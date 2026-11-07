@@ -97,3 +97,91 @@ repository's whole shape (`ORCH-CARLOS-DELEGATES-TIER-1-1`, ledger `ORCH-BUZON-R
 and owns the receiving wire (`FIN-API-BUZON-ENTRADAS-1`, `FIN-API-BUZON-ENTRADAS-1-B`). This slice
 (`BUZON-CONECTOR-1`) built the connector end to end against that wire: package, tests, `CLAUDE.md`, this
 ledger, and the host-deploy-v1 entry script.
+
+---
+
+## BUZON-TOPES-META-1 -- caps on id_externo/remitente/asunto before posting to Finanzas (2026-11-07)
+
+### Why
+
+Finanzas capped three of buzon-v1's `meta` fields that previously had none
+(`FIN-API-BUZON-LIMITES-CAMPOS-1`, `../finanzas/duna-finanzas-api` `3d48f65`, merging feature commit
+`38690b9`): `id_externo` <= 998 chars, `remitente` <= 320 chars, `asunto` <= 998 chars (`cuerpo_texto`'s
+existing 20,000-char cap is unchanged). Over a cap, the route now answers `422` naming the field, backed
+by a database `CHECK` per field. Without this slice a real receipt with a long subject, sender address or
+message id would be silently rejected by Finanzas and permanently skipped by this connector's existing
+413/422 handling -- this slice makes the connector respect the caps on the way in, so a long *subject*
+specifically is never lost.
+
+### The wire, read at the ref relayed by Finanzas (2026-11-07)
+
+Read directly, never taken on Finanzas' relay alone: `git -C ../finanzas/duna-finanzas-api show
+3d48f65:docs/buzon.md` (the "`meta` field length limits" section) and the feature commit itself,
+`38690b9494e7d061a5e5318183fb9712cd977aa7` (`src/duna_finanzas/web/buzon/schemas.py`'s
+`EntradaBuzonMeta.id_externo`/`remitente`/`asunto` `Field(max_length=...)`, and
+`src/duna_finanzas/storage/schema.py`'s `BUZON_ID_EXTERNO_MAXIMO_CARACTERES` /
+`BUZON_REMITENTE_MAXIMO_CARACTERES` / `BUZON_ASUNTO_MAXIMO_CARACTERES` constants and their `CHECK`s).
+The relayed figures (998/320/998) matched the code exactly -- no discrepancy found. `max_length` and the
+`CHECK`'s `length(...) <=` are both inclusive, so a value AT the cap is accepted, matching this slice's
+own inclusive boundary (`len(x) > cap` is the only thing that trips a skip).
+
+### Decided by Main, carried out by this slice
+
+- **`asunto` is truncated to 998 characters before posting, never skipped.** A receipt with a long
+  subject is still a receipt. Truncation is Python string slicing (`texto[:998]`), which counts Unicode
+  code points, never bytes, so it can never split a multi-byte character -- the identical mechanism
+  `texto.py::html_a_texto` already uses to cap `cuerpo_texto` at 20,000.
+- **`remitente` over 320 or `id_externo` over 998 are skipped BEFORE posting, never truncated.**
+  Truncating an identifier would break idempotency (`id_externo`, Finanzas' own de-duplication key) or
+  attribution (`remitente`). The skip is counted under the EXISTING `omitidos_por_413_422` counter and
+  the cursor advances past it, exactly like a 413/422 rejection from Finanzas itself -- no new counter,
+  since this is the same category of permanent, cursor-advancing skip.
+- New module `src/duna_buzon/limites.py` holds the three caps and the two decisions (`
+  excede_limites_no_truncables`, `truncar_asunto`), wired into `sincronizar.ejecutar_pasada` right after
+  a message matches a rule and before `obtener_mensaje_completo` is called, so a message that will be
+  skipped for an over-cap identifier never costs an extra Graph round-trip.
+
+### Tests, measured
+
+`tests/test_limites.py` (7 tests): both pure functions at exactly each cap and one over, for all three
+fields, plus a subject built from multi-byte characters (`é`, `🙂`) one character over the cap, proving
+the result is still valid UTF-8 (no character split) and exactly 998 characters.
+
+`tests/test_sincronizar.py` (8 new tests): end-to-end through `ejecutar_pasada` --
+`id_externo`/`remitente` each at-cap (forwarded normally) and one-over (skipped, `omitidos_por_413_422`
+incremented, cursor still advances, a Finanzas transport that asserts it is never called); `asunto` at
+cap (sent unchanged), one over (truncated in the ACTUAL posted multipart body, read back with a small
+regex-based multipart parser added to the test file), and the same multi-byte case end-to-end.
+
+`tests/test_registro_marcador.py::test_el_marcador_no_aparece_en_stdout_ni_en_los_logs` still passes
+unmodified -- nothing in this slice logs or returns a field's content, only counts.
+
+### Gate, measured
+
+Run on the slice branch before the merge (tree sha `77e7cb15b72ea663e251eeff8716f232aae22062`):
+
+    uv run pytest
+    141 passed, 5 skipped in 1.61s
+
+Tree identity proven before the merge commit was written: `git diff HEAD feat/buzon-topes-meta-1
+--stat` against the merge commit was empty, and `HEAD^{tree}` after the merge equals
+`77e7cb15b72ea663e251eeff8716f232aae22062`, the same tree the gate above ran on -- so the gate above is
+this merge's gate; it was not re-run. The 5 skips are the same pre-existing Windows file-mode skips
+`BUZON-CONECTOR-1` already recorded; none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration (no database in this repository). No cross-repo contract or DTO change: the wire
+shape (field names, keys) is unchanged -- this slice only makes the EXISTING client honour a cap Finanzas
+already set and merged; nothing Finanzas reads from this connector changes shape. No customer-facing
+bytes: same reasoning `BUZON-CONECTOR-1` recorded -- this repository's only reader is Carlos acting as
+his own system's administrator, and nothing user-visible (CLI text, `estado`'s summary) changed. All
+three conditions clear, so this slice merged on green without stopping for approval.
+
+### Attribution
+
+Finanzas set the three caps and their values (`FIN-API-BUZON-LIMITES-CAMPOS-1`, read at
+`../finanzas/duna-finanzas-api` `3d48f65`). Main decided which side of each cap truncates and which side
+skips, and that the skip reuses the existing 413/422 counter rather than adding a new one. This slice
+(`BUZON-TOPES-META-1`) read the wire at that ref, built `limites.py`, wired it into `sincronizar.py`, and
+wrote the boundary tests.
