@@ -1,0 +1,17 @@
+{
+  "desde": "2026-01-01T00:00:00+00:00",
+  "remitentes": [
+    "notificaciones@banco-ejemplo.com",
+    "ejemplo-empleador.com"
+  ],
+  "palabras": [
+    "factura",
+    "comprobante",
+    "extracto",
+    "pago",
+    "recibo",
+    "nomina",
+    "desprendible",
+    "dian"
+  ]
+}

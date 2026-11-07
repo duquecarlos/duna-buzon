@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Duna Buzon connector every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+# A run missed while the host was down fires once it's back, instead of
+# waiting up to 10 minutes for the next slot.
+Persistent=true
+Unit=duna-buzon.service
+
+[Install]
+WantedBy=timers.target
