@@ -13,6 +13,7 @@ from duna_buzon.adjuntos import AdjuntoCandidato, empacar
 from duna_buzon.cursor import SOLAPE
 from duna_buzon.finanzas import FinanzasClient, MetaEntrada
 from duna_buzon.graph import GraphAutenticacionError, GraphClient, GraphErrorTransitorio
+from duna_buzon.limites import excede_limites_no_truncables, truncar_asunto
 from duna_buzon.reglas import MensajeCandidato, Reglas, coincide
 from duna_buzon.texto import html_a_texto
 
@@ -23,6 +24,9 @@ class Contadores:
     reenviados: int = 0
     duplicados: int = 0
     omitidos_por_reglas: int = 0
+    # Also counts a message skipped BEFORE posting because `id_externo` or
+    # `remitente` is over its own wire cap (`limites.py`) -- the same
+    # permanent, cursor-advancing skip a 413/422 from Finanzas gets.
     omitidos_por_413_422: int = 0
     adjuntos_descartados: int = 0
 
@@ -71,14 +75,22 @@ def ejecutar_pasada(
                 cursor_final = max(cursor_final, mensaje.recibido_en)
                 continue
 
+            if excede_limites_no_truncables(
+                id_externo=mensaje.internet_message_id, remitente=mensaje.remitente
+            ):
+                contadores.omitidos_por_413_422 += 1
+                cursor_final = max(cursor_final, mensaje.recibido_en)
+                continue
+
             completo = cliente_graph.obtener_mensaje_completo(mensaje.id)
             cuerpo_texto = html_a_texto(completo.cuerpo_html) if completo.cuerpo_html else None
+            asunto = truncar_asunto(mensaje.asunto) if mensaje.asunto is not None else None
 
             meta = MetaEntrada(
                 fuente="correo",
                 id_externo=mensaje.internet_message_id,
                 remitente=mensaje.remitente,
-                asunto=mensaje.asunto,
+                asunto=asunto,
                 recibido_en=mensaje.recibido_en,
                 cuerpo_texto=cuerpo_texto,
             )

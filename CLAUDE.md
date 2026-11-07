@@ -44,6 +44,12 @@ Finanzas instance.
 6. **A missing environment variable is named, never its value.** `src/duna_buzon/config.py`'s
    `ConfigError` always names the variable; no caught exception anywhere in this codebase prints a
    secret's value.
+7. **A `meta` field over its wire cap is never silently sent.** `src/duna_buzon/limites.py` holds
+   buzon-v1's three `meta` caps (`id_externo`, `remitente`, `asunto`), mirrored from Finanzas
+   (`BUZON-TOPES-META-1`). `asunto` is truncated to its cap, never skipped -- a receipt with a long
+   subject is still a receipt. `id_externo` and `remitente` are never truncated, because truncating
+   either would break idempotency or attribution; a message over either cap is skipped BEFORE posting,
+   counted, and the cursor advances past it, exactly like a 413/422 skip from Finanzas itself.
 
 ## Tier 1 (a change here needs the investigation-first discipline)
 
@@ -51,4 +57,6 @@ Finanzas instance.
 - `src/duna_buzon/reglas.py` -- the selection rules (which messages get read and forwarded at all).
 - `src/duna_buzon/finanzas.py` -- the Finanzas client (the wire is Finanzas' own contract; read it at a
   ref in `../finanzas/duna-finanzas-api` before changing anything here).
+- `src/duna_buzon/limites.py` -- the wire's own `meta` field caps, mirrored from Finanzas; read it at a
+  ref in `../finanzas/duna-finanzas-api` before changing a cap here.
 - `deploy/host/` -- the root-owned entry script and its sudoers fragment.
