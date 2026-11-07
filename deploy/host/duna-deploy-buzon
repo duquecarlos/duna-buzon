@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# duna-deploy-buzon -- BUZON-CONECTOR-1, under Main's own
+# contracts/host-deploy-v1.md (ORCH-HOST-DEPLOY-V1). Installed once, by
+# hand, by Carlos (deploy/host/README.md), and granted passwordless sudo
+# for exactly this one path (deploy/host/duna-deploy-buzon.sudoers). Called
+# as:
+#
+#   sudo -n /usr/local/sbin/duna-deploy-buzon status
+#   sudo -n /usr/local/sbin/duna-deploy-buzon deploy [--dry-run]
+#   sudo -n /usr/local/sbin/duna-deploy-buzon entrar
+#
+# `entrar` is the one subcommand meant for Carlos himself, run directly in
+# his own SSH terminal (not over a batch/no-tty session) -- it signs in
+# interactively, printing Microsoft's device-code URL to whatever terminal
+# called it, and so is the one subcommand that never uses systemd-run.
+#
+# Every path below is a CONSTANT, never taken from argv or the environment:
+# the only things argv may select are the three subcommands and --dry-run.
+set -Eeuo pipefail
+
+# Fixed PATH, independent of the caller's shell -- this script trusts no
+# inherited environment variable for its own decisions.
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+REPO="/srv/duna/repos/duna-buzon"
+DATOS_DIR="/srv/duna/data/buzon"
+ENV_CLIENTE="/srv/duna/env/buzon.env"
+ENV_TOKEN="/srv/duna/env/buzon-conector.env"
+SERVICIO="duna-buzon.service"
+TIMER="duna-buzon.timer"
+UNIDADES_DIR="/etc/systemd/system"
+
+usage() {
+    echo "usage: duna-deploy-buzon {status|deploy [--dry-run]|entrar}" >&2
+    exit 2
+}
+
+# -- argument shape, checked BEFORE the EUID refusal, so a usage mistake is
+# reported the same way whether or not the caller is root.
+parse_args() {
+    if [[ $# -lt 1 ]]; then
+        usage
+    fi
+    SUBCOMMAND="$1"
+    shift
+    DRY_RUN=0
+    case "$SUBCOMMAND" in
+        status | entrar)
+            [[ $# -eq 0 ]] || usage
+            ;;
+        deploy)
+            if [[ $# -gt 0 ]]; then
+                [[ $# -eq 1 && "$1" == "--dry-run" ]] || usage
+                DRY_RUN=1
+            fi
+            ;;
+        *)
+            usage
+            ;;
+    esac
+}
+
+require_root() {
+    if [[ "$EUID" -ne 0 ]]; then
+        echo "duna-deploy-buzon: refusing: must be run as root (EUID 0), e.g. via sudo" >&2
+        exit 1
+    fi
+}
+
+_owner_of() {
+    stat -c %U "$1"
+}
+
+_desc_head_as_owner() {
+    printf 'runuser -u "$(stat -c %%U %s)" -- git -C %s rev-parse HEAD' "$1" "$1"
+}
+
+_desc_pull_as_owner() {
+    printf 'runuser -u "$(stat -c %%U %s)" -- git -C %s pull --ff-only' "$1" "$1"
+}
+
+_desc_estado_health() {
+    printf 'systemd-run --pipe --quiet --wait --uid=duna --gid=duna --property=EnvironmentFile=%s --property=EnvironmentFile=%s --property=WorkingDirectory=%s -- %s/.venv/bin/python -m duna_buzon estado' \
+        "$ENV_CLIENTE" "$ENV_TOKEN" "$REPO" "$REPO"
+}
+
+# Read-only: never writes, never restarts, never installs anything. Shares
+# its own health check with `deploy`'s final step below.
+cmd_status() {
+    local dry_run="$1"
+    if [[ "$dry_run" == "1" ]]; then
+        echo "+ $(_desc_head_as_owner "$REPO")"
+        echo "+ systemctl is-active $SERVICIO"
+        echo "+ systemctl is-active $TIMER"
+        echo "+ $(_desc_estado_health)"
+        return 0
+    fi
+
+    local owner
+    owner="$(_owner_of "$REPO")"
+    echo "repo HEAD: $(runuser -u "$owner" -- git -C "$REPO" rev-parse HEAD)"
+
+    local valor_servicio valor_timer
+    valor_servicio="$(systemctl is-active "$SERVICIO" 2>&1 || true)"
+    valor_timer="$(systemctl is-active "$TIMER" 2>&1 || true)"
+    echo "$SERVICIO: $valor_servicio"
+    echo "$TIMER: $valor_timer"
+
+    local estado_salida=0
+    systemd-run --pipe --quiet --wait --uid=duna --gid=duna \
+        --property="EnvironmentFile=$ENV_CLIENTE" --property="EnvironmentFile=$ENV_TOKEN" \
+        --property="WorkingDirectory=$REPO" -- \
+        "$REPO/.venv/bin/python" -m duna_buzon estado || estado_salida=$?
+    if [[ "$estado_salida" -ne 0 ]]; then
+        echo "duna-deploy-buzon: status check failed (python -m duna_buzon estado exited $estado_salida)" >&2
+        exit 1
+    fi
+}
+
+# Pulls as the owner, syncs as the owner, creates the data directory if
+# missing (NEVER deletes it -- no backup subcommand either: see
+# deploy/host/README.md, the data dir holds only a re-creatable cache and
+# cursor), installs the two units, enables the timer, and finishes with
+# the SAME health check `status` runs.
+cmd_deploy() {
+    local dry_run="$1"
+    if [[ "$dry_run" == "1" ]]; then
+        echo "+ $(_desc_head_as_owner "$REPO")"
+        echo "+ $(_desc_pull_as_owner "$REPO")"
+        echo "+ runuser -u \"\$(stat -c %U $REPO)\" -- uv sync --frozen (cwd $REPO)"
+        echo "+ install -d -o duna -g duna -m 0700 $DATOS_DIR"
+        echo "+ install -o root -g root -m 644 $REPO/deploy/systemd/duna-buzon.service $UNIDADES_DIR/$SERVICIO"
+        echo "+ install -o root -g root -m 644 $REPO/deploy/systemd/duna-buzon.timer $UNIDADES_DIR/$TIMER"
+        echo "+ systemctl daemon-reload"
+        echo "+ systemctl enable --now $TIMER"
+        echo "+ $(_desc_estado_health)"
+        return 0
+    fi
+
+    local owner before
+    owner="$(_owner_of "$REPO")"
+    before="$(runuser -u "$owner" -- git -C "$REPO" rev-parse HEAD)"
+    echo "deploy: before=$before"
+    runuser -u "$owner" -- git -C "$REPO" pull --ff-only
+    runuser -u "$owner" -- env --chdir="$REPO" uv sync --frozen
+
+    if [[ ! -d "$DATOS_DIR" ]]; then
+        install -d -o duna -g duna -m 0700 "$DATOS_DIR"
+    fi
+
+    install -o root -g root -m 644 "$REPO/deploy/systemd/duna-buzon.service" "$UNIDADES_DIR/$SERVICIO"
+    install -o root -g root -m 644 "$REPO/deploy/systemd/duna-buzon.timer" "$UNIDADES_DIR/$TIMER"
+    systemctl daemon-reload
+    systemctl enable --now "$TIMER"
+
+    local estado_salida=0
+    systemd-run --pipe --quiet --wait --uid=duna --gid=duna \
+        --property="EnvironmentFile=$ENV_CLIENTE" --property="EnvironmentFile=$ENV_TOKEN" \
+        --property="WorkingDirectory=$REPO" -- \
+        "$REPO/.venv/bin/python" -m duna_buzon estado || estado_salida=$?
+    if [[ "$estado_salida" -ne 0 ]]; then
+        echo "duna-deploy-buzon: deploy health check failed (python -m duna_buzon estado exited $estado_salida)" >&2
+        exit 1
+    fi
+}
+
+# For Carlos, at his own terminal: never systemd-run, never --pty -- a real
+# tty is already attached, and this just hands it straight to `duna`.
+# Sources both env files into the child's environment alone (never printed,
+# never logged, never argv) so Config.desde_entorno's blanket requirement
+# is satisfied even though this command itself never reads the Finanzas
+# token.
+cmd_entrar() {
+    exec runuser -u duna -- /bin/bash -c '
+        set -a
+        . "'"$ENV_CLIENTE"'"
+        . "'"$ENV_TOKEN"'"
+        set +a
+        exec "'"$REPO"'/.venv/bin/python" -m duna_buzon entrar
+    '
+}
+
+dispatch() {
+    local subcommand="$1" dry_run="$2"
+    case "$subcommand" in
+        status) cmd_status "$dry_run" ;;
+        deploy) cmd_deploy "$dry_run" ;;
+        entrar) cmd_entrar ;;
+    esac
+}
+
+__main() {
+    parse_args "$@"
+    require_root
+    dispatch "$SUBCOMMAND" "$DRY_RUN"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    __main "$@"
+fi

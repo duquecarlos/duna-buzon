@@ -1,0 +1,20 @@
+[Unit]
+Description=Duna Buzon connector (one sync pass, oneshot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=duna
+WorkingDirectory=/srv/duna/repos/duna-buzon
+# Two files: the client id + cache key (Carlos writes), and the Finanzas
+# bearer token (Finanzas' own issuing script writes) -- see
+# deploy/host/README.md for both.
+EnvironmentFile=/srv/duna/env/buzon.env
+EnvironmentFile=/srv/duna/env/buzon-conector.env
+ExecStart=/srv/duna/repos/duna-buzon/.venv/bin/python -m duna_buzon sincronizar
+# No Restart= -- a refused or crashed pass must stay "failed" until the
+# next scheduled run, never be retried immediately by systemd itself.
+# Nobody watches this unit's stdout on a schedule: a failed-unit state IS
+# the intended signal, the same discipline finanzas-recordatorios.service
+# already holds for the same reason.
