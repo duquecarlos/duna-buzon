@@ -253,3 +253,62 @@ Carlos measured the failure on `duna-prod-1` and reported it verbatim. Main deci
 opens the files, hands the child fds; refuse early on a missing venv). This slice
 (`BUZON-ENTRAR-ENV-ROOT-1`) carried it out: the script change, the comment above `cmd_entrar`, and the
 two regression tests.
+
+## BUZON-ALCANCES-MSAL-1 -- `entrar` raised ValueError on msal 1.39.0's reserved-scope check (2026-11-08)
+
+### Why
+
+Carlos measured it on the real host: `duna-deploy-buzon entrar` raised `ValueError: You cannot use any
+scope value that is reserved. Your input: ['offline_access', 'Mail.Read'] The reserved list:
+['offline_access', 'openid', 'profile']` from `initiate_device_flow`. `ALCANCES` listed
+`offline_access` explicitly (`src/duna_buzon/auth.py:25`), but msal 1.39.0 refuses that -- it adds
+`offline_access`/`openid`/`profile` to every request itself and raises if the caller also names one.
+
+### Fix
+
+`ALCANCES = ["Mail.Read"]`. The refresh token (silent renewal via `acquire_token_silent`) still comes
+back, because MSAL adds `offline_access` on its own; a one-line comment at `ALCANCES` says so, so
+nobody re-adds it believing it is required.
+
+### Tests, measured
+
+The old pin (`test_alcances_son_exactamente_mail_read_y_offline_access`) asserted the broken value and
+would never have caught this. Replaced with
+`test_alcances_son_exactamente_mail_read_sin_reservado`, which asserts `ALCANCES == ["Mail.Read"]` and
+that it is disjoint from MSAL's reserved set (`offline_access`, `openid`, `profile`), so this cannot
+regress silently. Added `test_alcances_no_disparan_el_scope_reservado_de_msal_real`, which runs the
+REAL `msal.PublicClientApplication(...)._decorate_scope(ALCANCES)` -- no network, a pure check -- and
+asserts it does not raise; this is exactly the internal call that raised on the real host, so the
+existing `construir_app` fake seam could never have exposed this bug and a real-msal check was needed
+alongside it.
+
+### Gate, measured
+
+Run on the slice branch before the merge (command: `uv run pytest`):
+
+    144 passed, 5 skipped in 6.36s
+
+Re-run on `main` after the merge, same command:
+
+    144 passed, 5 skipped in 10.60s
+
+Tree identity proven before writing this entry: merge commit `ea9136323178a9ad70e79fcf392553ca4383360b`
+has tree `0b8bb0d42fe596cb7f36db28eef8850d2858f83c`, identical to the slice branch
+`feat/buzon-alcances-msal-1`'s own tree at its last commit
+(`d6d9ce5c3b200780e783c3546c14c92b2972bab4`) -- so the second run above is this merge's gate, not a
+third independent run.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration (no database in this repository). No cross-repo contract or DTO change --
+`ALCANCES` governs what this process asks Microsoft Graph for, not the Finanzas wire, and the Graph
+side effect (the token's granted scopes) is unaffected since MSAL added `offline_access` either way.
+No customer-facing bytes: the diff is a list literal, a comment, and two unit tests; nothing printed or
+logged changes. All three conditions clear, so this slice merged on green without stopping for
+approval.
+
+### Attribution
+
+Carlos measured the failure on the real host and reported the exact exception text. This slice
+(`BUZON-ALCANCES-MSAL-1`) diagnosed it against msal 1.39.0's own reserved-scope check, carried out the
+fix, and added the regression tests, including one against the real library.
