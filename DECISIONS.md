@@ -185,3 +185,71 @@ Finanzas set the three caps and their values (`FIN-API-BUZON-LIMITES-CAMPOS-1`, 
 skips, and that the skip reuses the existing 413/422 counter rather than adding a new one. This slice
 (`BUZON-TOPES-META-1`) read the wire at that ref, built `limites.py`, wired it into `sincronizar.py`, and
 wrote the boundary tests.
+
+---
+
+## BUZON-ENTRAR-ENV-ROOT-1 -- `entrar` could never read its own env files on the real host (2026-11-09)
+
+### Why
+
+Carlos measured it on `duna-prod-1`: `sudo -n /usr/local/sbin/duna-deploy-buzon entrar` failed at
+`/bin/bash: line 3: /srv/duna/env/buzon.env: Permission denied` (and the same for
+`buzon-conector.env` on the next line). Both files are `duna:duna` mode `0600`, but `cmd_entrar`
+dropped to `duna` via `runuser` BEFORE sourcing either file by path, and `duna` cannot traverse
+`/srv/duna/env/` itself on this host -- `status` and `deploy` never hit this, because both read the
+same two files as ROOT through systemd's own `EnvironmentFile=` (`systemd-run`, which opens the file
+before dropping privileges). `entrar` is the one subcommand that never uses `systemd-run` (a real tty
+is already attached), so it had no equivalent and could never work on the real host.
+
+### Fix, decided by Main
+
+Root now opens both env files itself and hands them to the `duna`-owned child as already-open file
+descriptors -- `3<"$ENV_CLIENTE" 4<"$ENV_TOKEN"` on the `runuser` line itself, so the open happens as
+root, before the privilege drop. The child sources them from `/dev/fd/3` and `/dev/fd/4` (never by
+path), closes both fds, and only then `exec`s python -- keeping the real tty and the no-argv,
+never-printed properties `cmd_entrar` already had. `entrar` also now refuses up front, before
+`runuser`, with a one-line message ("run `duna-deploy-buzon deploy` first") when
+`$REPO/.venv/bin/python` does not exist -- Carlos hit exactly that ordering on the same host.
+
+### Tests, measured
+
+Two new tests in `tests/test_host_deploy_entry_script.py`: one asserts `cmd_entrar`'s block never
+sources either env file by its `$ENV_CLIENTE`/`$ENV_TOKEN` path, only from `/dev/fd/3`/`/dev/fd/4`,
+that the fd-opening redirections sit on the `runuser` line (root's own command), and that the fds are
+closed before python replaces the shell -- a direct regression guard against sourcing paths as `duna`
+again. The other asserts the venv-missing check runs before `runuser`. All 25 tests in that file,
+including the pre-existing `bash -n` syntax check, pass against the new script.
+
+`deploy/host/README.md` needed no change: nothing in it implied `duna` reads `/srv/duna/env/` by
+path -- only that the files are owned by `duna` and mode `0600`, which is unaffected since root opens
+them regardless of ownership (the same precondition `systemd-run`'s `EnvironmentFile=` already relies
+on for `status`/`deploy`).
+
+### Gate, measured
+
+Run on the slice branch before the merge, then re-run on `main` after it (same tree, proven below):
+
+    uv run pytest
+    143 passed, 5 skipped in 4.18s
+
+Tree identity proven before writing this entry: `git diff feat/buzon-entrar-env-root-1 HEAD --stat`
+against the merge commit (`48521d439503d4075df7f1e535d4999e2b1a9727`) was empty, and
+`HEAD^{tree}` equals `01feb2dda2d20789c1e8e8ff5ef4bd21ab173d4b`, the same tree the slice branch held
+at its own last commit (`9cff8d2a6f51fef573636134d10d2f8f9fba556a`) -- so the gate above is this
+merge's gate; it was not re-run a third time for this entry.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration (no database in this repository). No cross-repo contract or DTO change
+(nothing here touches the Finanzas wire). No customer-facing bytes: same reasoning
+`BUZON-CONECTOR-1` recorded -- this repository's only reader is Carlos acting as his own system's
+administrator running an infrastructure command on his own host, and the one new printed line (the
+venv-missing refusal) is the same category as the existing EUID-refusal message, not a product
+surface. All three conditions clear, so this slice merged on green without stopping for approval.
+
+### Attribution
+
+Carlos measured the failure on `duna-prod-1` and reported it verbatim. Main decided the fix (root
+opens the files, hands the child fds; refuse early on a missing venv). This slice
+(`BUZON-ENTRAR-ENV-ROOT-1`) carried it out: the script change, the comment above `cmd_entrar`, and the
+two regression tests.
