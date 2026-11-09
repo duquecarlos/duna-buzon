@@ -404,3 +404,91 @@ non-transient 4xx from `"retry"` into its own `rechazo_permanente` state. This s
 (`BUZON-MOTIVO-DE-PARADA-1`) carried it out: `graph.py`'s per-step `GraphError.motivo`, `finanzas.py`'s
 `rechazo_permanente` split, `sincronizar.py`'s `ResultadoPasada.motivo`, `registro.py`'s and `cli.py`'s
 wiring, and the tests above.
+
+---
+
+## BUZON-GRAPH-ADJUNTOS-1 -- `$expand` over the base attachment type 400'd on every matching message (2026-11-09)
+
+### Bug, measured live on `duna-prod-1`
+
+Carlos reported `parada: graph mensaje http=400` on the first message any rule matched -- the connector
+had forwarded nothing. `obtener_mensaje_completo` (`src/duna_buzon/graph.py:177-204` at this slice's
+start, verified against the repository before changing anything) asked
+`GET /me/messages/{id}?$select=body&$expand=attachments($select=name,contentBytes,isInline)`.
+`contentBytes` is a property of the DERIVED type `microsoft.graph.fileAttachment`, not of the base
+`attachment` type the expand selects over, so Graph rejects the query with 400. Every matching message
+hit this.
+
+### Fix, decided by Main -- per-attachment fetch
+
+Split into three kinds of call, each through the existing `_get`/`_exigir_ok` with its own `paso`:
+
+- **Body**: `GET /me/messages/{id}?$select=body`, no `$expand` at all.
+- **Attachment metadata**: `listar_adjuntos_metadata`'s `$select` widened from `name,size` to
+  `name,size,isInline`; `@odata.type` is read off every row without being named in `$select` (Graph
+  returns it as its own type annotation; `$select` only names declared properties, so it could never be
+  named there) and carried on the now-wider `AdjuntoMetadata` (`id`, `nombre`, `tamano`, `es_en_linea`,
+  `tipo_odata`).
+- **Attachment content**: for each metadata row that is non-inline AND `#microsoft.graph.fileAttachment`,
+  a separate `GET /me/messages/{id}/attachments/{aid}` with NO `$select`, reading `contentBytes` off the
+  whole response -- `paso="adjunto"`, a new step name. An `itemAttachment` or `referenceAttachment` has
+  no `contentBytes` at all, so it is skipped and counted in `MensajeCompleto.adjuntos_descartados` (new
+  field), never fetched -- never raises.
+
+`obtener_mensaje_completo` now takes the caller's already-fetched `metadatos_adjuntos` instead of
+listing attachments a second time. `sincronizar.py` already called `listar_adjuntos_metadata` once (for
+rule matching, when `mensaje.tiene_adjuntos`) -- it now keeps that list and threads it through to
+`obtener_mensaje_completo`, and adds `completo.adjuntos_descartados` into `Contadores.
+adjuntos_descartados` alongside `adjuntos.py`'s own `empacar` discards. The per-pass size/count limits
+in `adjuntos.py` (`LIMITE_TAMANO_ARCHIVO_BYTES`, `LIMITE_CUERPO_BYTES`, `LIMITE_ADJUNTOS_POR_ENTRADA`)
+are untouched -- they still apply after the bytes are fetched, exactly as before.
+
+### Tests, measured
+
+`tests/test_graph.py` (rewritten for the new two-argument `obtener_mensaje_completo` and the wider
+`listar_adjuntos_metadata`, +13 cases net): exact request shape for the body fetch (`$select=body`, no
+`$expand` key at all) and for each per-attachment fetch (no `$select` at all); inline attachments never
+fetched and never counted as discarded; `itemAttachment` and `referenceAttachment` skipped, never
+fetched, counted in `adjuntos_descartados` (parametrized over both types); a guard test
+(`test_ningun_request_pone_contentbytes_en_select_ni_expand`) scanning every request a realistic flow
+builds, asserting `contentBytes` never appears in any `$select` or `$expand` value and `$expand` is
+never sent at all; a new `paso="adjunto"` error-naming test; and a fake that reproduces the real Graph
+400 for the OLD query shape (`$expand` naming `contentBytes`) while answering 200 to every shape this
+client now actually sends -- proving both that the fake is realistic and that the new client never
+triggers it.
+
+`tests/test_sincronizar.py` and `tests/test_registro_marcador.py`: their fake Graph transports updated
+to the new per-message-body / per-attachment-content routing (previously a single combined
+body+attachments response per message); behavior assertions unchanged.
+
+### Gate, measured
+
+Run on the slice branch before the merge (command: `.venv/Scripts/python.exe -m pytest -q`), on tree
+`86c08fb00f57b8bce3d2c68fffa493d996827737` (slice commit `3f3bbe90b9b70a7a795e3bf53e40731599b6a372`):
+
+    173 passed, 5 skipped in 17.31s
+
+Tree identity proven before writing this entry, so that run was not repeated: merge commit
+`43362dc6ceff57ab68bd9b61b0e588585b239f19` has tree `86c08fb00f57b8bce3d2c68fffa493d996827737`, IDENTICAL
+to the slice branch's own tree at `3f3bbe90b9b70a7a795e3bf53e40731599b6a372`, and
+`git diff HEAD feat/buzon-graph-adjuntos-1 --stat` against the merge commit was empty. The 5 skips are
+the same pre-existing Windows file-mode skips `BUZON-CONECTOR-1` already recorded; none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration (no database in this repository). No cross-repo contract or DTO change: Graph's
+own wire shape is Microsoft's, not this repository's, and the only other side of this connector --
+Finanzas' buzon-v1 wire -- is unchanged by this diff (same `MetaEntrada`, same multipart shape). No
+customer-facing bytes, same reasoning `BUZON-CONECTOR-1`, `BUZON-TOPES-META-1`,
+`BUZON-ENTRAR-ENV-ROOT-1` and `BUZON-MOTIVO-DE-PARADA-1` already recorded: this repository has no
+product, no UI and no customer or operator other than Carlos acting as this system's own administrator.
+All three conditions clear, so this slice merged on green without stopping for approval.
+
+### Attribution
+
+Carlos measured the live 400 on `duna-prod-1` and reported the exact stop line, pinpointing it to the
+first message any rule matched. Main decided the fix: per-attachment fetch instead of one
+illegal-shaped expand, to also avoid one giant expanded response for a message with many or large
+attachments. This slice (`BUZON-GRAPH-ADJUNTOS-1`) carried it out: `graph.py`'s split body/metadata/
+per-attachment calls and the widened `AdjuntoMetadata`, `sincronizar.py`'s threading of the already-
+fetched metadata list, and the tests above.
