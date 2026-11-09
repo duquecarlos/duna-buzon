@@ -42,24 +42,30 @@ def _transporte_graph_con_marcador() -> httpx.MockTransport:
 
     def handler(request: httpx.Request) -> httpx.Response:
         segmentos = [s for s in request.url.path.split("/") if s]
+        if segmentos[-2] == "attachments":
+            return httpx.Response(
+                200,
+                json={"contentBytes": base64.b64encode(contenido_adjunto).decode("ascii")},
+            )
         if segmentos[-1] == "attachments":
             return httpx.Response(
                 200,
-                json={"value": [{"id": "a1", "name": nombre_adjunto, "size": len(contenido_adjunto)}]},
+                json={
+                    "value": [
+                        {
+                            "id": "a1",
+                            "name": nombre_adjunto,
+                            "size": len(contenido_adjunto),
+                            "isInline": False,
+                            "@odata.type": "#microsoft.graph.fileAttachment",
+                        }
+                    ]
+                },
             )
         if segmentos[-1] != "messages":
             return httpx.Response(
                 200,
-                json={
-                    "body": {"content": f"<p>{_MARCADOR} cuerpo secreto</p>"},
-                    "attachments": [
-                        {
-                            "name": nombre_adjunto,
-                            "isInline": False,
-                            "contentBytes": base64.b64encode(contenido_adjunto).decode("ascii"),
-                        }
-                    ],
-                },
+                json={"body": {"content": f"<p>{_MARCADOR} cuerpo secreto</p>"}},
             )
         return httpx.Response(
             200,

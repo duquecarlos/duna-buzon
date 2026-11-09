@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import base64
 import datetime
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 import httpx
 
 URL_BASE = "https://graph.microsoft.com/v1.0"
+_TIPO_ODATA_ADJUNTO_ARCHIVO = "#microsoft.graph.fileAttachment"
 
 _CAMPOS_RESUMEN = "id,internetMessageId,from,subject,receivedDateTime,hasAttachments"
 _TAMANO_PAGINA = "50"
@@ -71,6 +72,8 @@ class AdjuntoMetadata:
     id: str
     nombre: str
     tamano: int
+    es_en_linea: bool
+    tipo_odata: str
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,10 @@ class AdjuntoDescargado:
 class MensajeCompleto:
     cuerpo_html: str
     adjuntos: tuple[AdjuntoDescargado, ...]
+    # Non-inline attachments that are not `fileAttachment` (an
+    # `itemAttachment` or `referenceAttachment`) -- `contentBytes` only
+    # exists on `fileAttachment`, so these are never fetched, only counted.
+    adjuntos_descartados: int = 0
 
 
 def _formato_fecha_filtro(momento: datetime.datetime) -> str:
@@ -159,46 +166,70 @@ class GraphClient:
             parametros = None  # the nextLink already carries its own query
 
     def listar_adjuntos_metadata(self, id_mensaje: str) -> list[AdjuntoMetadata]:
-        """Metadata only -- names and sizes, never `contentBytes` -- so a
-        message that turns out not to match a rule is never read past
-        this."""
+        """Metadata only -- names, sizes and which kind of attachment each
+        one is, never `contentBytes` -- so a message that turns out not to
+        match a rule is never read past this. `@odata.type` comes back on
+        every row as Graph's own type annotation without being named in
+        `$select` -- it cannot be, since `$select` only names declared
+        properties and `@odata.type` is not one."""
         respuesta = self._get(
             f"/me/messages/{id_mensaje}/attachments",
-            params={"$select": "name,size"},
+            params={"$select": "name,size,isInline"},
             paso="adjuntos",
         )
         self._exigir_ok(respuesta, paso="adjuntos")
         cuerpo = respuesta.json()
         return [
-            AdjuntoMetadata(id=fila.get("id", ""), nombre=fila.get("name") or "", tamano=fila.get("size", 0))
+            AdjuntoMetadata(
+                id=fila.get("id", ""),
+                nombre=fila.get("name") or "",
+                tamano=fila.get("size", 0),
+                es_en_linea=bool(fila.get("isInline")),
+                tipo_odata=fila.get("@odata.type") or "",
+            )
             for fila in cuerpo.get("value", [])
         ]
 
-    def obtener_mensaje_completo(self, id_mensaje: str) -> MensajeCompleto:
-        """The body and every non-inline attachment's bytes -- called ONLY
-        once a message is already known to match a rule."""
-        respuesta = self._get(
-            f"/me/messages/{id_mensaje}",
-            params={
-                "$select": "body",
-                "$expand": "attachments($select=name,contentBytes,isInline)",
-            },
-            paso="mensaje",
-        )
+    def obtener_mensaje_completo(
+        self, id_mensaje: str, metadatos_adjuntos: Sequence[AdjuntoMetadata]
+    ) -> MensajeCompleto:
+        """The body, plus every non-inline `fileAttachment`'s bytes fetched
+        one at a time -- called ONLY once a message is already known to
+        match a rule. `metadatos_adjuntos` is the list the caller already
+        pulled via `listar_adjuntos_metadata`; this never lists attachments
+        again. `contentBytes` exists only on the derived `fileAttachment`
+        type, not on the base `attachment` type Graph's attachment list
+        returns -- selecting it in a `$select`/`$expand` over that base
+        collection is what produced the 400 this replaces. An
+        `itemAttachment` or `referenceAttachment` has no `contentBytes` at
+        all, so it is skipped and counted, never fetched."""
+        respuesta = self._get(f"/me/messages/{id_mensaje}", params={"$select": "body"}, paso="mensaje")
         self._exigir_ok(respuesta, paso="mensaje")
         cuerpo = respuesta.json()
         cuerpo_html = (cuerpo.get("body") or {}).get("content") or ""
+
         adjuntos: list[AdjuntoDescargado] = []
-        for fila in cuerpo.get("attachments") or []:
-            if fila.get("isInline"):
+        descartados = 0
+        for metadato in metadatos_adjuntos:
+            if metadato.es_en_linea:
                 continue
-            contenido_b64 = fila.get("contentBytes")
+            if metadato.tipo_odata != _TIPO_ODATA_ADJUNTO_ARCHIVO:
+                descartados += 1
+                continue
+            respuesta_adjunto = self._get(
+                f"/me/messages/{id_mensaje}/attachments/{metadato.id}", paso="adjunto"
+            )
+            self._exigir_ok(respuesta_adjunto, paso="adjunto")
+            cuerpo_adjunto = respuesta_adjunto.json()
+            contenido_b64 = cuerpo_adjunto.get("contentBytes")
             if not contenido_b64:
                 continue
             adjuntos.append(
                 AdjuntoDescargado(
-                    nombre=fila.get("name") or "adjunto",
+                    nombre=metadato.nombre or "adjunto",
                     contenido=base64.b64decode(contenido_b64),
                 )
             )
-        return MensajeCompleto(cuerpo_html=cuerpo_html, adjuntos=tuple(adjuntos))
+        return MensajeCompleto(
+            cuerpo_html=cuerpo_html, adjuntos=tuple(adjuntos), adjuntos_descartados=descartados
+        )
