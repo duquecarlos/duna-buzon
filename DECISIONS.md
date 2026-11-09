@@ -312,3 +312,95 @@ approval.
 Carlos measured the failure on the real host and reported the exact exception text. This slice
 (`BUZON-ALCANCES-MSAL-1`) diagnosed it against msal 1.39.0's own reserved-scope check, carried out the
 fix, and added the regression tests, including one against the real library.
+
+---
+
+## BUZON-MOTIVO-DE-PARADA-1 -- a stopped pass names WHY (2026-11-09)
+
+### Why
+
+Carlos measured it on the real host: every pass since his sign-in (2026-11-09 01:00, 01:10, 01:16 UTC)
+printed `vistos=2 reenviados=0 duplicados=0 omitidos_por_reglas=1 omitidos_por_413_422=0
+adjuntos_descartados=0` and exited 1 with no reason. The second message matched a rule and the pass
+stopped, either at Graph (`GraphAutenticacionError`/`GraphErrorTransitorio` while listing attachments or
+fetching the full message) or at Finanzas (`enviar_entrada` -> `"unauthorized"` or `"retry"`, where
+`"retry"` also swallowed every non-2xx/401/413/422 status such as 403/404/400). The operator could not
+tell which, so nothing could be fixed.
+
+### Fix, decided by Main
+
+A stopped pass now prints one line on stderr -- `parada: <lado> <paso> http=<status>` or `parada: <lado>
+<paso> error=<clase>` for a transport failure -- and the SAME string is appended to `estado.json`'s line
+(`registro.linea_resumen`'s new optional `motivo` argument), so `estado` shows it too. Never content:
+only the side (`graph`/`finanzas`), the step (`listar`/`adjuntos`/`mensaje`/`enviar`), the HTTP status,
+or the exception's class name.
+
+Finanzas' statuses that are NOT transient no longer pretend to be: any 4xx except
+401/408/413/422/429 (400, 403, 404, 405, ...) now returns a new `ResultadoEnvio.estado ==
+"rechazo_permanente"` (`finanzas.py`), which stops the pass (`ResultadoPasada.
+detenida_por_rechazo_permanente`, cursor unmoved, exit 1) -- distinct from `"retry"` (408, 429, any 5xx,
+or a transport error) and from the existing per-message `"rejected"` (413/422, which still advances the
+cursor and continues). `graph.py`'s `GraphError` now carries the step (`listar`/`adjuntos`/`mensaje`)
+plus the HTTP status or, for a transport failure, `type(exc).__name__` via a `motivo` property,
+threaded through `GraphClient._get`/`_exigir_ok`'s new `paso` keyword.
+
+### Tests, measured
+
+`tests/test_finanzas.py` (+5): 408/429 stay `"retry"`; 400/403/404/405 are `"rechazo_permanente"` with
+the status on `codigo_http`; a transport error carries `clase_excepcion == "ConnectError"`.
+
+`tests/test_graph.py` (+5, 2 existing extended): each of the three steps (`listar`, `adjuntos`,
+`mensaje`) produces the right `.motivo` string on a non-200/401 status and on a transport error.
+
+`tests/test_sincronizar.py` (+6, 2 existing extended): a 4xx-non-transient Finanzas response stops the
+pass as `detenida_por_rechazo_permanente` (not `detenida_por_error_transitorio`) with the exact motivo
+string, cursor unmoved; a Finanzas transport error's motivo carries the exception class; a Graph error
+while listing attachments carries `"graph adjuntos http=500"`.
+
+`tests/test_cli.py` (+6): `comando_sincronizar` prints `parada: <motivo>` on stderr and `parada=<motivo>`
+in both the stdout summary line and `estado.json`'s line (read back via `comando_estado`) for each stop
+reason, parametrized; a normal pass prints nothing on stderr and no `parada=` in the summary; and one
+full end-to-end test through real `GraphClient`/`FinanzasClient` mock transports with a marker Graph
+token, a marker Finanzas token, a marker sender and a marker subject, asserting NONE of the four appear
+in stdout or stderr when the pass stops on a 403 -- the direct test the spec asked for ("the line never
+contains the bearer token or the message's sender/subject").
+
+### Gate, measured
+
+Run on the slice branch before the merge (command: `uv run pytest -q`):
+
+    164 passed, 5 skipped in 4.91s
+
+Re-run on `main` after the merge, same command:
+
+    164 passed, 5 skipped in 6.66s
+
+Tree identity proven before writing this entry: merge commit `ed25bbf801d801e574078b38805dbb55717724b4`
+has tree `8a6409360c8d39ffd451256d0c24fa5150e9e37f`, identical to the slice branch
+`feat/buzon-motivo-de-parada-1`'s own tree at its last commit
+(`263669cb1a423614a649c53109eb5bfc8afb1aaf`), and `git diff HEAD feat/buzon-motivo-de-parada-1 --stat`
+against the merge commit was empty -- so the second run above is this merge's gate, not a third
+independent run. The 5 skips are the same pre-existing Windows file-mode skips `BUZON-CONECTOR-1`
+already recorded; none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration (no database in this repository). No cross-repo contract or DTO change: the new
+`"rechazo_permanente"` value on `finanzas.py`'s `Estado` is this client's OWN internal classification of
+an existing Finanzas response, never serialized or read by any other repository; the wire's field names
+and the request shape are unchanged. Judged NO customer-facing bytes, same reasoning `BUZON-CONECTOR-1`,
+`BUZON-TOPES-META-1` and `BUZON-ENTRAR-ENV-ROOT-1` already recorded: this repository has no product, no
+UI and no customer or operator other than Carlos acting as this system's own administrator running an
+infrastructure command on his own host -- the new stderr line and the new `estado.json` field are the
+same category as a tool's diagnostic log output, not a product surface a customer, operator or owner
+reads inside a Duna product. All three conditions clear, so this slice merged on green without stopping
+for approval.
+
+### Attribution
+
+Carlos measured the three silent stops on `duna-prod-1` and reported the exact summary line and exit
+code. Main decided the fix: name the stop reason on stderr and in `estado.json`, and split Finanzas'
+non-transient 4xx from `"retry"` into its own `rechazo_permanente` state. This slice
+(`BUZON-MOTIVO-DE-PARADA-1`) carried it out: `graph.py`'s per-step `GraphError.motivo`, `finanzas.py`'s
+`rechazo_permanente` split, `sincronizar.py`'s `ResultadoPasada.motivo`, `registro.py`'s and `cli.py`'s
+wiring, and the tests above.
