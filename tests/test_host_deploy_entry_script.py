@@ -183,6 +183,51 @@ def test_entrar_nunca_usa_systemd_run_ni_pty() -> None:
     assert not any("--pty" in linea for linea in _lineas_de_codigo(bloque_entrar))
 
 
+def test_entrar_abre_los_env_como_root_por_fd_nunca_por_ruta_bajo_duna() -> None:
+    # Regression guard (BUZON-ENTRAR-ENV-ROOT-1): `duna` cannot traverse
+    # /srv/duna/env/ on the real host, so the duna-owned child must never
+    # source either env file BY PATH itself -- root opens both files (via
+    # redirection attached to the `runuser` line, so root does the open)
+    # and hands them to the child as already-open fds 3 and 4, which the
+    # child sources from /dev/fd/N.
+    contenido = _contenido()
+    bloque_entrar = contenido[contenido.index("cmd_entrar() {"): contenido.index("dispatch() {")]
+
+    assert '. "$ENV_CLIENTE"' not in bloque_entrar
+    assert '. "$ENV_TOKEN"' not in bloque_entrar
+    assert ". /dev/fd/3" in bloque_entrar
+    assert ". /dev/fd/4" in bloque_entrar
+
+    # The redirections that open the files are on the `runuser` command
+    # itself, i.e. still executed by root, outside the single-quoted script
+    # the duna-owned child runs.
+    indice_runuser = bloque_entrar.index("exec runuser -u duna")
+    indice_cierre_comilla = bloque_entrar.rindex("'")
+    linea_redirecciones = bloque_entrar[indice_cierre_comilla:]
+    assert '3<"$ENV_CLIENTE"' in linea_redirecciones
+    assert '4<"$ENV_TOKEN"' in linea_redirecciones
+    assert indice_runuser < indice_cierre_comilla
+
+    # The fds are closed again before the real python process replaces the
+    # shell.
+    indice_cierre_fds = bloque_entrar.index("3<&- 4<&-")
+    indice_exec_python = bloque_entrar.index("duna_buzon entrar")
+    assert indice_cierre_fds < indice_exec_python
+
+
+def test_entrar_rechaza_si_falta_el_venv_antes_de_runuser() -> None:
+    # Carlos hit `entrar` before `deploy` had ever created the venv on the
+    # real host -- refuse with a clear one-line message, before runuser.
+    contenido = _contenido()
+    bloque_entrar = contenido[contenido.index("cmd_entrar() {"): contenido.index("dispatch() {")]
+
+    indice_check = bloque_entrar.index("if [[ ! -x")
+    indice_exec_runuser = bloque_entrar.index("exec runuser")
+    assert indice_check < indice_exec_runuser
+    assert "deploy" in bloque_entrar[indice_check:indice_exec_runuser]
+    assert "$REPO/.venv/bin/python" in bloque_entrar[indice_check:indice_exec_runuser]
+
+
 def test_status_y_deploy_nunca_usan_pty() -> None:
     contenido = _contenido()
     # "--pty" appears only in the explanatory header comment, never as an
