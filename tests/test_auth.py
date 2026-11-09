@@ -195,5 +195,22 @@ def test_authority_es_consumers_no_common() -> None:
     assert auth.AUTORIDAD == "https://login.microsoftonline.com/consumers"
 
 
-def test_alcances_son_exactamente_mail_read_y_offline_access() -> None:
-    assert auth.ALCANCES == ["Mail.Read", "offline_access"]
+def test_alcances_son_exactamente_mail_read_sin_reservado() -> None:
+    # Exactly Mail.Read, and NO MSAL reserved scope -- MSAL adds
+    # offline_access/openid/profile itself; listing one raises ValueError in
+    # msal>=1.39 and this must never regress.
+    assert auth.ALCANCES == ["Mail.Read"]
+    reservados = {"offline_access", "openid", "profile"}
+    assert reservados.isdisjoint(auth.ALCANCES)
+
+
+def test_alcances_no_disparan_el_scope_reservado_de_msal_real() -> None:
+    # Pure check against the REAL msal library (no network): this is exactly
+    # what `initiate_device_flow` does internally before ever reaching Graph,
+    # and it is what raised ValueError on the real host.
+    import msal
+
+    app = msal.PublicClientApplication(
+        "id-de-prueba", authority="https://login.microsoftonline.com/consumers"
+    )
+    app._decorate_scope(auth.ALCANCES)
