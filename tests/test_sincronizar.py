@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 
 import httpx
+import pytest
 
 from duna_buzon.config import Config
 from duna_buzon.finanzas import FinanzasClient
@@ -202,6 +203,7 @@ def test_401_de_finanzas_detiene_la_pasada_y_no_persiste_cursor(tmp_path) -> Non
 
     assert resultado.detenida_por_autenticacion
     assert not resultado.debe_persistir_cursor
+    assert resultado.motivo == "finanzas enviar http=401"
 
 
 def test_503_de_finanzas_detiene_la_pasada_y_no_persiste_cursor(tmp_path) -> None:
@@ -222,6 +224,53 @@ def test_503_de_finanzas_detiene_la_pasada_y_no_persiste_cursor(tmp_path) -> Non
 
     assert resultado.detenida_por_error_transitorio
     assert not resultado.debe_persistir_cursor
+    assert resultado.motivo == "finanzas enviar http=503"
+
+
+def test_conexion_rota_con_finanzas_detiene_la_pasada_con_la_clase_de_excepcion(tmp_path) -> None:
+    mensajes = [MensajeFalso(id="m1", remitente="notificaciones@banco-ejemplo.com")]
+    cliente_graph = GraphClient("token", transport=_transporte_graph(mensajes))
+
+    def finanzas_rota(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no se pudo conectar")
+
+    cliente_finanzas = _cliente_finanzas(tmp_path, finanzas_rota)
+
+    resultado = ejecutar_pasada(
+        cliente_graph=cliente_graph,
+        cliente_finanzas=cliente_finanzas,
+        reglas=_reglas(),
+        cursor_inicial=_CURSOR_INICIAL,
+    )
+
+    assert resultado.detenida_por_error_transitorio
+    assert not resultado.debe_persistir_cursor
+    assert resultado.motivo == "finanzas enviar error=ConnectError"
+
+
+@pytest.mark.parametrize("codigo", [400, 403, 404, 405])
+def test_4xx_no_transitorio_de_finanzas_detiene_la_pasada_como_rechazo_permanente(
+    tmp_path, codigo: int
+) -> None:
+    mensajes = [MensajeFalso(id="m1", remitente="notificaciones@banco-ejemplo.com")]
+    cliente_graph = GraphClient("token", transport=_transporte_graph(mensajes))
+
+    def finanzas_rechazo(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(codigo, json={"detail": "nope"})
+
+    cliente_finanzas = _cliente_finanzas(tmp_path, finanzas_rechazo)
+
+    resultado = ejecutar_pasada(
+        cliente_graph=cliente_graph,
+        cliente_finanzas=cliente_finanzas,
+        reglas=_reglas(),
+        cursor_inicial=_CURSOR_INICIAL,
+    )
+
+    assert resultado.detenida_por_rechazo_permanente
+    assert not resultado.detenida_por_error_transitorio
+    assert not resultado.debe_persistir_cursor
+    assert resultado.motivo == f"finanzas enviar http={codigo}"
 
 
 def test_graph_401_detiene_la_pasada(tmp_path) -> None:
@@ -240,6 +289,42 @@ def test_graph_401_detiene_la_pasada(tmp_path) -> None:
 
     assert resultado.detenida_por_autenticacion
     assert not resultado.debe_persistir_cursor
+    assert resultado.motivo == "graph listar http=401"
+
+
+def test_graph_error_transitorio_nombra_el_paso_de_adjuntos(tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        segmentos = [s for s in request.url.path.split("/") if s]
+        if segmentos[-1] == "attachments":
+            return httpx.Response(500, text="boom")
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    {
+                        "id": "m1",
+                        "internetMessageId": "<m1@mail.example>",
+                        "from": {"emailAddress": {"address": "notificaciones@banco-ejemplo.com"}},
+                        "subject": "hola",
+                        "receivedDateTime": "2026-03-01T10:00:00Z",
+                        "hasAttachments": True,
+                    }
+                ]
+            },
+        )
+
+    cliente_graph = GraphClient("token", transport=httpx.MockTransport(handler))
+    cliente_finanzas = _cliente_finanzas(tmp_path, _finanzas_siempre_201)
+
+    resultado = ejecutar_pasada(
+        cliente_graph=cliente_graph,
+        cliente_finanzas=cliente_finanzas,
+        reglas=_reglas(),
+        cursor_inicial=_CURSOR_INICIAL,
+    )
+
+    assert resultado.detenida_por_error_transitorio
+    assert resultado.motivo == "graph adjuntos http=500"
 
 
 def test_413_o_422_se_omiten_como_defecto_permanente_y_el_cursor_avanza(tmp_path) -> None:

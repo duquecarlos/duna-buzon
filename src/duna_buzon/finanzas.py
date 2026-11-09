@@ -27,7 +27,14 @@ from duna_buzon.config import Config
 
 RUTA_ENTRADAS = "/buzon/entradas"
 
-Estado = Literal["forwarded", "duplicated", "unauthorized", "retry", "rejected"]
+Estado = Literal[
+    "forwarded", "duplicated", "unauthorized", "retry", "rejected", "rechazo_permanente"
+]
+
+# 401, 413 and 422 are handled on their own; every other 4xx is a permanent
+# rejection (`rechazo_permanente`), never retried. 408 and 429 stay transient,
+# alongside every 5xx and a transport failure.
+_ESTADOS_4XX_TRANSITORIOS = frozenset({408, 429})
 
 
 @dataclass(frozen=True)
@@ -36,6 +43,7 @@ class ResultadoEnvio:
     id_entrada: str | None = None
     adjuntos_omitidos: int | None = None
     codigo_http: int | None = None
+    clase_excepcion: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,8 +90,8 @@ class FinanzasClient:
                 files=construir_partes_multipart(archivos),
                 headers={"Authorization": f"Bearer {self._token}"},
             )
-        except httpx.TransportError:
-            return ResultadoEnvio(estado="retry")
+        except httpx.TransportError as exc:
+            return ResultadoEnvio(estado="retry", clase_excepcion=type(exc).__name__)
 
         if respuesta.status_code in (200, 201):
             cuerpo = respuesta.json()
@@ -97,6 +105,13 @@ class FinanzasClient:
             return ResultadoEnvio(estado="unauthorized", codigo_http=401)
         if respuesta.status_code in (413, 422):
             return ResultadoEnvio(estado="rejected", codigo_http=respuesta.status_code)
-        # 503, and any other 5xx: a transient server condition -- the next
-        # timer run retries, cursor unmoved.
+        if (
+            400 <= respuesta.status_code < 500
+            and respuesta.status_code not in _ESTADOS_4XX_TRANSITORIOS
+        ):
+            # Any other 4xx (400, 403, 404, 405, ...): Finanzas rejected the
+            # request outright, not a transient condition -- never retried.
+            return ResultadoEnvio(estado="rechazo_permanente", codigo_http=respuesta.status_code)
+        # 408, 429, 503, any other 5xx: a transient server condition -- the
+        # next timer run retries, cursor unmoved.
         return ResultadoEnvio(estado="retry", codigo_http=respuesta.status_code)

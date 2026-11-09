@@ -116,6 +116,30 @@ def test_5xx_es_retry(tmp_path, codigo: int) -> None:
     assert resultado.estado == "retry"
 
 
+@pytest.mark.parametrize("codigo", [408, 429])
+def test_408_429_son_retry(tmp_path, codigo: int) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(codigo, text="boom")
+
+    cliente = _cliente_con(handler, tmp_path)
+    resultado = cliente.enviar_entrada(_meta(), [])
+    cliente.cerrar()
+    assert resultado.estado == "retry"
+    assert resultado.codigo_http == codigo
+
+
+@pytest.mark.parametrize("codigo", [400, 403, 404, 405])
+def test_4xx_no_transitorios_son_rechazo_permanente(tmp_path, codigo: int) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(codigo, json={"detail": "nope"})
+
+    cliente = _cliente_con(handler, tmp_path)
+    resultado = cliente.enviar_entrada(_meta(), [])
+    cliente.cerrar()
+    assert resultado.estado == "rechazo_permanente"
+    assert resultado.codigo_http == codigo
+
+
 def test_error_de_conexion_es_retry(tmp_path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no se pudo conectar")
@@ -124,3 +148,4 @@ def test_error_de_conexion_es_retry(tmp_path) -> None:
     resultado = cliente.enviar_entrada(_meta(), [])
     cliente.cerrar()
     assert resultado.estado == "retry"
+    assert resultado.clase_excepcion == "ConnectError"
