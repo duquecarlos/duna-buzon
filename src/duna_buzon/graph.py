@@ -26,7 +26,24 @@ _TAMANO_PAGINA = "50"
 
 
 class GraphError(Exception):
-    """Base for every failure this client raises."""
+    """Base for every failure this client raises. Carries only the step
+    (`listar`/`adjuntos`/`mensaje`), the HTTP status if any, and -- for a
+    transport failure -- the exception's CLASS name, never its message: a
+    sincronizar.py caller turns this into the stop reason it logs."""
+
+    def __init__(
+        self, paso: str, *, http_status: int | None = None, clase_excepcion: str | None = None
+    ) -> None:
+        self.paso = paso
+        self.http_status = http_status
+        self.clase_excepcion = clase_excepcion
+        super().__init__(self.motivo)
+
+    @property
+    def motivo(self) -> str:
+        if self.http_status is not None:
+            return f"graph {self.paso} http={self.http_status}"
+        return f"graph {self.paso} error={self.clase_excepcion}"
 
 
 class GraphAutenticacionError(GraphError):
@@ -102,19 +119,21 @@ class GraphClient:
     def cerrar(self) -> None:
         self._cliente.close()
 
-    def _get(self, url: str, *, params: dict[str, str] | None = None) -> httpx.Response:
+    def _get(
+        self, url: str, *, paso: str, params: dict[str, str] | None = None
+    ) -> httpx.Response:
         try:
             return self._cliente.get(url, params=params)
         except httpx.TransportError as exc:
-            raise GraphErrorTransitorio(type(exc).__name__) from exc
+            raise GraphErrorTransitorio(paso, clase_excepcion=type(exc).__name__) from exc
 
     @staticmethod
-    def _exigir_ok(respuesta: httpx.Response) -> None:
+    def _exigir_ok(respuesta: httpx.Response, *, paso: str) -> None:
         if respuesta.status_code == 200:
             return
         if respuesta.status_code == 401:
-            raise GraphAutenticacionError("graph answered 401")
-        raise GraphErrorTransitorio(f"graph answered {respuesta.status_code}")
+            raise GraphAutenticacionError(paso, http_status=401)
+        raise GraphErrorTransitorio(paso, http_status=respuesta.status_code)
 
     def listar_mensajes(self, desde: datetime.datetime) -> Iterator[MensajeResumen]:
         """Ascending order, `receivedDateTime` filtered from `desde` (the
@@ -128,8 +147,8 @@ class GraphClient:
         }
         url = "/me/messages"
         while True:
-            respuesta = self._get(url, params=parametros)
-            self._exigir_ok(respuesta)
+            respuesta = self._get(url, params=parametros, paso="listar")
+            self._exigir_ok(respuesta, paso="listar")
             cuerpo = respuesta.json()
             for fila in cuerpo.get("value", []):
                 yield _mensaje_resumen_desde_json(fila)
@@ -146,8 +165,9 @@ class GraphClient:
         respuesta = self._get(
             f"/me/messages/{id_mensaje}/attachments",
             params={"$select": "name,size"},
+            paso="adjuntos",
         )
-        self._exigir_ok(respuesta)
+        self._exigir_ok(respuesta, paso="adjuntos")
         cuerpo = respuesta.json()
         return [
             AdjuntoMetadata(id=fila.get("id", ""), nombre=fila.get("name") or "", tamano=fila.get("size", 0))
@@ -163,8 +183,9 @@ class GraphClient:
                 "$select": "body",
                 "$expand": "attachments($select=name,contentBytes,isInline)",
             },
+            paso="mensaje",
         )
-        self._exigir_ok(respuesta)
+        self._exigir_ok(respuesta, paso="mensaje")
         cuerpo = respuesta.json()
         cuerpo_html = (cuerpo.get("body") or {}).get("content") or ""
         adjuntos: list[AdjuntoDescargado] = []

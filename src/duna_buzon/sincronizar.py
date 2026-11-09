@@ -11,11 +11,21 @@ from dataclasses import dataclass, field
 
 from duna_buzon.adjuntos import AdjuntoCandidato, empacar
 from duna_buzon.cursor import SOLAPE
-from duna_buzon.finanzas import FinanzasClient, MetaEntrada
+from duna_buzon.finanzas import FinanzasClient, MetaEntrada, ResultadoEnvio
 from duna_buzon.graph import GraphAutenticacionError, GraphClient, GraphErrorTransitorio
 from duna_buzon.limites import excede_limites_no_truncables, truncar_asunto
 from duna_buzon.reglas import MensajeCandidato, Reglas, coincide
 from duna_buzon.texto import html_a_texto
+
+
+def _motivo_finanzas(resultado: ResultadoEnvio) -> str:
+    """Builds the stop reason for a Finanzas response: side, step (always
+    `enviar`, the client's only call) and the HTTP status, or -- for a
+    transport failure -- the exception's class name. Never the token, a
+    sender or a subject."""
+    if resultado.codigo_http is not None:
+        return f"finanzas enviar http={resultado.codigo_http}"
+    return f"finanzas enviar error={resultado.clase_excepcion}"
 
 
 @dataclass
@@ -37,10 +47,20 @@ class ResultadoPasada:
     cursor_final: datetime.datetime | None = None
     detenida_por_autenticacion: bool = False
     detenida_por_error_transitorio: bool = False
+    detenida_por_rechazo_permanente: bool = False
+    # Which side (`graph`/`finanzas`), which step, and the HTTP status or
+    # exception class -- set whenever any `detenida_por_*` flag above is
+    # True. Never content: see `sincronizar.py`'s own `_motivo_finanzas` and
+    # `graph.py`'s `GraphError.motivo`.
+    motivo: str | None = None
 
     @property
     def debe_persistir_cursor(self) -> bool:
-        return not (self.detenida_por_autenticacion or self.detenida_por_error_transitorio)
+        return not (
+            self.detenida_por_autenticacion
+            or self.detenida_por_error_transitorio
+            or self.detenida_por_rechazo_permanente
+        )
 
 
 def ejecutar_pasada(
@@ -113,21 +133,38 @@ def ejecutar_pasada(
                 cursor_final = max(cursor_final, mensaje.recibido_en)
             elif resultado.estado == "unauthorized":
                 return ResultadoPasada(
-                    contadores=contadores, cursor_final=cursor_final, detenida_por_autenticacion=True
+                    contadores=contadores,
+                    cursor_final=cursor_final,
+                    detenida_por_autenticacion=True,
+                    motivo=_motivo_finanzas(resultado),
                 )
-            else:  # "retry": a 503, another 5xx, or a connection error
+            elif resultado.estado == "rechazo_permanente":
+                return ResultadoPasada(
+                    contadores=contadores,
+                    cursor_final=cursor_final,
+                    detenida_por_rechazo_permanente=True,
+                    motivo=_motivo_finanzas(resultado),
+                )
+            else:  # "retry": 408, 429, a 5xx, or a connection error
                 return ResultadoPasada(
                     contadores=contadores,
                     cursor_final=cursor_final,
                     detenida_por_error_transitorio=True,
+                    motivo=_motivo_finanzas(resultado),
                 )
-    except GraphAutenticacionError:
+    except GraphAutenticacionError as exc:
         return ResultadoPasada(
-            contadores=contadores, cursor_final=cursor_final, detenida_por_autenticacion=True
+            contadores=contadores,
+            cursor_final=cursor_final,
+            detenida_por_autenticacion=True,
+            motivo=exc.motivo,
         )
-    except GraphErrorTransitorio:
+    except GraphErrorTransitorio as exc:
         return ResultadoPasada(
-            contadores=contadores, cursor_final=cursor_final, detenida_por_error_transitorio=True
+            contadores=contadores,
+            cursor_final=cursor_final,
+            detenida_por_error_transitorio=True,
+            motivo=exc.motivo,
         )
 
     return ResultadoPasada(contadores=contadores, cursor_final=cursor_final)

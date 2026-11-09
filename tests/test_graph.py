@@ -109,9 +109,11 @@ def test_graph_401_lanza_error_de_autenticacion() -> None:
         return httpx.Response(401, json={"error": "unauthorized"})
 
     cliente = _cliente_con(handler)
-    with pytest.raises(GraphAutenticacionError):
+    with pytest.raises(GraphAutenticacionError) as excinfo:
         list(cliente.listar_mensajes(_DESDE))
     cliente.cerrar()
+    assert excinfo.value.paso == "listar"
+    assert excinfo.value.motivo == "graph listar http=401"
 
 
 def test_graph_500_lanza_error_transitorio() -> None:
@@ -119,9 +121,10 @@ def test_graph_500_lanza_error_transitorio() -> None:
         return httpx.Response(500, text="boom")
 
     cliente = _cliente_con(handler)
-    with pytest.raises(GraphErrorTransitorio):
+    with pytest.raises(GraphErrorTransitorio) as excinfo:
         list(cliente.listar_mensajes(_DESDE))
     cliente.cerrar()
+    assert excinfo.value.motivo == "graph listar http=500"
 
 
 def test_error_de_conexion_lanza_error_transitorio() -> None:
@@ -129,9 +132,32 @@ def test_error_de_conexion_lanza_error_transitorio() -> None:
         raise httpx.ConnectError("no se pudo conectar")
 
     cliente = _cliente_con(handler)
-    with pytest.raises(GraphErrorTransitorio):
+    with pytest.raises(GraphErrorTransitorio) as excinfo:
         list(cliente.listar_mensajes(_DESDE))
     cliente.cerrar()
+    assert excinfo.value.motivo == "graph listar error=ConnectError"
+
+
+def test_graph_error_en_adjuntos_nombra_el_paso() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    cliente = _cliente_con(handler)
+    with pytest.raises(GraphErrorTransitorio) as excinfo:
+        cliente.listar_adjuntos_metadata("m1")
+    cliente.cerrar()
+    assert excinfo.value.motivo == "graph adjuntos http=500"
+
+
+def test_graph_error_en_mensaje_completo_nombra_el_paso() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="boom")
+
+    cliente = _cliente_con(handler)
+    with pytest.raises(GraphErrorTransitorio) as excinfo:
+        cliente.obtener_mensaje_completo("m1")
+    cliente.cerrar()
+    assert excinfo.value.motivo == "graph mensaje http=403"
 
 
 # ---------------------------------------------------------------------------

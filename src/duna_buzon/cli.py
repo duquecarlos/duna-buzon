@@ -49,8 +49,10 @@ def comando_sincronizar(config: Config) -> int:
         cliente_graph.cerrar()
         cliente_finanzas.cerrar()
 
-    linea = registro.linea_resumen(resultado.contadores)
+    linea = registro.linea_resumen(resultado.contadores, resultado.motivo)
     print(linea)
+    if resultado.motivo is not None:
+        print(f"parada: {resultado.motivo}", file=sys.stderr)
 
     cripto.asegurar_directorio_datos(Path(config.directorio_datos))
     cripto.escribir_archivo_sensible(
@@ -60,7 +62,11 @@ def comando_sincronizar(config: Config) -> int:
     if resultado.debe_persistir_cursor and resultado.cursor_final is not None:
         modulo_cursor.guardar_cursor(config.directorio_datos, resultado.cursor_final)
 
-    detenida = resultado.detenida_por_autenticacion or resultado.detenida_por_error_transitorio
+    detenida = (
+        resultado.detenida_por_autenticacion
+        or resultado.detenida_por_error_transitorio
+        or resultado.detenida_por_rechazo_permanente
+    )
     return 1 if detenida else 0
 
 
