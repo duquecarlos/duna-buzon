@@ -22,7 +22,9 @@ from duna_buzon import cripto
 from duna_buzon.config import Config
 
 AUTORIDAD = "https://login.microsoftonline.com/consumers"
-ALCANCES = ["Mail.Read", "offline_access"]
+# MSAL adds offline_access/openid/profile itself; listing one is a ValueError
+# in msal>=1.39 ("reserved scope"), and the refresh token still comes back.
+ALCANCES = ["Mail.Read"]
 
 _NOMBRE_ARCHIVO_CACHE = "cache.bin"
 
