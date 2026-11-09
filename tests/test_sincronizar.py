@@ -42,7 +42,16 @@ def _transporte_graph(mensajes: list[MensajeFalso]) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         segmentos = [s for s in request.url.path.split("/") if s]
         # segmentos is like ["v1.0", "me", "messages"] or [..., "messages",
-        # "<id>"] or [..., "messages", "<id>", "attachments"].
+        # "<id>"] or [..., "messages", "<id>", "attachments"] or [...,
+        # "messages", "<id>", "attachments", "<aid>"].
+        if segmentos[-2] == "attachments":
+            id_mensaje, id_adjunto = segmentos[-3], segmentos[-1]
+            mensaje = por_id[id_mensaje]
+            indice = int(id_adjunto.rsplit("-", 1)[-1])
+            _, contenido = mensaje.adjuntos[indice]
+            return httpx.Response(
+                200, json={"contentBytes": base64.b64encode(contenido).decode("ascii")}
+            )
         if segmentos[-1] == "attachments":
             id_mensaje = segmentos[-2]
             mensaje = por_id[id_mensaje]
@@ -50,27 +59,22 @@ def _transporte_graph(mensajes: list[MensajeFalso]) -> httpx.MockTransport:
                 200,
                 json={
                     "value": [
-                        {"id": f"{id_mensaje}-{i}", "name": nombre, "size": len(contenido)}
+                        {
+                            "id": f"{id_mensaje}-{i}",
+                            "name": nombre,
+                            "size": len(contenido),
+                            "isInline": False,
+                            "@odata.type": "#microsoft.graph.fileAttachment",
+                        }
                         for i, (nombre, contenido) in enumerate(mensaje.adjuntos)
                     ]
                 },
             )
         if segmentos[-1] != "messages":
             id_mensaje = segmentos[-1]
-            mensaje = por_id[id_mensaje]
             return httpx.Response(
                 200,
-                json={
-                    "body": {"content": f"<p>cuerpo de {id_mensaje}</p>"},
-                    "attachments": [
-                        {
-                            "name": nombre,
-                            "isInline": False,
-                            "contentBytes": base64.b64encode(contenido).decode("ascii"),
-                        }
-                        for nombre, contenido in mensaje.adjuntos
-                    ],
-                },
+                json={"body": {"content": f"<p>cuerpo de {id_mensaje}</p>"}},
             )
         return httpx.Response(
             200,

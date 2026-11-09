@@ -12,7 +12,12 @@ from dataclasses import dataclass, field
 from duna_buzon.adjuntos import AdjuntoCandidato, empacar
 from duna_buzon.cursor import SOLAPE
 from duna_buzon.finanzas import FinanzasClient, MetaEntrada, ResultadoEnvio
-from duna_buzon.graph import GraphAutenticacionError, GraphClient, GraphErrorTransitorio
+from duna_buzon.graph import (
+    AdjuntoMetadata,
+    GraphAutenticacionError,
+    GraphClient,
+    GraphErrorTransitorio,
+)
 from duna_buzon.limites import excede_limites_no_truncables, truncar_asunto
 from duna_buzon.reglas import MensajeCandidato, Reglas, coincide
 from duna_buzon.texto import html_a_texto
@@ -78,12 +83,10 @@ def ejecutar_pasada(
         for mensaje in cliente_graph.listar_mensajes(desde_con_solape):
             contadores.vistos += 1
 
-            nombres_adjuntos: list[str] = []
+            metadatos_adjuntos: list[AdjuntoMetadata] = []
             if mensaje.tiene_adjuntos:
-                nombres_adjuntos = [
-                    metadato.nombre
-                    for metadato in cliente_graph.listar_adjuntos_metadata(mensaje.id)
-                ]
+                metadatos_adjuntos = cliente_graph.listar_adjuntos_metadata(mensaje.id)
+            nombres_adjuntos = [metadato.nombre for metadato in metadatos_adjuntos]
 
             candidato = MensajeCandidato(
                 remitente=mensaje.remitente,
@@ -102,7 +105,8 @@ def ejecutar_pasada(
                 cursor_final = max(cursor_final, mensaje.recibido_en)
                 continue
 
-            completo = cliente_graph.obtener_mensaje_completo(mensaje.id)
+            completo = cliente_graph.obtener_mensaje_completo(mensaje.id, metadatos_adjuntos)
+            contadores.adjuntos_descartados += completo.adjuntos_descartados
             cuerpo_texto = html_a_texto(completo.cuerpo_html) if completo.cuerpo_html else None
             asunto = truncar_asunto(mensaje.asunto) if mensaje.asunto is not None else None
 
