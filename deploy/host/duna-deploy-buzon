@@ -165,19 +165,29 @@ cmd_deploy() {
 }
 
 # For Carlos, at his own terminal: never systemd-run, never --pty -- a real
-# tty is already attached, and this just hands it straight to `duna`.
-# Sources both env files into the child's environment alone (never printed,
-# never logged, never argv) so Config.desde_entorno's blanket requirement
-# is satisfied even though this command itself never reads the Finanzas
-# token.
+# tty is already attached, and this just hands it straight to `duna`. `duna`
+# cannot traverse /srv/duna/env/ on this host, so it can never source either
+# env file by path itself -- ROOT opens both files here and hands them to
+# the duna-owned child as already-open file descriptors (3 and 4), which
+# the child sources from /dev/fd/N and then closes before exec'ing python.
+# Never printed, never logged, never argv, so Config.desde_entorno's blanket
+# requirement is satisfied even though this command itself never reads the
+# Finanzas token. Refuses, before any of that, if `deploy` has never created
+# the venv.
 cmd_entrar() {
+    if [[ ! -x "$REPO/.venv/bin/python" ]]; then
+        echo "duna-deploy-buzon: refusing: run \`duna-deploy-buzon deploy\` first" >&2
+        exit 1
+    fi
+
     exec runuser -u duna -- /bin/bash -c '
         set -a
-        . "'"$ENV_CLIENTE"'"
-        . "'"$ENV_TOKEN"'"
+        . /dev/fd/3
+        . /dev/fd/4
         set +a
+        exec 3<&- 4<&-
         exec "'"$REPO"'/.venv/bin/python" -m duna_buzon entrar
-    '
+    ' 3<"$ENV_CLIENTE" 4<"$ENV_TOKEN"
 }
 
 dispatch() {
