@@ -47,3 +47,55 @@ def test_estado_se_despacha_con_la_config_del_entorno(
     monkeypatch.setattr(cli, "comando_estado", comando_falso)
     assert main(["estado"]) == 0
     assert recibido[0].directorio_datos == str(tmp_path)
+
+
+def test_fuentes_se_despacha_sin_argumentos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[Config] = []
+    monkeypatch.setattr(cli, "comando_fuentes", lambda config: (recibido.append(config), 0)[1])
+    assert main(["fuentes"]) == 0
+    assert recibido[0].directorio_datos == str(tmp_path)
+
+
+def test_entrar_sin_fuente_pasa_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[tuple[Config, str | None]] = []
+    monkeypatch.setattr(
+        cli, "comando_entrar", lambda config, id_fuente: (recibido.append((config, id_fuente)), 0)[1]
+    )
+    assert main(["entrar"]) == 0
+    assert recibido[0][1] is None
+
+
+def test_entrar_con_fuente_pasa_el_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[tuple[Config, str | None]] = []
+    monkeypatch.setattr(
+        cli, "comando_entrar", lambda config, id_fuente: (recibido.append((config, id_fuente)), 0)[1]
+    )
+    assert main(["entrar", "--fuente", "hotmail-carlos"]) == 0
+    assert recibido[0][1] == "hotmail-carlos"
+
+
+def test_entrar_con_fuente_mal_formado_es_uso_incorrecto(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["entrar", "--fuente"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_sincronizar_con_argumento_extra_es_uso_incorrecto(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["sincronizar", "algo-mas"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()

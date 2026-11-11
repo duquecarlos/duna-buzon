@@ -78,8 +78,15 @@ class _AppMSALFalsa:
         return self._resultado_silencioso
 
 
+def _directorio_fuente(tmp_path: Path) -> str:
+    ruta = tmp_path / "fuentes" / "hotmail-carlos"
+    ruta.mkdir(parents=True, exist_ok=True)
+    return str(ruta)
+
+
 def test_entrar_imprime_la_url_y_guarda_la_cache_cifrada(tmp_path: Path, no_es_windows: None) -> None:
     config = _config(tmp_path)
+    directorio = _directorio_fuente(tmp_path)
     mensajes: list[str] = []
 
     def construir_app(_config: Config, cache: _CacheFalsa) -> _AppMSALFalsa:
@@ -87,13 +94,14 @@ def test_entrar_imprime_la_url_y_guarda_la_cache_cifrada(tmp_path: Path, no_es_w
 
     auth.entrar(
         config,
+        directorio,
         construir_app=construir_app,
         nueva_cache=_CacheFalsa,
         imprimir=mensajes.append,
     )
 
     assert any("devicelogin" in m for m in mensajes)
-    ruta_cache = Path(config.directorio_datos) / "cache.bin"
+    ruta_cache = Path(directorio) / "credencial.bin"
     assert ruta_cache.is_file()
     assert cripto.modo_octal(ruta_cache) == 0o600
 
@@ -104,18 +112,22 @@ def test_entrar_imprime_la_url_y_guarda_la_cache_cifrada(tmp_path: Path, no_es_w
 
 def test_obtener_token_sin_cache_pide_entrar(tmp_path: Path) -> None:
     config = _config(tmp_path)
+    directorio = _directorio_fuente(tmp_path)
     with pytest.raises(auth.SinCuentaError, match="entrar"):
-        auth.obtener_token(config, construir_app=lambda c, cache: _AppMSALFalsa(cache))
+        auth.obtener_token(config, directorio, construir_app=lambda c, cache: _AppMSALFalsa(cache))
 
 
 def test_obtener_token_usa_silencioso_y_no_pide_contrasena(tmp_path: Path) -> None:
     config = _config(tmp_path)
+    directorio = _directorio_fuente(tmp_path)
 
     # Seed a cache as if `entrar` had already run.
     def construir_app_para_entrar(_config: Config, cache: _CacheFalsa) -> _AppMSALFalsa:
         return _AppMSALFalsa(cache)
 
-    auth.entrar(config, construir_app=construir_app_para_entrar, nueva_cache=_CacheFalsa, imprimir=lambda m: None)
+    auth.entrar(
+        config, directorio, construir_app=construir_app_para_entrar, nueva_cache=_CacheFalsa, imprimir=lambda m: None
+    )
 
     def construir_app_silencioso(_config: Config, cache: _CacheFalsa) -> _AppMSALFalsa:
         return _AppMSALFalsa(
@@ -124,14 +136,16 @@ def test_obtener_token_usa_silencioso_y_no_pide_contrasena(tmp_path: Path) -> No
             resultado_silencioso={"access_token": "token-renovado"},
         )
 
-    token = auth.obtener_token(config, construir_app=construir_app_silencioso, nueva_cache=_CacheFalsa)
+    token = auth.obtener_token(config, directorio, construir_app=construir_app_silencioso, nueva_cache=_CacheFalsa)
     assert token == "token-renovado"
 
 
 def test_obtener_token_sin_cuentas_pide_entrar(tmp_path: Path) -> None:
     config = _config(tmp_path)
+    directorio = _directorio_fuente(tmp_path)
     auth.entrar(
         config,
+        directorio,
         construir_app=lambda c, cache: _AppMSALFalsa(cache),
         nueva_cache=_CacheFalsa,
         imprimir=lambda m: None,
@@ -141,13 +155,15 @@ def test_obtener_token_sin_cuentas_pide_entrar(tmp_path: Path) -> None:
         return _AppMSALFalsa(cache, cuentas=[])
 
     with pytest.raises(auth.SinCuentaError, match="entrar"):
-        auth.obtener_token(config, construir_app=construir_app_sin_cuentas, nueva_cache=_CacheFalsa)
+        auth.obtener_token(config, directorio, construir_app=construir_app_sin_cuentas, nueva_cache=_CacheFalsa)
 
 
 def test_obtener_token_sin_resultado_silencioso_pide_entrar(tmp_path: Path) -> None:
     config = _config(tmp_path)
+    directorio = _directorio_fuente(tmp_path)
     auth.entrar(
         config,
+        directorio,
         construir_app=lambda c, cache: _AppMSALFalsa(cache),
         nueva_cache=_CacheFalsa,
         imprimir=lambda m: None,
@@ -159,13 +175,15 @@ def test_obtener_token_sin_resultado_silencioso_pide_entrar(tmp_path: Path) -> N
         )
 
     with pytest.raises(auth.SinCuentaError, match="entrar"):
-        auth.obtener_token(config, construir_app=construir_app_sin_refresh, nueva_cache=_CacheFalsa)
+        auth.obtener_token(config, directorio, construir_app=construir_app_sin_refresh, nueva_cache=_CacheFalsa)
 
 
 def test_cache_cargable_con_clave_equivocada_es_falso(tmp_path: Path) -> None:
     config = _config(tmp_path)
+    directorio = _directorio_fuente(tmp_path)
     auth.entrar(
         config,
+        directorio,
         construir_app=lambda c, cache: _AppMSALFalsa(cache),
         nueva_cache=_CacheFalsa,
         imprimir=lambda m: None,
@@ -179,8 +197,8 @@ def test_cache_cargable_con_clave_equivocada_es_falso(tmp_path: Path) -> None:
         directorio_datos=config.directorio_datos,
         url_finanzas=config.url_finanzas,
     )
-    assert auth.cache_cargable(config_con_otra_clave) is False
-    assert auth.cache_cargable(config) is True
+    assert auth.cache_cargable(config_con_otra_clave, directorio) is False
+    assert auth.cache_cargable(config, directorio) is True
 
 
 def test_cache_cargable_sin_archivo_es_verdadero(tmp_path: Path) -> None:
@@ -188,7 +206,8 @@ def test_cache_cargable_sin_archivo_es_verdadero(tmp_path: Path) -> None:
     # check is "the file could be loaded", and an absent file loads as
     # empty, cleanly.
     config = _config(tmp_path)
-    assert auth.cache_cargable(config) is True
+    directorio = _directorio_fuente(tmp_path)
+    assert auth.cache_cargable(config, directorio) is True
 
 
 def test_authority_es_consumers_no_common() -> None:
