@@ -1,5 +1,6 @@
-"""The three commands -- `entrar`, `sincronizar`, `estado` -- wired to one
-`Config`. `__main__.py` is the thin argparse shell around this module."""
+"""The four commands -- `entrar`, `sincronizar`, `estado`, `fuentes` -- wired
+to one `Config` and iterating `fuentes.py`'s own per-source layout.
+`__main__.py` is the thin argument-parsing shell around this module."""
 
 from __future__ import annotations
 
@@ -9,81 +10,174 @@ from pathlib import Path
 
 from duna_buzon import auth, cripto
 from duna_buzon import cursor as modulo_cursor
+from duna_buzon import fuentes as modulo_fuentes
 from duna_buzon import registro
 from duna_buzon.config import Config
 from duna_buzon.finanzas import FinanzasClient
-from duna_buzon.graph import GraphClient
-from duna_buzon.reglas import cargar_reglas
-from duna_buzon.sincronizar import ejecutar_pasada
+from duna_buzon.fuentes import FuenteConfig
+from duna_buzon.proveedor import construir_proveedor
+from duna_buzon.reglas import ReglasInvalidasError, cargar_reglas
+from duna_buzon.sincronizar import Contadores, ejecutar_pasada
 
 NOMBRE_ARCHIVO_REGLAS = "reglas.json"
 NOMBRE_ARCHIVO_ESTADO = "estado.json"
 
 
-def comando_entrar(config: Config) -> int:
-    auth.entrar(config)
+def _migrar_si_necesario(config: Config) -> None:
+    modulo_fuentes.migrar_fuente_unica_si_necesario(config.directorio_datos, config.clave_cifrado)
+
+
+def comando_entrar(config: Config, id_fuente: str | None) -> int:
+    _migrar_si_necesario(config)
+    todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
+
+    if id_fuente is None:
+        if len(todas) != 1:
+            print(
+                "error: --fuente is required (more than one source configured, or none yet)",
+                file=sys.stderr,
+            )
+            return 1
+        fuente = todas[0]
+    else:
+        try:
+            fuente = next(f for f in todas if f.id == id_fuente)
+        except StopIteration:
+            print(f"error: no such source: {id_fuente}", file=sys.stderr)
+            return 1
+
+    if fuente.proveedor != "microsoft":
+        print(
+            f"error: fuente {fuente.id!r} uses provider {fuente.proveedor!r}, "
+            "which 'entrar' does not support yet",
+            file=sys.stderr,
+        )
+        return 1
+
+    directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
+    auth.entrar(config, directorio)
     return 0
 
 
-def comando_sincronizar(config: Config) -> int:
+def _ejecutar_una_fuente(
+    config: Config, fuente: FuenteConfig, cliente_finanzas: FinanzasClient
+) -> tuple[str, str | None]:
+    """Runs one source's own pass end to end and returns `(linea, motivo)`
+    -- the summary line this source's `estado.json` carries, and the stop
+    reason (`None` if it finished cleanly). Never raises for a failure that
+    is this source's own (auth, rules, the provider, Finanzas): a source
+    that cannot even sign in is reported exactly like one that signs in and
+    then has its pass stopped, so one source's trouble never stops
+    another's."""
+    directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
+
+    def _detenida(motivo: str) -> tuple[str, str | None]:
+        linea = registro.linea_resumen(Contadores(), motivo)
+        cripto.asegurar_directorio_datos(Path(directorio))
+        cripto.escribir_archivo_sensible(Path(directorio) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8"))
+        return linea, motivo
+
     try:
-        token = auth.obtener_token(config)
+        token = auth.obtener_token(config, directorio)
     except (auth.SinCuentaError, cripto.ClaveInvalidaError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        return _detenida(f"auth error={exc}")
 
-    ruta_reglas = Path(config.directorio_datos) / NOMBRE_ARCHIVO_REGLAS
-    reglas = cargar_reglas(ruta_reglas)
-    cursor_inicial = modulo_cursor.cargar_cursor(config.directorio_datos, valor_inicial=reglas.desde)
+    ruta_reglas = Path(directorio) / NOMBRE_ARCHIVO_REGLAS
+    try:
+        reglas = cargar_reglas(ruta_reglas)
+    except ReglasInvalidasError as exc:
+        return _detenida(f"reglas error={exc}")
 
-    cliente_graph = GraphClient(token)
-    cliente_finanzas = FinanzasClient(config)
+    cursor_inicial = modulo_cursor.cargar_cursor(directorio, valor_inicial=reglas.desde)
+
+    proveedor = construir_proveedor(fuente, token)
     try:
         resultado = ejecutar_pasada(
-            cliente_graph=cliente_graph,
+            proveedor=proveedor,
             cliente_finanzas=cliente_finanzas,
             reglas=reglas,
             cursor_inicial=cursor_inicial,
+            etiqueta_fuente=fuente.etiqueta_wire,
         )
     finally:
-        cliente_graph.cerrar()
-        cliente_finanzas.cerrar()
-
-    linea = registro.linea_resumen(resultado.contadores, resultado.motivo)
-    print(linea)
-    if resultado.motivo is not None:
-        print(f"parada: {resultado.motivo}", file=sys.stderr)
-
-    cripto.asegurar_directorio_datos(Path(config.directorio_datos))
-    cripto.escribir_archivo_sensible(
-        Path(config.directorio_datos) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8")
-    )
+        proveedor.cerrar()
 
     if resultado.debe_persistir_cursor and resultado.cursor_final is not None:
-        modulo_cursor.guardar_cursor(config.directorio_datos, resultado.cursor_final)
+        modulo_cursor.guardar_cursor(directorio, resultado.cursor_final)
 
-    detenida = (
-        resultado.detenida_por_autenticacion
-        or resultado.detenida_por_error_transitorio
-        or resultado.detenida_por_rechazo_permanente
-    )
-    return 1 if detenida else 0
+    linea = registro.linea_resumen(resultado.contadores, resultado.motivo)
+    cripto.asegurar_directorio_datos(Path(directorio))
+    cripto.escribir_archivo_sensible(Path(directorio) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8"))
+    return linea, resultado.motivo
+
+
+def comando_sincronizar(config: Config) -> int:
+    _migrar_si_necesario(config)
+    activas = modulo_fuentes.fuentes_activas(config.directorio_datos)
+    if not activas:
+        print("error: no active sources configured", file=sys.stderr)
+        return 1
+
+    cliente_finanzas = FinanzasClient(config)
+    algun_fallo = False
+    try:
+        for fuente in activas:
+            linea, motivo = _ejecutar_una_fuente(config, fuente, cliente_finanzas)
+            print(f"fuente={fuente.id} {linea}")
+            if motivo is not None:
+                print(f"fuente={fuente.id} parada: {motivo}", file=sys.stderr)
+                algun_fallo = True
+    finally:
+        cliente_finanzas.cerrar()
+
+    return 1 if algun_fallo else 0
 
 
 def comando_estado(config: Config) -> int:
-    if not auth.cache_cargable(config):
-        print("error: the cache could not be decrypted under the configured key", file=sys.stderr)
-        return 1
-
-    ruta_cursor = Path(config.directorio_datos) / modulo_cursor.NOMBRE_ARCHIVO
-    if ruta_cursor.is_file():
-        datos = json.loads(ruta_cursor.read_text(encoding="utf-8"))
-        print(f"cursor={datos['cursor']}")
-    else:
+    _migrar_si_necesario(config)
+    todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
+    if not todas:
         print("cursor=none")
+        return 0
 
-    ruta_estado = Path(config.directorio_datos) / NOMBRE_ARCHIVO_ESTADO
-    if ruta_estado.is_file():
-        print(ruta_estado.read_text(encoding="utf-8").strip())
+    algun_fallo = False
+    for fuente in todas:
+        directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
 
+        if not auth.cache_cargable(config, directorio):
+            print(
+                f"fuente={fuente.id} error: the credential could not be decrypted "
+                "under the configured key",
+                file=sys.stderr,
+            )
+            algun_fallo = True
+            continue
+
+        ruta_cursor = Path(directorio) / modulo_cursor.NOMBRE_ARCHIVO
+        if ruta_cursor.is_file():
+            datos = json.loads(ruta_cursor.read_text(encoding="utf-8"))
+            print(f"fuente={fuente.id} cursor={datos['cursor']}")
+        else:
+            print(f"fuente={fuente.id} cursor=none")
+
+        ruta_estado = Path(directorio) / NOMBRE_ARCHIVO_ESTADO
+        if ruta_estado.is_file():
+            print(f"fuente={fuente.id} {ruta_estado.read_text(encoding='utf-8').strip()}")
+
+    return 1 if algun_fallo else 0
+
+
+def comando_fuentes(config: Config) -> int:
+    _migrar_si_necesario(config)
+    todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
+    if not todas:
+        print("no sources configured")
+        return 0
+
+    for fuente in todas:
+        estado_txt = "activa" if fuente.activa else "inactiva"
+        print(
+            f"{fuente.id} proveedor={fuente.proveedor} direccion={fuente.direccion} "
+            f"etiqueta={fuente.etiqueta} estado={estado_txt}"
+        )
     return 0

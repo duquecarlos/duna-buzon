@@ -50,9 +50,16 @@ class ResultadoEnvio:
 class MetaEntrada:
     """The `meta` form part's own fields -- exactly these six keys, in
     `EntradaBuzonMeta`'s own names; no other key, or the wire answers
-    `422`."""
+    `422`.
 
-    fuente: Literal["correo"]
+    `fuente` carried the one constant value `"correo"` before
+    `BUZON-FUENTES-ESQUEMA-1`; it is now `"<proveedor>:<id>"` (e.g.
+    `"microsoft:hotmail-carlos"`), built by `fuentes.FuenteConfig.etiqueta_wire`
+    -- the SAME wire key Finanzas already accepts, no new field added, and
+    well inside every length cap `limites.py` mirrors from Finanzas (ids are
+    short, hand-chosen source names)."""
+
+    fuente: str
     id_externo: str
     remitente: str
     asunto: str | None

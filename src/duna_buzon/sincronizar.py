@@ -12,13 +12,9 @@ from dataclasses import dataclass, field
 from duna_buzon.adjuntos import AdjuntoCandidato, empacar
 from duna_buzon.cursor import SOLAPE
 from duna_buzon.finanzas import FinanzasClient, MetaEntrada, ResultadoEnvio
-from duna_buzon.graph import (
-    AdjuntoMetadata,
-    GraphAutenticacionError,
-    GraphClient,
-    GraphErrorTransitorio,
-)
+from duna_buzon.graph import AdjuntoMetadata, GraphAutenticacionError, GraphErrorTransitorio
 from duna_buzon.limites import excede_limites_no_truncables, truncar_asunto
+from duna_buzon.proveedor import Proveedor
 from duna_buzon.reglas import MensajeCandidato, Reglas, coincide
 from duna_buzon.texto import html_a_texto
 
@@ -70,22 +66,23 @@ class ResultadoPasada:
 
 def ejecutar_pasada(
     *,
-    cliente_graph: GraphClient,
+    proveedor: Proveedor,
     cliente_finanzas: FinanzasClient,
     reglas: Reglas,
     cursor_inicial: datetime.datetime,
+    etiqueta_fuente: str,
 ) -> ResultadoPasada:
     contadores = Contadores()
     cursor_final = cursor_inicial
     desde_con_solape = cursor_inicial - SOLAPE
 
     try:
-        for mensaje in cliente_graph.listar_mensajes(desde_con_solape):
+        for mensaje in proveedor.listar_mensajes(desde_con_solape):
             contadores.vistos += 1
 
             metadatos_adjuntos: list[AdjuntoMetadata] = []
             if mensaje.tiene_adjuntos:
-                metadatos_adjuntos = cliente_graph.listar_adjuntos_metadata(mensaje.id)
+                metadatos_adjuntos = proveedor.listar_adjuntos_metadata(mensaje.id)
             nombres_adjuntos = [metadato.nombre for metadato in metadatos_adjuntos]
 
             candidato = MensajeCandidato(
@@ -105,13 +102,13 @@ def ejecutar_pasada(
                 cursor_final = max(cursor_final, mensaje.recibido_en)
                 continue
 
-            completo = cliente_graph.obtener_mensaje_completo(mensaje.id, metadatos_adjuntos)
+            completo = proveedor.obtener_mensaje_completo(mensaje.id, metadatos_adjuntos)
             contadores.adjuntos_descartados += completo.adjuntos_descartados
             cuerpo_texto = html_a_texto(completo.cuerpo_html) if completo.cuerpo_html else None
             asunto = truncar_asunto(mensaje.asunto) if mensaje.asunto is not None else None
 
             meta = MetaEntrada(
-                fuente="correo",
+                fuente=etiqueta_fuente,
                 id_externo=mensaje.internet_message_id,
                 remitente=mensaje.remitente,
                 asunto=asunto,

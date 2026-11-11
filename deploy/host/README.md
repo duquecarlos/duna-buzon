@@ -77,10 +77,23 @@ interactively and prints Microsoft's own device-code URL to that terminal.
 
 ## No backup subcommand
 
-`/srv/duna/data/buzon/` holds only `cache.bin` (the encrypted MSAL token cache), `cursor.json`, and
-`estado.json` -- all re-creatable: `entrar` rebuilds the cache, and an empty or stale `cursor.json`
-only costs a few minutes of re-read overlap, which Finanzas' own idempotency on `id_externo` absorbs
-for free. There is nothing here worth a dedicated backup path.
+`/srv/duna/data/buzon/` holds only `fuentes/<id>/credencial.bin` (the encrypted MSAL token cache, one
+per source), `cursor.json`, and `estado.json` -- all re-creatable: `entrar --fuente <id>` rebuilds a
+source's own cache, and an empty or stale `cursor.json` only costs a few minutes of re-read overlap,
+which Finanzas' own idempotency on `id_externo` absorbs for free. There is nothing here worth a
+dedicated backup path.
+
+## Multi-source migration (BUZON-FUENTES-ESQUEMA-1)
+
+As of this slice, `/srv/duna/data/buzon/` holds one subdirectory per mailbox source,
+`fuentes/<id>/{fuente.json,credencial.bin,cursor.json,reglas.json}`, instead of those files sitting
+directly under the data root. The FIRST `sincronizar`, `estado`, `entrar` or `fuentes` run against an
+existing data directory still in the old (pre-`BUZON-FUENTES-ESQUEMA-1`) layout migrates it
+automatically into `fuentes/hotmail-carlos/`, preserving the exact same cursor -- no mail is re-sent,
+none is skipped. This needs nothing from the operator: the next scheduled `sincronizar` (or `deploy`'s
+own health check, which runs `estado`) does it on its own, once, and is a no-op on every run after
+that. `entrar` with no `--fuente` keeps working unchanged as long as exactly one source is configured,
+which is the state migration leaves a single-mailbox install in.
 
 ## Trust boundary
 
