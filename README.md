@@ -5,7 +5,8 @@ and posts the financial items it finds to Duna Finanzas' inbox (buzon-v1, `POST 
 Runs on duna-prod-1 as `duna`. Nothing is exposed to the internet.
 
 Created by Main (dev-protocol) on 2026-11-06, ORCH-BUZON-REPO-1. Built end to end by BUZON-CONECTOR-1; made
-multi-source by BUZON-FUENTES-ESQUEMA-1; gained a generic IMAP provider by BUZON-FUENTE-IMAP-1 -- see `CLAUDE.md`
+multi-source by BUZON-FUENTES-ESQUEMA-1; gained a generic IMAP provider by BUZON-FUENTE-IMAP-1, widened from
+that provider's own `INBOX`-only start to every folder by BUZON-FUENTE-IMAP-CARPETAS-1 -- see `CLAUDE.md`
 for the gate and the invariants, `DECISIONS.md` for the ledger, and `deploy/host/README.md` for the operator steps.
 
 ## Shape
@@ -21,7 +22,8 @@ fuentes/<id>/credencial.bin        -- the signed-in account's own credential, AE
                                        cache for "microsoft"; the app password itself for "imap")
 fuentes/<id>/cursor.json           -- this source's own sync cursor (a timestamp)
 fuentes/<id>/cursor_proveedor.json -- this source's own provider-defined resume token, if it has one (IMAP's
-                                       "<uidvalidity>:<uid>"; absent for Microsoft)
+                                       JSON object mapping folder name to that folder's own
+                                       "<uidvalidity>:<uid>" pair; absent for Microsoft)
 fuentes/<id>/reglas.json           -- this source's own matching rules (never committed; see `reglas.py`)
 fuentes/<id>/estado.json           -- this source's own last-pass summary line
 ```
@@ -29,7 +31,11 @@ fuentes/<id>/estado.json           -- this source's own last-pass summary line
 `host`/`port` are only set for `proveedor == "imap"` (`None` for Microsoft).
 
 `proveedor` is `"microsoft"` (Microsoft Graph, read-only, device-code sign-in) or `"imap"` (a generic read-only IMAP
-mailbox over SSL, app-password sign-in -- first used for `legal@duna.solutions` on Zoho). Every entry every source
+mailbox over SSL, app-password sign-in -- first used for `legal@duna.solutions` on Zoho). An IMAP source reads
+every selectable folder, not only `INBOX` -- it skips a folder the server marks `\Trash`/`\Junk`/`\Sent`/`\Drafts`/
+`\All`, or, when the server says nothing about it, a folder named like one of those (`cliente_imap.py`), the same
+parity with the Microsoft source (which already reaches every folder via `/me/messages`) that
+`BUZON-FUENTE-IMAP-CARPETAS-1` closed. Every entry every source
 posts to Finanzas carries the wire's `fuente` field as the one constant value `"correo"` -- it is the CHANNEL, not
 a source's own identity, and Finanzas rejects anything else (`Literal["correo", "sms", "notificacion"]`,
 `src/duna_finanzas/web/buzon/schemas.py:37`). A source's own identity (`"<proveedor>:<id>"`,

@@ -78,7 +78,8 @@ interactively and prints Microsoft's own device-code URL to that terminal.
 ## No backup subcommand
 
 `/srv/duna/data/buzon/` holds only `fuentes/<id>/credencial.bin` (the encrypted MSAL token cache or
-IMAP app password, one per source), `cursor.json`, `cursor_proveedor.json`, and `estado.json` -- all
+IMAP app password, one per source), `cursor.json`, `cursor_proveedor.json` (for IMAP, a JSON object
+keyed by folder name, one `"<uidvalidity>:<uid>"` pair per folder), and `estado.json` -- all
 re-creatable: `entrar --fuente <id>` rebuilds a source's own credential, and an empty or stale
 `cursor.json`/`cursor_proveedor.json` only costs a few minutes of re-read overlap, which Finanzas' own
 idempotency on `id_externo` absorbs for free. There is nothing here worth a dedicated backup path.
@@ -128,7 +129,11 @@ which is the state migration leaves a single-mailbox install in.
 
 This mailbox is read ONLY: `EXAMINE`, never `SELECT`; `BODY.PEEK[...]`, never `BODY[...]`; no
 flag/move/delete command is ever sent (`src/duna_buzon/cliente_imap.py`; proven from the outside by
-`tests/test_cliente_imap.py` against a fake IMAP server).
+`tests/test_cliente_imap.py` against a fake IMAP server) -- for EVERY folder this reads, not only
+`INBOX` (`BUZON-FUENTE-IMAP-CARPETAS-1`): every selectable folder except one the server marks
+`\Trash`/`\Junk`/`\Sent`/`\Drafts`/`\All`, or, failing that, one named like one of those -- so mail
+Zoho's own rules file into a folder (invoices, contracts) is read exactly like `INBOX` is, matching
+the Microsoft source's own every-folder reach.
 
 ## Trust boundary
 

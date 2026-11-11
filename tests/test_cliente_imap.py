@@ -2,12 +2,15 @@
 network, never a real mailbox. The fake server records every command it
 receives, so these tests can prove from the outside that this client only
 ever sends `EXAMINE` (never `SELECT`), `BODY.PEEK[...]` (never
-`BODY[...]`), and no `STORE`/`COPY`/`MOVE`/`EXPUNGE` command at all.
+`BODY[...]`), and no `STORE`/`COPY`/`MOVE`/`EXPUNGE` command at all --
+against every folder the fake server advertises, not only `INBOX`
+(BUZON-FUENTE-IMAP-CARPETAS-1).
 """
 
 from __future__ import annotations
 
 import datetime
+import json
 import re
 import socket
 import threading
@@ -124,22 +127,59 @@ def _bodystructure_mensaje(partes: list[_ParteFalsa]) -> str:
     return f'({hijos} "MIXED")'
 
 
+@dataclass
+class _CarpetaFalsa:
+    """One IMAP folder the fake server knows about -- its own messages,
+    its own UIDVALIDITY/UIDNEXT, and the SPECIAL-USE/other flags its
+    `LIST` response carries (e.g. `("\\Trash",)`, or `()` for a plain
+    folder with no SPECIAL-USE attribute at all)."""
+
+    nombre: str
+    mensajes: dict[int, _MensajeFalso] = field(default_factory=dict)
+    banderas: tuple[str, ...] = ()
+    uidvalidity: int = 1000
+    uidnext: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.uidnext is None:
+            self.uidnext = max(self.mensajes, default=0) + 1
+
+
+def _desentrecomillar(texto: str) -> str:
+    texto = texto.strip()
+    if texto.startswith('"') and texto.endswith('"'):
+        return texto[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return texto
+
+
 class _ServidorImapFalso:
     """A real TCP server speaking just enough IMAP4 to drive `ClienteImap`
     -- one connection, one thread, closed with the `with` block. Every
-    command line it receives is recorded in `comandos`, in order."""
+    command line it receives is recorded in `comandos`, in order. One
+    folder (`INBOX`) by default, from `mensajes`; pass `carpetas` instead
+    for a server with several, as `BUZON-FUENTE-IMAP-CARPETAS-1`'s own
+    tests do."""
 
     def __init__(
         self,
-        mensajes: list[_MensajeFalso],
+        mensajes: list[_MensajeFalso] | None = None,
         *,
         uidvalidity: int = 1000,
         uidnext: int | None = None,
         fallar_login: bool = False,
+        carpetas: list[_CarpetaFalsa] | None = None,
     ) -> None:
-        self.mensajes = {m.uid: m for m in mensajes}
-        self.uidvalidity = uidvalidity
-        self.uidnext = uidnext if uidnext is not None else (max(self.mensajes, default=0) + 1)
+        if carpetas is None:
+            carpetas = [
+                _CarpetaFalsa(
+                    nombre="INBOX",
+                    mensajes={m.uid: m for m in (mensajes or [])},
+                    uidvalidity=uidvalidity,
+                    uidnext=uidnext,
+                )
+            ]
+        self.carpetas = {c.nombre: c for c in carpetas}
+        self._carpeta_seleccionada: _CarpetaFalsa | None = None
         self.fallar_login = fallar_login
         self.comandos: list[str] = []
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -198,12 +238,23 @@ class _ServidorImapFalso:
                         enviar_texto(f"{tag} NO LOGIN failed")
                     else:
                         enviar_texto(f"{tag} OK LOGIN completed")
+                elif comando == "LIST":
+                    for carpeta in self.carpetas.values():
+                        banderas_str = " ".join(carpeta.banderas)
+                        enviar_texto(f'* LIST ({banderas_str}) "/" "{carpeta.nombre}"')
+                    enviar_texto(f"{tag} OK LIST completed")
                 elif comando in ("EXAMINE", "SELECT"):
-                    enviar_texto(f"* {len(self.mensajes)} EXISTS")
-                    enviar_texto(f"* OK [UIDVALIDITY {self.uidvalidity}] UIDs valid")
-                    enviar_texto(f"* OK [UIDNEXT {self.uidnext}] Predicted next UID")
-                    etiqueta = "READ-ONLY" if comando == "EXAMINE" else "READ-WRITE"
-                    enviar_texto(f"{tag} OK [{etiqueta}] {comando} completed")
+                    nombre_carpeta = _desentrecomillar(resto2)
+                    carpeta = self.carpetas.get(nombre_carpeta)
+                    if carpeta is None:
+                        enviar_texto(f"{tag} NO [NONEXISTENT] no such mailbox")
+                    else:
+                        self._carpeta_seleccionada = carpeta
+                        enviar_texto(f"* {len(carpeta.mensajes)} EXISTS")
+                        enviar_texto(f"* OK [UIDVALIDITY {carpeta.uidvalidity}] UIDs valid")
+                        enviar_texto(f"* OK [UIDNEXT {carpeta.uidnext}] Predicted next UID")
+                        etiqueta = "READ-ONLY" if comando == "EXAMINE" else "READ-WRITE"
+                        enviar_texto(f"{tag} OK [{etiqueta}] {comando} completed")
                 elif comando == "UID":
                     self._manejar_uid(tag, resto2, enviar_texto, enviar_bytes)
                 elif comando == "LOGOUT":
@@ -228,22 +279,25 @@ class _ServidorImapFalso:
         else:
             enviar_texto(f"{tag} BAD unknown UID command")
 
+    @property
+    def _mensajes_carpeta_actual(self) -> dict[int, _MensajeFalso]:
+        if self._carpeta_seleccionada is None:
+            return {}
+        return self._carpeta_seleccionada.mensajes
+
     def _buscar(self, criterio: str) -> list[int]:
+        mensajes = self._mensajes_carpeta_actual
         primero, _, resto = criterio.partition(" ")
         primero = primero.upper()
         if primero == "ALL":
-            return sorted(self.mensajes)
+            return sorted(mensajes)
         if primero == "SINCE":
             fecha = self._parsear_fecha(resto.strip())
-            return sorted(
-                uid
-                for uid, mensaje in self.mensajes.items()
-                if self._fecha_de(mensaje.internaldate) >= fecha
-            )
+            return sorted(uid for uid, mensaje in mensajes.items() if self._fecha_de(mensaje.internaldate) >= fecha)
         if primero == "UID":
             inicio_str = resto.split(":")[0]
             inicio = int(inicio_str)
-            return sorted(uid for uid in self.mensajes if uid >= inicio)
+            return sorted(uid for uid in mensajes if uid >= inicio)
         return []
 
     @staticmethod
@@ -256,7 +310,7 @@ class _ServidorImapFalso:
         return cls._parsear_fecha(internaldate.split(" ")[0])
 
     def _fetch(self, tag: str, uid: int, items: str, enviar_texto, enviar_bytes) -> None:
-        mensaje = self.mensajes.get(uid)
+        mensaje = self._mensajes_carpeta_actual.get(uid)
         if mensaje is None:
             enviar_texto(f"{tag} OK UID FETCH completed")
             return
@@ -396,7 +450,7 @@ def test_listar_mensajes_simple_sin_adjuntos() -> None:
     assert mensaje.tiene_adjuntos is False
     assert mensaje.recibido_en == datetime.datetime(2026, 3, 1, 10, 0, tzinfo=datetime.UTC)
     assert mensaje.internet_message_id == "<m1@mail.example>"
-    assert mensaje.cursor_proveedor == "1000:1"
+    assert json.loads(mensaje.cursor_proveedor) == {"INBOX": "1000:1"}
 
 
 def test_listar_mensajes_con_adjunto_marca_tiene_adjuntos() -> None:
@@ -519,7 +573,161 @@ def test_uidvalidity_distinta_cae_de_nuevo_a_since() -> None:
 
     assert {m.id for m in resultado} == {"1"}
     assert any("UID SEARCH SINCE" in c for c in servidor.comandos)
-    assert resultado[0].cursor_proveedor == "2000:1"
+    assert json.loads(resultado[0].cursor_proveedor) == {"INBOX": "2000:1"}
+
+
+# ---------------------------------------------------------------------------
+# Multiple folders (BUZON-FUENTE-IMAP-CARPETAS-1): discovery, SPECIAL-USE
+# and name-based exclusion, a per-folder cursor, and a per-folder
+# UIDVALIDITY change.
+# ---------------------------------------------------------------------------
+
+
+def test_carpeta_trash_excluida_por_special_use_nunca_se_examina() -> None:
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={1: _mensaje_simple(1, asunto="debe aparecer")})
+    trash = _CarpetaFalsa(
+        nombre="Trash",
+        banderas=("\\Trash",),
+        mensajes={1: _mensaje_simple(1, asunto="nunca debe aparecer")},
+    )
+    with _ServidorImapFalso(carpetas=[inbox, trash]) as servidor:
+        cliente = _cliente(servidor)
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"debe aparecer"}
+    comandos_examine = [c for c in servidor.comandos if "EXAMINE" in c]
+    assert any('"INBOX"' in c for c in comandos_examine)
+    assert not any('"Trash"' in c for c in comandos_examine)
+
+
+def test_carpeta_excluida_por_nombre_cuando_special_use_esta_ausente() -> None:
+    # No `\Spam`/`\Junk` flag at all -- the server never advertised
+    # SPECIAL-USE for this folder, so the name fallback applies.
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={1: _mensaje_simple(1, asunto="debe aparecer")})
+    spam = _CarpetaFalsa(nombre="Spam", mensajes={1: _mensaje_simple(1, asunto="nunca debe aparecer")})
+    with _ServidorImapFalso(carpetas=[inbox, spam]) as servidor:
+        cliente = _cliente(servidor)
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"debe aparecer"}
+    assert not any('"Spam"' in c for c in servidor.comandos if "EXAMINE" in c)
+
+
+def test_carpeta_con_otro_special_use_nunca_cae_al_nombre() -> None:
+    # Named exactly like a folder the name list would exclude, but the
+    # server marks it `\Archive` -- a DIFFERENT SPECIAL-USE attribute, so
+    # the server already answered "not Trash" and the name is never
+    # consulted.
+    archivo = _CarpetaFalsa(
+        nombre="Trash", banderas=("\\Archive",), mensajes={1: _mensaje_simple(1, asunto="debe aparecer")}
+    )
+    with _ServidorImapFalso(carpetas=[archivo]) as servidor:
+        cliente = _cliente(servidor)
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"debe aparecer"}
+    assert any('"Trash"' in c for c in servidor.comandos if "EXAMINE" in c)
+
+
+def test_carpeta_no_seleccionable_nunca_se_examina() -> None:
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={1: _mensaje_simple(1)})
+    contenedor = _CarpetaFalsa(nombre="[Gmail]", banderas=("\\Noselect",), mensajes={})
+    with _ServidorImapFalso(carpetas=[inbox, contenedor]) as servidor:
+        cliente = _cliente(servidor)
+        list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert not any('"[Gmail]"' in c for c in servidor.comandos)
+
+
+def test_tres_carpetas_con_trash_y_cambio_de_uidvalidity() -> None:
+    inbox = _CarpetaFalsa(
+        nombre="INBOX",
+        mensajes={1: _mensaje_simple(1, internaldate="01-Mar-2026 10:00:00 +0000")},
+        uidvalidity=1000,
+        uidnext=2,
+    )
+    facturas = _CarpetaFalsa(
+        nombre="Facturas",
+        mensajes={
+            5: _mensaje_simple(5, internaldate="02-Mar-2026 10:00:00 +0000", asunto="factura antigua"),
+            6: _mensaje_simple(6, internaldate="03-Mar-2026 10:00:00 +0000", asunto="factura nueva"),
+        },
+        # The server's own UIDVALIDITY for this folder today, DIFFERENT
+        # from the 1500 the stored cursor below remembers.
+        uidvalidity=2000,
+        uidnext=7,
+    )
+    trash = _CarpetaFalsa(
+        nombre="Trash",
+        banderas=("\\Trash",),
+        mensajes={1: _mensaje_simple(1, internaldate="01-Mar-2026 10:00:00 +0000", asunto="nunca debe aparecer")},
+        uidvalidity=1,
+        uidnext=2,
+    )
+    cursor_inicial = json.dumps({"INBOX": "1000:1", "Facturas": "1500:3"})
+
+    with _ServidorImapFalso(carpetas=[inbox, facturas, trash]) as servidor:
+        cliente = _cliente(servidor, cursor_proveedor_inicial=cursor_inicial)
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    # INBOX's cursor is already at UIDNEXT -- nothing new, no search
+    # issued for it at all. Facturas' UIDVALIDITY changed (1500 -> 2000)
+    # -- it restarts from the date cursor and returns BOTH its messages,
+    # not just the one past UID 3. Trash is never examined.
+    assert {m.id for m in resultado} == {"5", "6"}
+    assert all(m.asunto != "nunca debe aparecer" for m in resultado)
+    comandos_examine = [c for c in servidor.comandos if "EXAMINE" in c]
+    assert any('"INBOX"' in c for c in comandos_examine)
+    assert any('"Facturas"' in c for c in comandos_examine)
+    assert not any('"Trash"' in c for c in comandos_examine)
+    assert not any("UID SEARCH UID" in c for c in servidor.comandos)  # Facturas never resumed by UID
+
+    cursor_final = json.loads(resultado[-1].cursor_proveedor)
+    assert cursor_final == {"INBOX": "1000:1", "Facturas": "2000:6"}
+    assert "Trash" not in cursor_final
+
+
+def test_cursor_proveedor_formato_antiguo_se_lee_como_inbox() -> None:
+    # A source that synced under BUZON-FUENTE-IMAP-1, before this slice,
+    # persisted the bare "<uidvalidity>:<uid>" pair -- read as INBOX's own
+    # cursor, since INBOX was the only folder that format could ever have
+    # come from.
+    inbox = _CarpetaFalsa(
+        nombre="INBOX", mensajes={1: _mensaje_simple(1)}, uidvalidity=1000, uidnext=2
+    )
+    with _ServidorImapFalso(carpetas=[inbox]) as servidor:
+        cliente = _cliente(servidor, cursor_proveedor_inicial="1000:1")
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert resultado == []
+    assert not any("UID SEARCH" in c for c in servidor.comandos)
+
+
+def test_dos_carpetas_mismo_uid_no_colisionan_en_internet_message_id() -> None:
+    # Two different folders can each have their own UID 1 under the same
+    # UIDVALIDITY -- the Message-Id fallback must stay unique across them.
+    def _sin_message_id(uid: int) -> _MensajeFalso:
+        return _MensajeFalso(
+            uid=uid,
+            internaldate="01-Mar-2026 10:00:00 +0000",
+            headers=b"From: a@b.com\r\nSubject: factura\r\n\r\n",
+            partes=[_ParteFalsa("TEXT", "PLAIN", b"cuerpo")],
+        )
+
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={1: _sin_message_id(1)}, uidvalidity=1000)
+    facturas = _CarpetaFalsa(nombre="Facturas", mensajes={1: _sin_message_id(1)}, uidvalidity=1000)
+    with _ServidorImapFalso(carpetas=[inbox, facturas]) as servidor:
+        cliente = _cliente(servidor)
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert len({m.internet_message_id for m in resultado}) == 2
 
 
 # ---------------------------------------------------------------------------
