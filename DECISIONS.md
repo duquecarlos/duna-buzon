@@ -555,6 +555,16 @@ new wire field" as the build instructions required. Source ids are short, hand-c
 the three capped fields already carry. Flagged as an open unknown for Main or Carlos to confirm against
 the live Finanzas schema before `legal@duna.solutions` or Gmail actually ship mail through this wire.
 
+**CORRECTED by `BUZON-FUENTE-WIRE-CORREO-1` (2026-11-11): the open unknown above resolved the wrong
+way.** Finanzas' `fuente` IS a Finanzas-side enum, not a plain string field --
+`src/duna_finanzas/web/buzon/schemas.py:37`'s `Fuente = Literal["correo", "sms", "notificacion"]`, and
+`storage/schema.py` carries a CHECK constraint `fuente_conocida` on `String(16)` besides. Every entry
+this slice's `"<proveedor>:<id>"` built would have answered `422` on the next connector deploy against
+a real Finanzas, including Carlos's own live Hotmail. `fuente` went back to the one constant `"correo"`
+for every source; `FuenteConfig`'s computed identity (renamed `etiqueta_registro`) stays local to this
+connector's own logs and status output, never the wire. See the `BUZON-FUENTE-WIRE-CORREO-1` entry
+below for the fix and the contract test that now pins this down.
+
 ### Migration, automatic and idempotent
 
 `fuentes.migrar_fuente_unica_si_necesario(directorio_datos, clave_cifrado)` runs at the top of every

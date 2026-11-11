@@ -54,10 +54,13 @@ class FuenteConfig:
     port: int | None = None
 
     @property
-    def etiqueta_wire(self) -> str:
-        """The exact value this source's entries carry in buzon-v1's own
-        `fuente` field -- `"<proveedor>:<id>"`, never the mailbox address
-        itself."""
+    def etiqueta_registro(self) -> str:
+        """`"<proveedor>:<id>"` -- this source's own identity for LOGS and
+        status output only (`fuentes`, `estado`, a future per-source log
+        line). Never sent to Finanzas: buzon-v1's wire `fuente` field is the
+        CHANNEL, always `"correo"` for every mail source, never this value
+        (`BUZON-FUENTE-WIRE-CORREO-1`, correcting `BUZON-FUENTES-ESQUEMA-1`,
+        which sent this as the wire `fuente` and got it wrong)."""
         return f"{self.proveedor}:{self.id}"
 
 

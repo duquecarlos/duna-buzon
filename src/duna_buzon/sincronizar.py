@@ -13,7 +13,7 @@ from duna_buzon.adjuntos import AdjuntoCandidato, empacar
 from duna_buzon.cursor import SOLAPE
 from duna_buzon.finanzas import FinanzasClient, MetaEntrada, ResultadoEnvio
 from duna_buzon.graph import AdjuntoMetadata, MensajeResumen
-from duna_buzon.limites import excede_limites_no_truncables, truncar_asunto
+from duna_buzon.limites import FUENTE_CORREO, excede_limites_no_truncables, truncar_asunto
 from duna_buzon.proveedor import Proveedor
 from duna_buzon.proveedor_errores import ProveedorAutenticacionError, ProveedorErrorTransitorio
 from duna_buzon.reglas import MensajeCandidato, Reglas, coincide
@@ -74,7 +74,6 @@ def ejecutar_pasada(
     cliente_finanzas: FinanzasClient,
     reglas: Reglas,
     cursor_inicial: datetime.datetime,
-    etiqueta_fuente: str,
     cursor_proveedor_inicial: str | None = None,
 ) -> ResultadoPasada:
     contadores = Contadores()
@@ -120,7 +119,7 @@ def ejecutar_pasada(
             asunto = truncar_asunto(mensaje.asunto) if mensaje.asunto is not None else None
 
             meta = MetaEntrada(
-                fuente=etiqueta_fuente,
+                fuente=FUENTE_CORREO,
                 id_externo=mensaje.internet_message_id,
                 remitente=mensaje.remitente,
                 asunto=asunto,

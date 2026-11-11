@@ -137,7 +137,6 @@ def test_mensaje_que_coincide_se_reenvia_y_avanza_el_cursor(tmp_path) -> None:
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.vistos == 1
@@ -181,7 +180,6 @@ def test_mensaje_sin_coincidencia_se_omite_sin_leer_cuerpo_ni_adjuntos(tmp_path)
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.vistos == 1
@@ -205,7 +203,6 @@ def test_401_de_finanzas_detiene_la_pasada_y_no_persiste_cursor(tmp_path) -> Non
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.detenida_por_autenticacion
@@ -227,7 +224,6 @@ def test_503_de_finanzas_detiene_la_pasada_y_no_persiste_cursor(tmp_path) -> Non
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.detenida_por_error_transitorio
@@ -249,7 +245,6 @@ def test_conexion_rota_con_finanzas_detiene_la_pasada_con_la_clase_de_excepcion(
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.detenida_por_error_transitorio
@@ -274,7 +269,6 @@ def test_4xx_no_transitorio_de_finanzas_detiene_la_pasada_como_rechazo_permanent
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.detenida_por_rechazo_permanente
@@ -295,7 +289,6 @@ def test_graph_401_detiene_la_pasada(tmp_path) -> None:
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.detenida_por_autenticacion
@@ -332,7 +325,6 @@ def test_graph_error_transitorio_nombra_el_paso_de_adjuntos(tmp_path) -> None:
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.detenida_por_error_transitorio
@@ -353,7 +345,6 @@ def test_413_o_422_se_omiten_como_defecto_permanente_y_el_cursor_avanza(tmp_path
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.omitidos_por_413_422 == 1
@@ -375,7 +366,6 @@ def test_reenvio_duplicado_por_el_solape_se_cuenta_como_duplicado(tmp_path) -> N
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.duplicados == 1
@@ -407,7 +397,6 @@ def test_regla_c_con_adjunto_zip_se_reenvia_con_el_adjunto(tmp_path) -> None:
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.reenviados == 1
@@ -432,7 +421,6 @@ def test_id_externo_en_el_tope_se_reenvia_normalmente(tmp_path) -> None:
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.reenviados == 1
@@ -456,7 +444,6 @@ def test_id_externo_sobre_el_tope_se_omite_antes_de_publicar(tmp_path) -> None:
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.reenviados == 0
@@ -487,7 +474,6 @@ def test_remitente_en_el_tope_se_reenvia_normalmente(tmp_path) -> None:
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas_dominio_grande(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.reenviados == 1
@@ -512,7 +498,6 @@ def test_remitente_sobre_el_tope_se_omite_antes_de_publicar(tmp_path) -> None:
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas_dominio_grande(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.reenviados == 0
@@ -541,13 +526,15 @@ def test_asunto_en_el_tope_se_envia_sin_truncar(tmp_path) -> None:
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.reenviados == 1
     meta_enviada = _meta_json_desde_multipart(capturado["cuerpo"])
     assert meta_enviada["asunto"] == asunto
     assert len(meta_enviada["asunto"]) == LIMITE_ASUNTO
+    # The wire `fuente` is always "correo" -- the channel, never this
+    # source's own identity (BUZON-FUENTE-WIRE-CORREO-1).
+    assert meta_enviada["fuente"] == "correo"
 
 
 def test_asunto_sobre_el_tope_se_trunca_y_se_reenvia(tmp_path) -> None:
@@ -570,7 +557,6 @@ def test_asunto_sobre_el_tope_se_trunca_y_se_reenvia(tmp_path) -> None:
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.reenviados == 1
@@ -604,7 +590,6 @@ def test_asunto_multibyte_sobre_el_tope_se_trunca_sin_romper_caracteres(tmp_path
         cliente_finanzas=cliente_finanzas,
         reglas=_reglas(),
         cursor_inicial=_CURSOR_INICIAL,
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
 
     assert resultado.contadores.reenviados == 1

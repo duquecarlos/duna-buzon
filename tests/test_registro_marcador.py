@@ -105,7 +105,6 @@ def test_el_marcador_no_aparece_en_stdout_ni_en_los_logs(tmp_path, caplog, capsy
         cliente_finanzas=cliente_finanzas,
         reglas=reglas,
         cursor_inicial=datetime.datetime(2026, 2, 1, tzinfo=datetime.UTC),
-        etiqueta_fuente="microsoft:hotmail-carlos",
     )
     assert resultado.contadores.reenviados == 1  # rule (c): a ZIP attachment, on its own
 

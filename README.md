@@ -29,9 +29,13 @@ fuentes/<id>/estado.json           -- this source's own last-pass summary line
 `host`/`port` are only set for `proveedor == "imap"` (`None` for Microsoft).
 
 `proveedor` is `"microsoft"` (Microsoft Graph, read-only, device-code sign-in) or `"imap"` (a generic read-only IMAP
-mailbox over SSL, app-password sign-in -- first used for `legal@duna.solutions` on Zoho). Every entry a source
-posts to Finanzas carries its own identity in the existing wire field `fuente`, as `"<proveedor>:<id>"` (e.g.
-`"microsoft:hotmail-carlos"`, `"imap:legal-duna"`) -- never a new wire field.
+mailbox over SSL, app-password sign-in -- first used for `legal@duna.solutions` on Zoho). Every entry every source
+posts to Finanzas carries the wire's `fuente` field as the one constant value `"correo"` -- it is the CHANNEL, not
+a source's own identity, and Finanzas rejects anything else (`Literal["correo", "sms", "notificacion"]`,
+`src/duna_finanzas/web/buzon/schemas.py:37`). A source's own identity (`"<proveedor>:<id>"`,
+`FuenteConfig.etiqueta_registro`) stays local to this connector's own logs and status output
+(`BUZON-FUENTE-WIRE-CORREO-1`, correcting `BUZON-FUENTES-ESQUEMA-1`, which briefly sent it over the wire and would
+have had every entry rejected with a `422`).
 
 The commands:
 
