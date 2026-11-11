@@ -5,8 +5,8 @@ and posts the financial items it finds to Duna Finanzas' inbox (buzon-v1, `POST 
 Runs on duna-prod-1 as `duna`. Nothing is exposed to the internet.
 
 Created by Main (dev-protocol) on 2026-11-06, ORCH-BUZON-REPO-1. Built end to end by BUZON-CONECTOR-1; made
-multi-source by BUZON-FUENTES-ESQUEMA-1 -- see `CLAUDE.md` for the gate and the invariants, `DECISIONS.md` for the
-ledger, and `deploy/host/README.md` for the operator steps.
+multi-source by BUZON-FUENTES-ESQUEMA-1; gained a generic IMAP provider by BUZON-FUENTE-IMAP-1 -- see `CLAUDE.md`
+for the gate and the invariants, `DECISIONS.md` for the ledger, and `deploy/host/README.md` for the operator steps.
 
 ## Shape
 
@@ -16,21 +16,33 @@ Every mailbox this connector reads is a SOURCE, independent of every other: its 
 cursor, its own matching rules, under `$BUZON_DATOS/fuentes/<id>/`:
 
 ```
-fuentes/<id>/fuente.json      -- {id, proveedor, direccion, etiqueta, token_finanzas_ref, activa}
-fuentes/<id>/credencial.bin   -- the signed-in account's token cache, AES-256-GCM encrypted
-fuentes/<id>/cursor.json      -- this source's own sync cursor
-fuentes/<id>/reglas.json      -- this source's own matching rules (never committed; see `reglas.py`)
-fuentes/<id>/estado.json      -- this source's own last-pass summary line
+fuentes/<id>/fuente.json           -- {id, proveedor, direccion, etiqueta, token_finanzas_ref, activa, host, port}
+fuentes/<id>/credencial.bin        -- the signed-in account's own credential, AES-256-GCM encrypted (an MSAL token
+                                       cache for "microsoft"; the app password itself for "imap")
+fuentes/<id>/cursor.json           -- this source's own sync cursor (a timestamp)
+fuentes/<id>/cursor_proveedor.json -- this source's own provider-defined resume token, if it has one (IMAP's
+                                       "<uidvalidity>:<uid>"; absent for Microsoft)
+fuentes/<id>/reglas.json           -- this source's own matching rules (never committed; see `reglas.py`)
+fuentes/<id>/estado.json           -- this source's own last-pass summary line
 ```
 
-`proveedor` is `"microsoft"` (Microsoft Graph, read-only, device-code sign-in) today; `"imap"` is the next slice.
-Every entry a source posts to Finanzas carries its own identity in the existing wire field `fuente`, as
-`"<proveedor>:<id>"` (e.g. `"microsoft:hotmail-carlos"`) -- never a new wire field.
+`host`/`port` are only set for `proveedor == "imap"` (`None` for Microsoft).
+
+`proveedor` is `"microsoft"` (Microsoft Graph, read-only, device-code sign-in) or `"imap"` (a generic read-only IMAP
+mailbox over SSL, app-password sign-in -- first used for `legal@duna.solutions` on Zoho). Every entry a source
+posts to Finanzas carries its own identity in the existing wire field `fuente`, as `"<proveedor>:<id>"` (e.g.
+`"microsoft:hotmail-carlos"`, `"imap:legal-duna"`) -- never a new wire field.
 
 The commands:
 
-- `entrar [--fuente <id>]` -- signs in to ONE Microsoft source, by device code, in Carlos's own browser. No password
-  ever passes through this program. `--fuente` can be omitted while exactly one source is configured.
+- `agregar-fuente imap --id <id> --direccion <direccion> --host <host> --token-finanzas <ref> [--port <puerto>]
+  [--etiqueta <etiqueta>]` -- writes a new IMAP source's `fuente.json` (`--port` defaults to 993). Never signs in --
+  `entrar --fuente <id>` is the separate next step.
+- `entrar [--fuente <id>]` -- signs in to ONE source. For a Microsoft source, by device code, in Carlos's own
+  browser -- no password ever passes through this program. For an IMAP source, by reading its app password from
+  STDIN with no echo (`getpass`, never a command-line argument) and verifying it with a real `LOGIN` before ever
+  storing it, encrypted, in that source's own `credencial.bin`. `--fuente` can be omitted while exactly one source
+  is configured.
 - `sincronizar` -- one pass over every ACTIVE source, independently: pulls new mail, decides which messages match
   that source's own rules, builds and POSTs the matches to Finanzas, advances that source's own cursor past
   whatever finished. One source failing (expired auth, a network error) logs its id and stop reason and does not

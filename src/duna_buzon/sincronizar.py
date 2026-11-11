@@ -12,9 +12,10 @@ from dataclasses import dataclass, field
 from duna_buzon.adjuntos import AdjuntoCandidato, empacar
 from duna_buzon.cursor import SOLAPE
 from duna_buzon.finanzas import FinanzasClient, MetaEntrada, ResultadoEnvio
-from duna_buzon.graph import AdjuntoMetadata, GraphAutenticacionError, GraphErrorTransitorio
+from duna_buzon.graph import AdjuntoMetadata, MensajeResumen
 from duna_buzon.limites import excede_limites_no_truncables, truncar_asunto
 from duna_buzon.proveedor import Proveedor
+from duna_buzon.proveedor_errores import ProveedorAutenticacionError, ProveedorErrorTransitorio
 from duna_buzon.reglas import MensajeCandidato, Reglas, coincide
 from duna_buzon.texto import html_a_texto
 
@@ -46,6 +47,9 @@ class Contadores:
 class ResultadoPasada:
     contadores: Contadores = field(default_factory=Contadores)
     cursor_final: datetime.datetime | None = None
+    # The provider's own opaque resume token, carried the same way
+    # `cursor_final` is -- see `graph.MensajeResumen.cursor_proveedor`.
+    cursor_proveedor_final: str | None = None
     detenida_por_autenticacion: bool = False
     detenida_por_error_transitorio: bool = False
     detenida_por_rechazo_permanente: bool = False
@@ -71,10 +75,18 @@ def ejecutar_pasada(
     reglas: Reglas,
     cursor_inicial: datetime.datetime,
     etiqueta_fuente: str,
+    cursor_proveedor_inicial: str | None = None,
 ) -> ResultadoPasada:
     contadores = Contadores()
     cursor_final = cursor_inicial
+    cursor_proveedor_final = cursor_proveedor_inicial
     desde_con_solape = cursor_inicial - SOLAPE
+
+    def _avanzar(mensaje: MensajeResumen) -> None:
+        nonlocal cursor_final, cursor_proveedor_final
+        cursor_final = max(cursor_final, mensaje.recibido_en)
+        if mensaje.cursor_proveedor is not None:
+            cursor_proveedor_final = mensaje.cursor_proveedor
 
     try:
         for mensaje in proveedor.listar_mensajes(desde_con_solape):
@@ -92,14 +104,14 @@ def ejecutar_pasada(
             )
             if not coincide(candidato, reglas):
                 contadores.omitidos_por_reglas += 1
-                cursor_final = max(cursor_final, mensaje.recibido_en)
+                _avanzar(mensaje)
                 continue
 
             if excede_limites_no_truncables(
                 id_externo=mensaje.internet_message_id, remitente=mensaje.remitente
             ):
                 contadores.omitidos_por_413_422 += 1
-                cursor_final = max(cursor_final, mensaje.recibido_en)
+                _avanzar(mensaje)
                 continue
 
             completo = proveedor.obtener_mensaje_completo(mensaje.id, metadatos_adjuntos)
@@ -125,17 +137,18 @@ def ejecutar_pasada(
 
             if resultado.estado == "forwarded":
                 contadores.reenviados += 1
-                cursor_final = max(cursor_final, mensaje.recibido_en)
+                _avanzar(mensaje)
             elif resultado.estado == "duplicated":
                 contadores.duplicados += 1
-                cursor_final = max(cursor_final, mensaje.recibido_en)
+                _avanzar(mensaje)
             elif resultado.estado == "rejected":
                 contadores.omitidos_por_413_422 += 1
-                cursor_final = max(cursor_final, mensaje.recibido_en)
+                _avanzar(mensaje)
             elif resultado.estado == "unauthorized":
                 return ResultadoPasada(
                     contadores=contadores,
                     cursor_final=cursor_final,
+                    cursor_proveedor_final=cursor_proveedor_final,
                     detenida_por_autenticacion=True,
                     motivo=_motivo_finanzas(resultado),
                 )
@@ -143,6 +156,7 @@ def ejecutar_pasada(
                 return ResultadoPasada(
                     contadores=contadores,
                     cursor_final=cursor_final,
+                    cursor_proveedor_final=cursor_proveedor_final,
                     detenida_por_rechazo_permanente=True,
                     motivo=_motivo_finanzas(resultado),
                 )
@@ -150,22 +164,27 @@ def ejecutar_pasada(
                 return ResultadoPasada(
                     contadores=contadores,
                     cursor_final=cursor_final,
+                    cursor_proveedor_final=cursor_proveedor_final,
                     detenida_por_error_transitorio=True,
                     motivo=_motivo_finanzas(resultado),
                 )
-    except GraphAutenticacionError as exc:
+    except ProveedorAutenticacionError as exc:
         return ResultadoPasada(
             contadores=contadores,
             cursor_final=cursor_final,
+            cursor_proveedor_final=cursor_proveedor_final,
             detenida_por_autenticacion=True,
-            motivo=exc.motivo,
+            motivo=str(exc),
         )
-    except GraphErrorTransitorio as exc:
+    except ProveedorErrorTransitorio as exc:
         return ResultadoPasada(
             contadores=contadores,
             cursor_final=cursor_final,
+            cursor_proveedor_final=cursor_proveedor_final,
             detenida_por_error_transitorio=True,
-            motivo=exc.motivo,
+            motivo=str(exc),
         )
 
-    return ResultadoPasada(contadores=contadores, cursor_final=cursor_final)
+    return ResultadoPasada(
+        contadores=contadores, cursor_final=cursor_final, cursor_proveedor_final=cursor_proveedor_final
+    )

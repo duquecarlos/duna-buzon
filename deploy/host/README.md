@@ -77,11 +77,11 @@ interactively and prints Microsoft's own device-code URL to that terminal.
 
 ## No backup subcommand
 
-`/srv/duna/data/buzon/` holds only `fuentes/<id>/credencial.bin` (the encrypted MSAL token cache, one
-per source), `cursor.json`, and `estado.json` -- all re-creatable: `entrar --fuente <id>` rebuilds a
-source's own cache, and an empty or stale `cursor.json` only costs a few minutes of re-read overlap,
-which Finanzas' own idempotency on `id_externo` absorbs for free. There is nothing here worth a
-dedicated backup path.
+`/srv/duna/data/buzon/` holds only `fuentes/<id>/credencial.bin` (the encrypted MSAL token cache or
+IMAP app password, one per source), `cursor.json`, `cursor_proveedor.json`, and `estado.json` -- all
+re-creatable: `entrar --fuente <id>` rebuilds a source's own credential, and an empty or stale
+`cursor.json`/`cursor_proveedor.json` only costs a few minutes of re-read overlap, which Finanzas' own
+idempotency on `id_externo` absorbs for free. There is nothing here worth a dedicated backup path.
 
 ## Multi-source migration (BUZON-FUENTES-ESQUEMA-1)
 
@@ -94,6 +94,41 @@ none is skipped. This needs nothing from the operator: the next scheduled `sincr
 own health check, which runs `estado`) does it on its own, once, and is a no-op on every run after
 that. `entrar` with no `--fuente` keeps working unchanged as long as exactly one source is configured,
 which is the state migration leaves a single-mailbox install in.
+
+## Adding an IMAP source (BUZON-FUENTE-IMAP-1) -- e.g. `legal@duna.solutions` on Zoho
+
+1. Create a Zoho app password for `legal@duna.solutions`: sign in to Zoho Mail as that account, go to
+   **Settings -> Security -> App passwords**, and make sure **IMAP access** is enabled for the account
+   first (**Settings -> Mail Accounts -> IMAP Access**) -- Zoho's own app passwords only work once IMAP
+   is turned on. Generate the app password and keep it somewhere Carlos can paste from in step 3; it is
+   never typed anywhere in a terminal history or a file in this repository.
+2. On the host, as `duna`:
+
+   ```
+   uv run python -m duna_buzon agregar-fuente imap --id legal-duna --direccion legal@duna.solutions \
+       --host imap.zoho.com --token-finanzas carlos
+   ```
+
+   This writes `fuentes/legal-duna/fuente.json` (port defaults to 993, IMAP-over-SSL) and does NOT sign
+   in yet.
+3. Still as `duna`, in Carlos's own terminal (never through an automated, no-tty session, exactly like
+   `entrar` for a Microsoft source):
+
+   ```
+   uv run python -m duna_buzon entrar --fuente legal-duna
+   ```
+
+   This prompts for the app password with no echo (`getpass`), verifies it with a real IMAP `LOGIN`
+   against `imap.zoho.com:993`, and only then encrypts and stores it in
+   `fuentes/legal-duna/credencial.bin`. A wrong app password is reported and nothing is stored.
+4. Confirm with `uv run python -m duna_buzon fuentes` (lists `legal-duna proveedor=imap ...
+   estado=activa`) and `uv run python -m duna_buzon estado` (reports its cursor once a pass has run).
+   The next scheduled `sincronizar` picks it up automatically -- `duna-buzon.timer` already covers every
+   active source, not just the Microsoft one.
+
+This mailbox is read ONLY: `EXAMINE`, never `SELECT`; `BODY.PEEK[...]`, never `BODY[...]`; no
+flag/move/delete command is ever sent (`src/duna_buzon/cliente_imap.py`; proven from the outside by
+`tests/test_cliente_imap.py` against a fake IMAP server).
 
 ## Trust boundary
 

@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-from duna_buzon import auth, cripto
+from duna_buzon import auth, credencial_imap, cripto
 from duna_buzon import cursor as modulo_cursor
 from duna_buzon import fuentes as modulo_fuentes
 from duna_buzon import registro
@@ -46,16 +46,21 @@ def comando_entrar(config: Config, id_fuente: str | None) -> int:
             print(f"error: no such source: {id_fuente}", file=sys.stderr)
             return 1
 
-    if fuente.proveedor != "microsoft":
-        print(
-            f"error: fuente {fuente.id!r} uses provider {fuente.proveedor!r}, "
-            "which 'entrar' does not support yet",
-            file=sys.stderr,
-        )
-        return 1
-
     directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
-    auth.entrar(config, directorio)
+
+    if fuente.proveedor == "microsoft":
+        auth.entrar(config, directorio)
+        return 0
+
+    assert fuente.proveedor == "imap"
+    assert fuente.host is not None and fuente.port is not None
+    try:
+        credencial_imap.entrar(
+            config, directorio, host=fuente.host, puerto=fuente.port, usuario=fuente.direccion
+        )
+    except credencial_imap.VerificacionLoginError as exc:
+        print(f"error: imap login failed: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -78,8 +83,12 @@ def _ejecutar_una_fuente(
         return linea, motivo
 
     try:
-        token = auth.obtener_token(config, directorio)
-    except (auth.SinCuentaError, cripto.ClaveInvalidaError) as exc:
+        if fuente.proveedor == "microsoft":
+            token = auth.obtener_token(config, directorio)
+        else:
+            assert fuente.proveedor == "imap"
+            token = credencial_imap.obtener_credencial(config, directorio)
+    except (auth.SinCuentaError, credencial_imap.SinCredencialError, cripto.ClaveInvalidaError) as exc:
         return _detenida(f"auth error={exc}")
 
     ruta_reglas = Path(directorio) / NOMBRE_ARCHIVO_REGLAS
@@ -89,8 +98,9 @@ def _ejecutar_una_fuente(
         return _detenida(f"reglas error={exc}")
 
     cursor_inicial = modulo_cursor.cargar_cursor(directorio, valor_inicial=reglas.desde)
+    cursor_proveedor_inicial = modulo_cursor.cargar_cursor_proveedor(directorio)
 
-    proveedor = construir_proveedor(fuente, token)
+    proveedor = construir_proveedor(fuente, token, cursor_proveedor_inicial=cursor_proveedor_inicial)
     try:
         resultado = ejecutar_pasada(
             proveedor=proveedor,
@@ -98,12 +108,15 @@ def _ejecutar_una_fuente(
             reglas=reglas,
             cursor_inicial=cursor_inicial,
             etiqueta_fuente=fuente.etiqueta_wire,
+            cursor_proveedor_inicial=cursor_proveedor_inicial,
         )
     finally:
         proveedor.cerrar()
 
     if resultado.debe_persistir_cursor and resultado.cursor_final is not None:
         modulo_cursor.guardar_cursor(directorio, resultado.cursor_final)
+    if resultado.debe_persistir_cursor and resultado.cursor_proveedor_final is not None:
+        modulo_cursor.guardar_cursor_proveedor(directorio, resultado.cursor_proveedor_final)
 
     linea = registro.linea_resumen(resultado.contadores, resultado.motivo)
     cripto.asegurar_directorio_datos(Path(directorio))
@@ -180,4 +193,45 @@ def comando_fuentes(config: Config) -> int:
             f"{fuente.id} proveedor={fuente.proveedor} direccion={fuente.direccion} "
             f"etiqueta={fuente.etiqueta} estado={estado_txt}"
         )
+    return 0
+
+
+def comando_agregar_fuente(
+    config: Config,
+    *,
+    proveedor: str,
+    id_fuente: str,
+    direccion: str,
+    host: str,
+    puerto: int,
+    token_finanzas: str,
+    etiqueta: str | None,
+) -> int:
+    """Writes a new `fuente.json` -- never signs in. `entrar --fuente
+    <id>` is the next, separate step (build instructions for
+    `BUZON-FUENTE-IMAP-1`)."""
+    if proveedor != "imap":
+        print(f"error: agregar-fuente does not support provider {proveedor!r} yet", file=sys.stderr)
+        return 1
+
+    _migrar_si_necesario(config)
+    existentes = modulo_fuentes.listar_fuentes(config.directorio_datos)
+    if any(f.id == id_fuente for f in existentes):
+        print(f"error: a source named {id_fuente!r} already exists", file=sys.stderr)
+        return 1
+
+    modulo_fuentes.guardar_fuente(
+        config.directorio_datos,
+        FuenteConfig(
+            id=id_fuente,
+            proveedor="imap",
+            direccion=direccion,
+            etiqueta=etiqueta or direccion,
+            token_finanzas_ref=token_finanzas,
+            activa=True,
+            host=host,
+            port=puerto,
+        ),
+    )
+    print(f"fuente {id_fuente!r} agregada: ejecute 'entrar --fuente {id_fuente}' para firmar.")
     return 0

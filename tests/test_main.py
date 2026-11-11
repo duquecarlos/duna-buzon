@@ -99,3 +99,120 @@ def test_entrar_con_fuente_mal_formado_es_uso_incorrecto(capsys: pytest.CaptureF
 def test_sincronizar_con_argumento_extra_es_uso_incorrecto(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["sincronizar", "algo-mas"]) == 2
     assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_agregar_fuente_imap_se_despacha_con_los_campos_requeridos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[dict] = []
+
+    def comando_falso(config: Config, **kwargs: object) -> int:
+        recibido.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "comando_agregar_fuente", comando_falso)
+    assert (
+        main(
+            [
+                "agregar-fuente",
+                "imap",
+                "--id",
+                "legal-duna",
+                "--direccion",
+                "legal@duna.solutions",
+                "--host",
+                "imap.zoho.com",
+                "--token-finanzas",
+                "carlos",
+            ]
+        )
+        == 0
+    )
+    assert recibido[0] == {
+        "proveedor": "imap",
+        "id_fuente": "legal-duna",
+        "direccion": "legal@duna.solutions",
+        "host": "imap.zoho.com",
+        "puerto": 993,
+        "token_finanzas": "carlos",
+        "etiqueta": None,
+    }
+
+
+def test_agregar_fuente_imap_acepta_puerto_y_etiqueta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[dict] = []
+    monkeypatch.setattr(
+        cli, "comando_agregar_fuente", lambda config, **kwargs: (recibido.append(kwargs), 0)[1]
+    )
+    assert (
+        main(
+            [
+                "agregar-fuente",
+                "imap",
+                "--id",
+                "legal-duna",
+                "--direccion",
+                "legal@duna.solutions",
+                "--host",
+                "imap.zoho.com",
+                "--token-finanzas",
+                "carlos",
+                "--port",
+                "143",
+                "--etiqueta",
+                "Legal",
+            ]
+        )
+        == 0
+    )
+    assert recibido[0]["puerto"] == 143
+    assert recibido[0]["etiqueta"] == "Legal"
+
+
+def test_agregar_fuente_sin_campo_requerido_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["agregar-fuente", "imap", "--id", "legal-duna"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_agregar_fuente_sin_proveedor_es_uso_incorrecto(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["agregar-fuente"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_agregar_fuente_puerto_no_numerico_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        main(
+            [
+                "agregar-fuente",
+                "imap",
+                "--id",
+                "legal-duna",
+                "--direccion",
+                "legal@duna.solutions",
+                "--host",
+                "imap.zoho.com",
+                "--token-finanzas",
+                "carlos",
+                "--port",
+                "no-es-un-numero",
+            ]
+        )
+        == 2
+    )
+    assert "port" in capsys.readouterr().err.lower()
