@@ -905,3 +905,129 @@ was ever touched.
 **FIN-API-BUZON-ORIGEN-OBS-1** -- Finanzas' own follow-up, not this repository's: an optional `origen`
 field on buzon-v1, for a source's own identity, if and when Finanzas decides it needs one. Not started
 here; this connector will add it only once that field exists on the receiving end.
+
+---
+
+## BUZON-FUENTE-IMAP-CARPETAS-1 -- the IMAP source reads every folder, not only `INBOX` (2026-11-11)
+
+### Why
+
+`BUZON-FUENTE-IMAP-1`'s own open follow-up (above): `ClienteImap` only ever examined `INBOX`, while the
+Microsoft source (`graph.py`'s `/me/messages`) already reaches every folder, since Carlos's own inbox
+rules move mail out before this connector ever sees it. `legal@duna.solutions` has the same shape of
+risk -- Zoho rules can file invoices and contracts into a folder -- so an IMAP source that only read
+`INBOX` would miss exactly the mail this connector exists to forward. Decided by Main
+(`ORCH-CARLOS-DELEGATES-TIER-1-1`): read every selectable folder except Trash/Junk/Sent/Drafts/All, by
+SPECIAL-USE where the server advertises it, by name otherwise.
+
+### The spec's premise did not hold, and what this slice did instead
+
+The build instructions asked for the IMAP exclusion's name fallback to be "the same folders by the names
+the Microsoft source already excludes (cite them)". There is no such list to cite: `graph.py`'s own
+docstring says `/me/messages` "reaches every folder in the mailbox" -- no exclusion, by name or
+otherwise -- and `BUZON-FUENTE-IMAP-1`'s own follow-up entry (above) says the same thing in these words:
+"Graph's own `listar_mensajes` deliberately reaches every folder". Grepping this repository for every
+spelling of Trash/Junk/Sent/Drafts in English and Spanish, across `src/`, `tests/` and `DECISIONS.md`,
+turned up nothing but this slice's own new code. The measurement won over the prompt's assumption: this
+slice built `_NOMBRES_EXCLUIDOS` (`cliente_imap.py`) as this provider's OWN name fallback, not a mirror of
+anything Microsoft does, drawn from the default English folder names Zoho (`legal@duna.solutions`'s own
+provider), Gmail and Outlook/Exchange actually use for Trash/Junk/Sent/Drafts/All-Mail. `graph.py` itself
+is untouched by this slice -- there was nothing to extract from it.
+
+### The fix
+
+`cliente_imap.py`:
+
+- `ConexionImapProtocolo` gained `list()`, matching `imaplib.IMAP4`'s own method.
+- `ClienteImap._carpetas_a_examinar` calls `LIST` once per pass, parses each untagged response line
+  (flags, delimiter, name -- reusing the same parenthesized-list/string/atom grammar `BODYSTRUCTURE`
+  already needed, via `_parsear_linea_list`), and keeps a folder unless: it carries `\Noselect`; it
+  carries one of the five excluded SPECIAL-USE attributes `\Trash`/`\Junk`/`\Sent`/`\Drafts`/`\All`
+  (`_carpeta_excluida`); or -- only when it carries NO SPECIAL-USE attribute at all, not even a
+  different one like `\Archive` or `\Flagged`, which would mean the server already answered the
+  question -- its name is in `_NOMBRES_EXCLUIDOS`.
+- `listar_mensajes` now loops over `_carpetas_a_examinar()`'s result (sorted, for a deterministic,
+  repeatable order), `EXAMINE`-ing each one (`_examinar_carpeta`, quoting the mailbox name via the new
+  `_entrecomillar_imap` -- needed now that a real folder name can carry spaces, e.g. "Facturas Legales")
+  and running the SAME UID-resume-or-SINCE-fallback logic as before this slice (`_buscar_uids`,
+  unchanged except for taking its UIDVALIDITY/UIDNEXT/prior-cursor as parameters instead of reading
+  instance state set once at connect time), now evaluated once PER FOLDER.
+- The resume token (`MensajeResumen.cursor_proveedor`) is now a JSON object mapping folder name to that
+  folder's own `"<uidvalidity>:<uid>"` pair (`_formato_cursor_multi`/`_analizar_cursor_multi`), not a
+  bare pair -- UID is only unique within one folder, so one pair could not represent more than one
+  folder's position. `_analizar_cursor_multi` also reads the OLD bare-pair format a source already
+  synced under `BUZON-FUENTE-IMAP-1` would have stored, as `{"INBOX": "<uidvalidity>:<uid>"}` -- the only
+  folder that format could ever have come from -- so an already-deployed source upgrades in place and
+  resumes exactly where `INBOX` left off instead of re-scanning it from the date cursor.
+- `internet_message_id`'s own fallback (used only when a message carries no `Message-Id` header) is now
+  folder-qualified (`f"{nombre_carpeta}:{uidvalidity}:{uid}"`), not the bare pair -- two different folders
+  can each have their own UID 1 under the same UIDVALIDITY, and the bare pair (safe when `INBOX` was the
+  only folder) would have let a message in one folder dedupe-collide at Finanzas with an unrelated
+  message in another.
+- `listar_adjuntos_metadata`/`obtener_mensaje_completo`, called by `sincronizar.py` in between two
+  `next()` calls on the `listar_mensajes` generator while that folder is still the one selected on the
+  connection, needed no change to their own bodies -- `_fetch_uno`'s new
+  `_asegurar_carpeta_seleccionada` only adds a LAZY default-to-`INBOX` for the case for a caller that
+  never ran `listar_mensajes` first at all (this module's own standalone metadata/body tests, which
+  predate this slice and still call them that way).
+- The single-folder constructor kwarg `buzon` is gone (nothing outside this module ever passed it);
+  `BUZON_PREDETERMINADO = "INBOX"` stays, now naming only that lazy standalone-call default.
+
+No change anywhere outside `cliente_imap.py` and its own tests: `proveedor.py`'s `construir_proveedor`,
+`sincronizar.py`, `cursor.py`, `fuentes.py` and the CLI are untouched -- the per-folder cursor stays
+inside the one opaque string `cursor_proveedor.json` already carried, exactly as `BUZON-FUENTE-IMAP-1`
+designed it to.
+
+### Tests
+
+`tests/test_cliente_imap.py`'s fake server gained `_CarpetaFalsa` (one folder's own messages,
+UIDVALIDITY/UIDNEXT and `LIST` flags) and a `carpetas=` constructor option, defaulting to today's single
+`INBOX` shape when omitted, plus a `LIST` handler and folder-aware `EXAMINE`/`SELECT`/`UID` handling.
+Seven new tests: a `\Trash`-flagged folder excluded and never `EXAMINE`d; a folder with no SPECIAL-USE
+attribute at all excluded by name; a folder NAMED like an excluded one but flagged `\Archive` kept,
+proving the name fallback never overrides a different attribute the server already set; a `\Noselect`
+folder never `EXAMINE`d; the composite case the spec asked for by name -- three folders including Trash,
+one folder's UIDVALIDITY changed from what the stored cursor remembers, proving that folder alone
+restarts from the date cursor while the other's untouched folder entry carries forward unchanged in the
+final `cursor_proveedor`; the old bare-pair cursor format read as `INBOX`'s own; and two folders sharing
+a UID under the same UIDVALIDITY never colliding in `internet_message_id`. Two existing assertions on the
+exact `cursor_proveedor` string (`test_listar_mensajes_simple_sin_adjuntos`,
+`test_uidvalidity_distinta_cae_de_nuevo_a_since`) updated for the new JSON shape; every other existing
+test in this file and in `test_proveedor.py` (including the one asserting `ClienteImap._cursor_inicial`
+directly) passed unchanged -- that attribute still holds the raw string this slice's own
+`_cursor_inicial_mapa` is parsed from, kept for exactly that test.
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest -q` on the slice branch before the merge, tree
+`30afd3e9a666db154bbf5d5ba2e132e56a8354d5` (slice commit `a87dcf848dbd693898a48f78a9c1fe698293ab12`):
+
+    248 passed, 7 skipped in 15.73s
+
+Tree identity proven before writing this entry, so that run was not repeated for the merge: merge commit
+`df90e64495969b9b0c5cc7a48223a3920aacaf66` has tree `30afd3e9a666db154bbf5d5ba2e132e56a8354d5`, IDENTICAL
+to the slice branch's own tree, and `git diff HEAD feat/buzon-fuente-imap-carpetas-1 --stat` against the
+merge commit was empty.
+
+248 = the 241 `BUZON-FUENTE-WIRE-CORREO-1` recorded (the most recent count on `main` before this slice)
+plus this slice's 7 new tests, all in the new multi-folder section of `tests/test_cliente_imap.py`. The 7
+skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger already
+recorded; none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database; the on-disk `cursor_proveedor.json` changes
+its OWN internal encoding (bare pair to JSON object) but stays the same file, read back only through
+`cursor.py`'s existing opaque-string accessors, exactly the category `BUZON-FUENTES-ESQUEMA-1` and
+`BUZON-FUENTE-IMAP-1` already classified that file as. No customer-facing bytes: this repository has no
+product, no UI and no customer or operator other than Carlos acting as this system's own administrator;
+no `print`/stdout/stderr string this slice touched changed. No cross-repo contract or DTO change: the
+buzon-v1 wire's key set, types and endpoint are unchanged -- this slice is entirely about WHICH messages
+this connector ever offers to `reglas.coincide`, not about the shape of what it posts. All three
+conditions clear, so this slice merged on green without stopping for approval.
+
+### Attribution
+
+Carlos delegated this build (`ORCH-CARLOS-DELEGATES-TIER-1-1`); Main decided the exclusion rule (SPECIAL-
+USE first, name fallback second) this slice's own approval reason states verbatim. The open follow-up
+this closes was written by `BUZON-FUENTE-IMAP-1` itself.
