@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from duna_buzon import auth, cli, cripto
+from duna_buzon import auth, cli, credencial_imap, cripto
 from duna_buzon.config import Config
 from duna_buzon.fuentes import FuenteConfig, guardar_fuente
 
@@ -33,7 +33,12 @@ def _escribir_fuente(
     etiqueta: str = "Hotmail",
     token_finanzas_ref: str = "carlos",
     activa: bool = True,
+    host: str | None = None,
+    port: int | None = None,
 ) -> Path:
+    if proveedor == "imap":
+        host = host or "imap.zoho.com"
+        port = port or 993
     guardar_fuente(
         str(tmp_path),
         FuenteConfig(
@@ -43,6 +48,8 @@ def _escribir_fuente(
             etiqueta=etiqueta,
             token_finanzas_ref=token_finanzas_ref,
             activa=activa,
+            host=host,
+            port=port,
         ),
     )
     return tmp_path / "fuentes" / id
@@ -126,14 +133,47 @@ def test_entrar_con_id_desconocido_es_error(tmp_path: Path, capsys: pytest.Captu
     assert "no-existe" in capsys.readouterr().err
 
 
-def test_entrar_sobre_fuente_no_microsoft_es_error(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_entrar_sobre_fuente_imap_delega_en_credencial_imap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
-    _escribir_fuente(tmp_path, id="gmail-carlos", proveedor="imap")
+    directorio = _escribir_fuente(
+        tmp_path,
+        id="legal-duna",
+        proveedor="imap",
+        direccion="legal@duna.solutions",
+        host="imap.zoho.com",
+        port=993,
+    )
+    llamado_con: list[tuple[Config, str, str, int, str]] = []
 
-    assert cli.comando_entrar(config, "gmail-carlos") == 1
-    assert "gmail-carlos" in capsys.readouterr().err
+    def falso_entrar(cfg: Config, directorio_fuente: str, *, host: str, puerto: int, usuario: str) -> None:
+        llamado_con.append((cfg, directorio_fuente, host, puerto, usuario))
+
+    monkeypatch.setattr(credencial_imap, "entrar", falso_entrar)
+    assert cli.comando_entrar(config, "legal-duna") == 0
+    assert llamado_con == [(config, str(directorio), "imap.zoho.com", 993, "legal@duna.solutions")]
+
+
+def test_entrar_sobre_fuente_imap_con_login_invalido_es_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(
+        tmp_path,
+        id="legal-duna",
+        proveedor="imap",
+        direccion="legal@duna.solutions",
+        host="imap.zoho.com",
+        port=993,
+    )
+
+    def falso_entrar(cfg: Config, directorio_fuente: str, *, host: str, puerto: int, usuario: str) -> None:
+        raise credencial_imap.VerificacionLoginError("IMAP4.error")
+
+    monkeypatch.setattr(credencial_imap, "entrar", falso_entrar)
+    assert cli.comando_entrar(config, "legal-duna") == 1
+    assert "imap login failed" in capsys.readouterr().err
 
 
 def test_sincronizar_sin_fuentes_activas_es_error(
@@ -206,7 +246,9 @@ def test_sincronizar_detenida_imprime_el_motivo_en_stderr_y_en_estado(
     config = _config(tmp_path)
     _escribir_fuente_y_reglas(tmp_path)
     monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
-    monkeypatch.setattr(cli, "construir_proveedor", lambda fuente, token: _ProveedorFalso())
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
 
     resultado_falso = ResultadoPasada(
         contadores=Contadores(vistos=2, omitidos_por_reglas=1), **resultado_falso_kwargs
@@ -233,7 +275,9 @@ def test_sincronizar_sin_detenerse_no_imprime_nada_en_stderr(
     config = _config(tmp_path)
     _escribir_fuente_y_reglas(tmp_path)
     monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
-    monkeypatch.setattr(cli, "construir_proveedor", lambda fuente, token: _ProveedorFalso())
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
 
     resultado_falso = ResultadoPasada(contadores=Contadores(vistos=1))
     monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: resultado_falso)
@@ -260,7 +304,9 @@ def test_una_fuente_fallando_no_detiene_a_las_demas(
         return "token-falso"
 
     monkeypatch.setattr(auth, "obtener_token", falso_obtener_token)
-    monkeypatch.setattr(cli, "construir_proveedor", lambda fuente, token: _ProveedorFalso())
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
     monkeypatch.setattr(
         cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=3))
     )
@@ -324,7 +370,9 @@ def test_parada_nunca_imprime_el_token_el_remitente_ni_el_asunto(
     monkeypatch.setattr(
         cli,
         "construir_proveedor",
-        lambda fuente, token: GraphClient(token, transport=httpx.MockTransport(graph_handler)),
+        lambda fuente, token, cursor_proveedor_inicial=None: GraphClient(
+            token, transport=httpx.MockTransport(graph_handler)
+        ),
     )
     monkeypatch.setattr(
         cli,
@@ -345,7 +393,9 @@ def test_parada_nunca_imprime_el_token_el_remitente_ni_el_asunto(
 def test_fuentes_lista_sin_secretos(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     config = _config(tmp_path)
     _escribir_fuente(tmp_path, id="hotmail-carlos", direccion="carlos@hotmail.com")
-    _escribir_fuente(tmp_path, id="legal-duna", proveedor="imap", activa=False)
+    _escribir_fuente(
+        tmp_path, id="legal-duna", proveedor="imap", activa=False, host="imap.zoho.com", port=993
+    )
 
     assert cli.comando_fuentes(config) == 0
     salida = capsys.readouterr().out
@@ -361,6 +411,78 @@ def test_fuentes_sin_nada_configurado(tmp_path: Path, capsys: pytest.CaptureFixt
     assert "no sources configured" in capsys.readouterr().out
 
 
+def test_agregar_fuente_imap_escribe_fuente_json_sin_firmar(tmp_path: Path) -> None:
+    from duna_buzon.fuentes import cargar_fuente
+
+    config = _config(tmp_path)
+    assert (
+        cli.comando_agregar_fuente(
+            config,
+            proveedor="imap",
+            id_fuente="legal-duna",
+            direccion="legal@duna.solutions",
+            host="imap.zoho.com",
+            puerto=993,
+            token_finanzas="carlos",
+            etiqueta=None,
+        )
+        == 0
+    )
+
+    fuente = cargar_fuente(str(tmp_path), "legal-duna")
+    assert fuente.proveedor == "imap"
+    assert fuente.direccion == "legal@duna.solutions"
+    assert fuente.host == "imap.zoho.com"
+    assert fuente.port == 993
+    assert fuente.token_finanzas_ref == "carlos"
+    assert fuente.activa is True
+    assert fuente.etiqueta == "legal@duna.solutions"
+    # Never signs in -- no credential file exists yet.
+    assert not (tmp_path / "fuentes" / "legal-duna" / "credencial.bin").exists()
+
+
+def test_agregar_fuente_con_id_repetido_es_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="legal-duna", proveedor="imap")
+
+    assert (
+        cli.comando_agregar_fuente(
+            config,
+            proveedor="imap",
+            id_fuente="legal-duna",
+            direccion="legal@duna.solutions",
+            host="imap.zoho.com",
+            puerto=993,
+            token_finanzas="carlos",
+            etiqueta=None,
+        )
+        == 1
+    )
+    assert "legal-duna" in capsys.readouterr().err
+
+
+def test_agregar_fuente_proveedor_no_imap_es_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    assert (
+        cli.comando_agregar_fuente(
+            config,
+            proveedor="microsoft",
+            id_fuente="otra",
+            direccion="x@y.com",
+            host="h",
+            puerto=1,
+            token_finanzas="carlos",
+            etiqueta=None,
+        )
+        == 1
+    )
+    assert "microsoft" in capsys.readouterr().err
+
+
 def test_migracion_automatica_desde_sincronizar(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -374,7 +496,9 @@ def test_migracion_automatica_desde_sincronizar(
     _escribir_reglas_vacias(tmp_path)
 
     monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
-    monkeypatch.setattr(cli, "construir_proveedor", lambda fuente, token: _ProveedorFalso())
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
     monkeypatch.setattr(
         cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=5))
     )

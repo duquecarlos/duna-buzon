@@ -16,12 +16,17 @@ from pathlib import Path
 from duna_buzon import cripto
 
 NOMBRE_ARCHIVO = "cursor.json"
+NOMBRE_ARCHIVO_PROVEEDOR = "cursor_proveedor.json"
 
 SOLAPE = datetime.timedelta(minutes=10)
 
 
 def _ruta(directorio_datos: str) -> Path:
     return Path(directorio_datos) / NOMBRE_ARCHIVO
+
+
+def _ruta_proveedor(directorio_datos: str) -> Path:
+    return Path(directorio_datos) / NOMBRE_ARCHIVO_PROVEEDOR
 
 
 def cargar_cursor(directorio_datos: str, *, valor_inicial: datetime.datetime) -> datetime.datetime:
@@ -38,3 +43,21 @@ def guardar_cursor(directorio_datos: str, momento: datetime.datetime) -> None:
     cripto.asegurar_directorio_datos(Path(directorio_datos))
     contenido = json.dumps({"cursor": momento.isoformat()}).encode("utf-8")
     cripto.escribir_archivo_sensible(_ruta(directorio_datos), contenido)
+
+
+def cargar_cursor_proveedor(directorio_datos: str) -> str | None:
+    """The provider's own opaque resume token (e.g. IMAP's
+    `"<uidvalidity>:<uid>"`, from `graph.MensajeResumen.cursor_proveedor`)
+    -- `None` for a provider that never sets one (Microsoft, today), and
+    for a source that has not yet completed a pass."""
+    ruta = _ruta_proveedor(directorio_datos)
+    if not ruta.is_file():
+        return None
+    datos = json.loads(ruta.read_text(encoding="utf-8"))
+    return datos["cursor_proveedor"]
+
+
+def guardar_cursor_proveedor(directorio_datos: str, valor: str) -> None:
+    cripto.asegurar_directorio_datos(Path(directorio_datos))
+    contenido = json.dumps({"cursor_proveedor": valor}).encode("utf-8")
+    cripto.escribir_archivo_sensible(_ruta_proveedor(directorio_datos), contenido)

@@ -19,6 +19,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from duna_buzon.proveedor_errores import ProveedorAutenticacionError, ProveedorErrorTransitorio
+
 URL_BASE = "https://graph.microsoft.com/v1.0"
 _TIPO_ODATA_ADJUNTO_ARCHIVO = "#microsoft.graph.fileAttachment"
 
@@ -47,11 +49,11 @@ class GraphError(Exception):
         return f"graph {self.paso} error={self.clase_excepcion}"
 
 
-class GraphAutenticacionError(GraphError):
+class GraphAutenticacionError(GraphError, ProveedorAutenticacionError):
     """Graph answered 401 -- the access token is no longer good."""
 
 
-class GraphErrorTransitorio(GraphError):
+class GraphErrorTransitorio(GraphError, ProveedorErrorTransitorio):
     """Any other failed Graph call: a non-200/401 status, or a connection
     failure. Treated as transient -- the pass stops, the cursor does not
     advance past it, the next timer run tries again."""
@@ -65,6 +67,12 @@ class MensajeResumen:
     asunto: str | None
     recibido_en: datetime.datetime
     tiene_adjuntos: bool
+    # An opaque, provider-defined resume token -- Microsoft never sets one
+    # (the datetime cursor `sincronizar.py` already tracks is precise
+    # enough for it); the IMAP provider (`cliente_imap.py`) sets
+    # `"<uidvalidity>:<uid>"` so a later pass can resume by UID instead of
+    # re-scanning a whole day of mail.
+    cursor_proveedor: str | None = None
 
 
 @dataclass(frozen=True)

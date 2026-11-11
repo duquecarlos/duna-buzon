@@ -25,9 +25,10 @@ NOMBRE_SUBDIRECTORIO = "fuentes"
 NOMBRE_ARCHIVO_FUENTE = "fuente.json"
 NOMBRE_ARCHIVO_CREDENCIAL = "credencial.bin"
 
-# "imap" (Gmail, and any other IMAP mailbox) lands in the next slice -- the
-# field already accepts only these two spellings so a typo in a hand-edited
-# fuente.json is caught here, not three steps later as "unknown provider".
+# "imap" is any generic IMAP mailbox (legal@duna.solutions on Zoho today,
+# Gmail later) -- the field accepts only these two spellings so a typo in
+# a hand-edited fuente.json is caught here, not three steps later as
+# "unknown provider".
 ProveedorId = Literal["microsoft", "imap"]
 _PROVEEDORES_VALIDOS = frozenset({"microsoft", "imap"})
 
@@ -47,6 +48,10 @@ class FuenteConfig:
     etiqueta: str
     token_finanzas_ref: str
     activa: bool
+    # Only meaningful for `proveedor == "imap"` -- `None` for every
+    # Microsoft source, and required (validated below) for every IMAP one.
+    host: str | None = None
+    port: int | None = None
 
     @property
     def etiqueta_wire(self) -> str:
@@ -89,6 +94,20 @@ def _fuente_desde_json(id_fuente: str, datos: dict) -> FuenteConfig:
             f"fuente.json for {id_fuente!r} carries a different 'id' inside it: {datos['id']!r}"
         )
 
+    host: str | None = None
+    port: int | None = None
+    if proveedor == "imap":
+        host = datos.get("host")
+        port = datos.get("port")
+        if not isinstance(host, str) or not host:
+            raise FuenteInvalidaError(
+                f"fuente.json for {id_fuente!r} is missing required field: host"
+            )
+        if not isinstance(port, int) or isinstance(port, bool):
+            raise FuenteInvalidaError(
+                f"fuente.json for {id_fuente!r} is missing required field: port"
+            )
+
     return FuenteConfig(
         id=id_fuente,
         proveedor=proveedor,
@@ -96,6 +115,8 @@ def _fuente_desde_json(id_fuente: str, datos: dict) -> FuenteConfig:
         etiqueta=str(etiqueta),
         token_finanzas_ref=str(token_finanzas_ref),
         activa=bool(activa),
+        host=host,
+        port=port,
     )
 
 
@@ -123,6 +144,8 @@ def guardar_fuente(directorio_datos: str, fuente: FuenteConfig) -> None:
             "etiqueta": fuente.etiqueta,
             "token_finanzas_ref": fuente.token_finanzas_ref,
             "activa": fuente.activa,
+            "host": fuente.host,
+            "port": fuente.port,
         }
     ).encode("utf-8")
     cripto.escribir_archivo_sensible(ruta, contenido)
