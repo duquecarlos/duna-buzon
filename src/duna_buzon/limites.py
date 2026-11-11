@@ -11,15 +11,28 @@ side skips is this connector's own decision (`BUZON-TOPES-META-1`):
   truncating either would break idempotency (`id_externo`) or attribution
   (`remitente`). A skip here is counted and the cursor advances past it,
   exactly like a 413/422 skip from Finanzas itself.
+
+`FuenteWire` and `LIMITE_FUENTE` mirror the wire's own `fuente` field, the
+same way: `src/duna_finanzas/web/buzon/schemas.py:37`'s
+`Fuente = Literal["correo", "sms", "notificacion"]`, and the CHECK constraint
+`fuente_conocida` on `String(16)` at `storage/schema.py:6560` (repeated at
+`6709`/`6725`). This connector only ever sends `"correo"` -- the channel, not
+a source's own identity (`BUZON-FUENTE-WIRE-CORREO-1`, correcting
+`BUZON-FUENTES-ESQUEMA-1`, which sent `"<proveedor>:<id>"` here and Finanzas
+would have rejected every entry with a `422`).
 """
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, Literal
 
 LIMITE_ID_EXTERNO: Final[int] = 998
 LIMITE_REMITENTE: Final[int] = 320
 LIMITE_ASUNTO: Final[int] = 998
+
+FuenteWire = Literal["correo", "sms", "notificacion"]
+LIMITE_FUENTE: Final[int] = 16
+FUENTE_CORREO: Final[FuenteWire] = "correo"
 
 
 def excede_limites_no_truncables(*, id_externo: str, remitente: str) -> bool:

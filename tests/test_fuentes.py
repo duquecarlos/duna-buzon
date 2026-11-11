@@ -34,8 +34,8 @@ def _fuente(**over) -> FuenteConfig:
     return FuenteConfig(**base)
 
 
-def test_etiqueta_wire_combina_proveedor_e_id() -> None:
-    assert _fuente().etiqueta_wire == "microsoft:hotmail-carlos"
+def test_etiqueta_registro_combina_proveedor_e_id() -> None:
+    assert _fuente().etiqueta_registro == "microsoft:hotmail-carlos"
 
 
 def test_guardar_y_cargar_ida_y_vuelta(tmp_path: Path) -> None:

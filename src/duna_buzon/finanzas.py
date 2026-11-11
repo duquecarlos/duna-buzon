@@ -24,6 +24,7 @@ import httpx
 
 from duna_buzon.adjuntos import ArchivoMultipart, construir_partes_multipart
 from duna_buzon.config import Config
+from duna_buzon.limites import FuenteWire
 
 RUTA_ENTRADAS = "/buzon/entradas"
 
@@ -52,14 +53,17 @@ class MetaEntrada:
     `EntradaBuzonMeta`'s own names; no other key, or the wire answers
     `422`.
 
-    `fuente` carried the one constant value `"correo"` before
-    `BUZON-FUENTES-ESQUEMA-1`; it is now `"<proveedor>:<id>"` (e.g.
-    `"microsoft:hotmail-carlos"`), built by `fuentes.FuenteConfig.etiqueta_wire`
-    -- the SAME wire key Finanzas already accepts, no new field added, and
-    well inside every length cap `limites.py` mirrors from Finanzas (ids are
-    short, hand-chosen source names)."""
+    `fuente` is the CHANNEL, not a source's own identity: always
+    `"correo"` (`limites.FUENTE_CORREO`) for every mail source, Microsoft or
+    IMAP alike. `BUZON-FUENTES-ESQUEMA-1` briefly sent `"<proveedor>:<id>"`
+    here instead, which Finanzas' own `Literal["correo", "sms",
+    "notificacion"]` (`limites.FuenteWire`, mirrored from
+    `src/duna_finanzas/web/buzon/schemas.py:37`) would answer `422` to on
+    every entry -- fixed by `BUZON-FUENTE-WIRE-CORREO-1`. A source's own
+    identity, when Finanzas needs it, is `fuentes.FuenteConfig.etiqueta_registro`
+    -- logs and status only, never this field."""
 
-    fuente: str
+    fuente: FuenteWire
     id_externo: str
     remitente: str
     asunto: str | None

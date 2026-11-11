@@ -107,7 +107,6 @@ def _ejecutar_una_fuente(
             cliente_finanzas=cliente_finanzas,
             reglas=reglas,
             cursor_inicial=cursor_inicial,
-            etiqueta_fuente=fuente.etiqueta_wire,
             cursor_proveedor_inicial=cursor_proveedor_inicial,
         )
     finally:
