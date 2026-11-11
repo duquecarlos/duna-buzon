@@ -492,3 +492,126 @@ illegal-shaped expand, to also avoid one giant expanded response for a message w
 attachments. This slice (`BUZON-GRAPH-ADJUNTOS-1`) carried it out: `graph.py`'s split body/metadata/
 per-attachment calls and the widened `AdjuntoMetadata`, `sincronizar.py`'s threading of the already-
 fetched metadata list, and the tests above.
+
+## BUZON-FUENTES-ESQUEMA-1 -- N independent mailbox sources, shaped for Gmail and legal@duna.solutions (2026-11-11)
+
+### Surface, carried in from the observed slice
+
+Carlos, 11 Nov 2026: the connector must eventually read his Hotmail, his Gmail, and
+`legal@duna.solutions`, and later any user's own mailboxes. `BUZON-MULTI-FUENTE-OBS-1` (OBSERVED)
+measured that this repository, until now, held exactly one `cache.bin`/`cursor.json`/`reglas.json`
+under `$BUZON_DATOS` (`auth.py:29`, `cursor.py:18`, `cli.py:35-37` as they stood) and one Finanzas
+token per person -- one mailbox, hard-coded. Main decided the shape this slice builds
+(`ORCH-CARLOS-DELEGATES-TIER-1-1`); this slice is the build, not the decision.
+
+### What changed
+
+Every mailbox is now a SOURCE, independent of every other, under
+`$BUZON_DATOS/fuentes/<id>/{fuente.json, credencial.bin, cursor.json, reglas.json, estado.json}`.
+`fuente.json` carries `{id, proveedor, direccion, etiqueta, token_finanzas_ref, activa}` and no secret
+of its own -- the credential moved apart into `credencial.bin`, encrypted exactly like the single
+`cache.bin` was (`auth.py`'s `_guardar_cache_si_cambio`/`_cargar_cache_serializada` now take the
+source's own directory, never the data root). New module `fuentes.py` owns this shape: load/save one
+source, list every source, filter to the active ones, and the migration below.
+
+`sincronizar` now loops over every ACTIVE source independently (`cli.py`'s new
+`_ejecutar_una_fuente`): one source's auth failure, missing/invalid rules, provider error or Finanzas
+stop is caught and reported under that source's own id, in both stdout (`fuente=<id> ...`) and stderr
+(`fuente=<id> parada: ...`) -- it never stops the sources after it in the loop. The pass as a whole
+exits non-zero the moment any source failed, so systemd still sees trouble. `estado` reports every
+source's own cursor and last-pass line the same way; `fuentes` (new) lists every configured source
+(id, provider, address, label, active/inactive) with no secret in it.
+
+`entrar` takes an optional `--fuente <id>`: omitted, it resolves to the one configured source and
+refuses with a clear message the moment there is more than one (or none) -- so the real host's
+existing `duna-deploy-buzon entrar` (which calls `python -m duna_buzon entrar` with no arguments) keeps
+working unchanged through and after the migration below, and `deploy/host/duna-deploy-buzon` itself
+needed no change.
+
+New module `proveedor.py` names the provider interface every source's mailbox client satisfies: list
+messages since a cursor, list one message's attachment metadata, fetch one message's body and
+attachments, close. `GraphClient` (`graph.py`) already has exactly this shape and needed no change at
+all -- `construir_proveedor(fuente, token)` is the one new seam `cli.py` calls through, and the only
+place that will grow an `if fuente.proveedor == "imap"` branch next.
+
+### The wire field `fuente`, and what this slice could and could not verify about it
+
+Every posted entry now carries its source's identity in the EXISTING `meta.fuente` field
+(`finanzas.py`), as `"<proveedor>:<id>"` (e.g. `"microsoft:hotmail-carlos"`) instead of the one
+constant value `"correo"` every entry carried before -- no new wire field, same six keys
+`MetaEntrada.como_json()` has always sent. `MetaEntrada.fuente`'s own type widened from
+`Literal["correo"]` to `str` accordingly.
+
+**This slice could NOT re-read `EntradaBuzonMeta` at `../finanzas/duna-finanzas-api` to confirm
+Finanzas accepts an arbitrary string here** (the build instructions asked for exactly that check): the
+sandbox this slice ran in has no network and no filesystem access outside this repository's own
+working directory, and the finanzas repository sits outside it. What this repository already has on
+record (`BUZON-TOPES-META-1`, `DECISIONS.md` above) names caps on `id_externo`, `remitente` and
+`asunto` only -- never on `fuente` -- and no entry anywhere in this repository's history claims `fuente`
+is a Finanzas-side enum rather than a plain string field. On that basis, and because widening a
+single-value field to a general string changes no KEY, no TYPE and no endpoint, this stays inside "no
+new wire field" as the build instructions required. Source ids are short, hand-chosen names
+(`hotmail-carlos`, `legal-duna`, ...), so `"<proveedor>:<id>"` will be well under any cap of the size
+the three capped fields already carry. Flagged as an open unknown for Main or Carlos to confirm against
+the live Finanzas schema before `legal@duna.solutions` or Gmail actually ship mail through this wire.
+
+### Migration, automatic and idempotent
+
+`fuentes.migrar_fuente_unica_si_necesario(directorio_datos, clave_cifrado)` runs at the top of every
+command (`cli.py`'s `_migrar_si_necesario`). It is a no-op the instant `fuentes/` already exists --
+migrated already, or a fresh multi-source install that never had the old layout, look identical from
+there and both mean "nothing to do" -- and a no-op on a brand-new install with neither `fuentes/` nor
+any legacy file. Otherwise it moves whichever of `cache.bin`/`cursor.json`/`reglas.json`/`estado.json`
+exist at the data root into `fuentes/hotmail-carlos/` (`proveedor: "microsoft"`, `activa: true`),
+preserving the SAME cursor value exactly -- no mail is re-sent, none is skipped -- and best-effort
+recovers the account's own address for `fuente.json`'s `direccion` by parsing MSAL's own serialized
+cache JSON (`Account` -> `username`) under the configured key; a cache that cannot be read this way
+(wrong key, or none yet) still migrates, with `direccion` left empty for Carlos to fill in by hand --
+a record field, never read by any provider logic.
+
+### Tests, measured
+
+New `tests/test_fuentes.py` (load/save round-trip, every `FuenteInvalidaError` path, listing and
+filtering, and the migration: no-op cases, exact cursor preservation, idempotency across two calls,
+address recovery from a real MSAL-shaped cache, a wrong key leaving `direccion` empty without losing
+the credential, and a partial legacy state with only `reglas.json`). New `tests/test_proveedor.py`
+(the Microsoft branch builds a `GraphClient`, `GraphClient` satisfies `Proveedor` structurally via
+`runtime_checkable`, an unknown provider raises). `tests/test_auth.py`, `tests/test_cli.py`,
+`tests/test_main.py`, `tests/test_sincronizar.py` and `tests/test_registro_marcador.py` rewritten for
+the per-source directory argument, the `proveedor=`/`etiqueta_fuente=` parameters, the new CLI
+dispatch, and the multi-source `cli.py` (including one test with two sources where the first's auth
+failure is reported and the second still runs to completion).
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest -q` on the slice branch before the merge, tree
+`27b013c8585141947b975a4c186f3cf72a443b10` (slice commit `2258a4b0329a3ca0bb74425d847696e89f66cf8d`):
+
+    206 passed, 6 skipped in 29.64s
+
+Tree identity proven before writing this entry, so that run was not repeated for the merge: merge
+commit `bfad4f36a55e24f467681a4ee0011e2a467c5a5f` has tree `27b013c8585141947b975a4c186f3cf72a443b10`,
+IDENTICAL to the slice branch's own tree, and `git diff HEAD feat/buzon-fuentes-esquema-1 --stat`
+against the merge commit was empty. The 6 skips are the same pre-existing Windows file-mode skips
+`BUZON-CONECTOR-1` already recorded, plus one more of the same kind in the new `test_fuentes.py`; none
+are a new KIND of skip.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration in the database sense -- this repository has no database; the directory-layout
+migration above moves files on disk, never a table or a model. No customer-facing bytes, same reasoning
+`BUZON-CONECTOR-1` through `BUZON-GRAPH-ADJUNTOS-1` already recorded: this repository has no product,
+no UI, and no customer or operator other than Carlos acting as this system's own administrator -- every
+new line this slice prints (`fuente=<id> ...`) is that same operator-facing stdout/stderr, not a
+customer-facing surface. No cross-repo contract or DTO change: the wire's key set, types and endpoint
+are unchanged; only the VALUE one existing field carries changed, under the open unknown recorded
+above. All three conditions clear, so this slice merged on green without stopping for approval.
+
+### Attribution
+
+Carlos named the surface (Hotmail, Gmail, `legal@duna.solutions`, and eventually other users' own
+mailboxes) and ORCH-CARLOS-DELEGATES-TIER-1-1 authorized this Tier 1 build; `BUZON-MULTI-FUENTE-OBS-1`
+measured today's single-mailbox shape and Main decided the directory layout this slice carried out:
+`fuentes.py`'s per-source config and migration, `proveedor.py`'s provider interface, `auth.py`'s
+per-source credential, `cli.py`'s per-source orchestration and new `fuentes` command, and the existing
+`fuente` wire field now carrying each source's own identity.
