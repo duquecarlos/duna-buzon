@@ -615,3 +615,11 @@ measured today's single-mailbox shape and Main decided the directory layout this
 `fuentes.py`'s per-source config and migration, `proveedor.py`'s provider interface, `auth.py`'s
 per-source credential, `cli.py`'s per-source orchestration and new `fuentes` command, and the existing
 `fuente` wire field now carrying each source's own identity.
+
+### Open follow-up
+
+**BUZON-FUENTES-IMAP-1** -- implement the `imap` branch of `proveedor.construir_proveedor` (Gmail and
+`legal@duna.solutions` both need it) against the interface `proveedor.py` names in this slice. Not done
+here: explicitly scoped to "the next slice" by this slice's own build instructions, and `fuentes.py`
+already refuses a `fuente.json` naming any provider other than `microsoft`/`imap` so a hand-written
+IMAP source stays inert (never silently mis-handled as Microsoft) until that slice lands.
