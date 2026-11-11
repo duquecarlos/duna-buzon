@@ -623,3 +623,175 @@ per-source credential, `cli.py`'s per-source orchestration and new `fuentes` com
 here: explicitly scoped to "the next slice" by this slice's own build instructions, and `fuentes.py`
 already refuses a `fuente.json` naming any provider other than `microsoft`/`imap` so a hand-written
 IMAP source stays inert (never silently mis-handled as Microsoft) until that slice lands.
+
+---
+
+## BUZON-FUENTE-IMAP-1 -- a generic IMAP provider, first used for legal@duna.solutions on Zoho (2026-11-11)
+
+### Why
+
+`BUZON-FUENTES-ESQUEMA-1` named the provider interface and left its own `imap` branch for "the next
+slice" (`BUZON-FUENTES-IMAP-1` above). Carlos delegated this build (`ORCH-CARLOS-DELEGATES-TIER-1-1`);
+`BUZON-MULTI-FUENTE-OBS-1` recommended exactly this provider. This slice builds it, against
+`legal@duna.solutions`'s real mailbox shape first: Zoho Mail, `imap.zoho.com:993`, SSL, an app
+password.
+
+### The design question this slice had to answer, and the decision
+
+The build instructions ask for "cursor by UIDVALIDITY+UID" -- the textbook-correct way to resync an
+IMAP mailbox incrementally, and NOT what `sincronizar.py`/`cursor.py` carry today: every cursor in this
+repository, before this slice, is a `datetime`, persisted in `cursor.json`, advanced by
+`max(cursor_final, mensaje.recibido_en)`. IMAP's own `SEARCH SINCE <date>` has only DAY granularity, so
+a cursor that were datetime-only would force every pass to re-list and re-fetch a whole day of mail,
+repeatedly, forever.
+
+Decision: keep the EXISTING datetime cursor and its whole call path completely unchanged for every
+provider (`Proveedor.listar_mensajes(desde: datetime)` still takes exactly that, Microsoft's own
+behaviour is untouched), and add a SECOND, OPTIONAL, provider-owned cursor that travels alongside it
+through the exact same success/commit point -- never on its own:
+
+- `graph.MensajeResumen` gains `cursor_proveedor: str | None = None` (Microsoft never sets it).
+- `sincronizar.ejecutar_pasada` tracks a parallel `cursor_proveedor_final`, updated at every point
+  `cursor_final` already is (`_avanzar`, one closure replacing five duplicated `max(...)` call sites),
+  and returns it on `ResultadoPasada`.
+- A new file per source, `fuentes/<id>/cursor_proveedor.json` (`cursor.cargar_cursor_proveedor`/
+  `guardar_cursor_proveedor`), written by `cli.py`'s `_ejecutar_una_fuente` under the EXACT SAME
+  `resultado.debe_persistir_cursor` guard the datetime cursor already is.
+
+This is why invariant 5 (the cursor never advances past a message a pass could not finish) still holds
+for IMAP: the provider's own UID resume token is never written by the provider itself mid-pass -- it is
+carried on the message, like `recibido_en`, and only reaches disk when the REST of the pass already
+proved itself safe to persist. `ClienteImap.listar_mensajes` uses it to resume with `UID SEARCH UID
+<uid+1>:*` when the stored UIDVALIDITY still matches the mailbox's current one, and falls back to the
+datetime-based `SEARCH SINCE <date>` (Python-filtered by the exact `desde` timestamp, the same precision
+discipline Graph's own `$filter` already has) the first time a source ever runs, or the moment
+UIDVALIDITY no longer matches -- the server's own signal that stored UIDs are no longer meaningful. A
+`UID SEARCH UID n:*` is never issued once `n` is already at or past the mailbox's `UIDNEXT`: some IMAP
+servers normalize an otherwise-empty range by returning the last message instead of none, so the search
+is skipped outright in that case.
+
+### `proveedor_errores.py`, and a two-line fix to `graph.py`
+
+`sincronizar.ejecutar_pasada`'s own try/except caught `GraphAutenticacionError`/`GraphErrorTransitorio`
+by name -- Microsoft-specific types baked into the one pass-execution loop every provider shares. New
+module `proveedor_errores.py` names the two buckets generically
+(`ProveedorAutenticacionError`/`ProveedorErrorTransitorio`); `graph.py`'s two exception classes now ALSO
+inherit from them (`class GraphAutenticacionError(GraphError, ProveedorAutenticacionError)`), which
+changes nothing about Graph's own behaviour (verified: `GraphError.__init__`'s `super().__init__(self.motivo)`
+walks the MRO into the new base's un-overridden `Exception.__init__`, so `str(exc) == exc.motivo` exactly
+as before) and `sincronizar.py` now reads `str(exc)` instead of `exc.motivo` at those two sites. `graph.py`
+would otherwise have had to import from `proveedor.py`, which already imports `graph.py` -- the new
+leaf module is what keeps that acyclic. `cliente_imap.py`'s own `ClienteImapAutenticacionError`/
+`ClienteImapErrorTransitorio` sit under the same two buckets the same way.
+
+### `cliente_imap.py`
+
+`ClienteImap` satisfies `Proveedor` structurally, with no change to the shape. Connecting is LAZY --
+`__init__` does no I/O at all (mirrors `GraphClient`, whose `httpx.Client` never connects until the
+first request), so `construir_proveedor` can build it without risking an exception outside
+`sincronizar.py`'s own try/except; one source's bad app password still never stops another source's
+pass.
+
+Read-only by construction: `self._conexion.select(buzon, readonly=True)` (which sends `EXAMINE`, never
+`SELECT` -- `imaplib`'s own dispatch, confirmed against a real exchange before writing this module) is
+the ONLY way this client opens the mailbox; every content fetch asks for `BODY.PEEK[<n>]`, never
+`BODY[<n>]`; there is no method anywhere in this class that could send `STORE`, `COPY`, `MOVE` or
+`EXPUNGE`. `tests/test_cliente_imap.py::test_examine_nunca_select_y_ningun_comando_de_escritura` proves
+all of this from the outside, against a fake server that records every command line it receives.
+
+Every message and attachment is addressed by IMAP UID, never a sequence number (which shifts as new
+mail arrives mid-pass). Content is read by hand-writing a small parser for IMAP's own parenthesized-list
+syntax (`_parsear_valor`/`_parsear_lista`/`_parsear_cadena`/`_parsear_atomo`) rather than pulling in a
+third-party IMAP library -- `BODYSTRUCTURE` is walked into flat, numbered leaf parts
+(`_particionar_bodystructure`); a leaf is the message's body candidate when it is `TEXT/PLAIN` or
+`TEXT/HTML` without an `ATTACHMENT` disposition, and an attachment candidate otherwise (an inline image
+counts as an attachment candidate too, listed but never downloaded -- the same skip Graph's own
+`es_en_linea` already applies). Headers (`From`/`Subject`/`Message-Id`) are read as a `BODY.PEEK[HEADER.
+FIELDS (...)]` literal and parsed with the stdlib `email` module, never ENVELOPE's own structure.
+`AdjuntoMetadata.tipo_odata` is repurposed to carry the part's own MIME type (e.g. `"application/pdf"`)
+since IMAP has no OData type annotation -- nothing outside this module's own `obtener_mensaje_completo`
+reads that field for an IMAP-built `AdjuntoMetadata`, so nothing else needed to change.
+
+`imaplib`'s exact wire behaviour (that `select(..., readonly=True)` sends `EXAMINE`; that `UIDVALIDITY`/
+`UIDNEXT` surface through `response(name)`; that a FETCH literal comes back as a `(prefix, literal)`
+tuple inside `dat`) was confirmed by driving the real stdlib `imaplib.IMAP4` against a throwaway socket
+server before writing `cliente_imap.py`, rather than assumed from memory.
+
+### `credencial_imap.py`
+
+Mirrors `auth.py`'s shape for the one thing an IMAP source needs: `entrar` reads the app password with
+`getpass.getpass` (no echo, never a command-line argument), verifies it with a REAL `LOGIN` against the
+server (`_verificar_login_real`, the one seam, parallel to `auth.py`'s `construir_app`) BEFORE ever
+writing anything, and only then encrypts and stores it in the source's own `credencial.bin` --
+`auth.py` itself needed no change at all, since its existing `cache_cargable` (used by `estado`) already
+only tests "does this file decrypt under the configured key", which says nothing about MSAL specifically
+and already works unchanged for an IMAP source's stored password.
+
+### `fuentes.py`, `cli.py`, `__main__.py`
+
+`FuenteConfig` gains `host: str | None = None` / `port: int | None = None`, required (and validated) the
+moment `proveedor == "imap"`, always `None` for Microsoft. New command `agregar-fuente imap --id <id>
+--direccion <direccion> --host <host> --token-finanzas <ref> [--port <puerto>] [--etiqueta <etiqueta>]`
+(`cli.comando_agregar_fuente`) writes a new source's `fuente.json` and never signs in -- `entrar --fuente
+<id>` is the separate next step, exactly as the build instructions asked. `cli.comando_entrar` and
+`_ejecutar_una_fuente` now branch on `fuente.proveedor` for which credential module to call
+(`auth`/`credencial_imap`) and which errors to catch (`auth.SinCuentaError`/`credencial_imap.
+SinCredencialError`/`cripto.ClaveInvalidaError`, unchanged otherwise); `comando_estado`,
+`comando_fuentes` and `comando_sincronizar`'s own loop needed no change.
+
+### Tests, measured
+
+Two new files: `tests/test_cliente_imap.py` (15 tests) builds a real, in-process, single-connection TCP
+server (`_ServidorImapFalso`, `socket`+`threading`) that records every command line, and drives
+`ClienteImap` against it for: read-only-by-construction (above), listing with and without attachments,
+the SINCE-date exact-timestamp filter, UID metadata and content fetch (including the inline-attachment
+skip), the three cursor paths (no prior cursor, resume by UID, UIDVALIDITY mismatch falls back to
+SINCE, and a cursor already at `UIDNEXT` issues no search at all), encoded-word subject decoding, a
+failed LOGIN raising the generic authentication error, and a connection failure raising the generic
+transient one. `tests/test_credencial_imap.py` (5 tests, 1 skipped on Windows for the file-mode
+assertion, same as every other `no_es_windows`-gated test in this repository) covers `entrar`'s
+read-verify-then-store order, a failed verification never writing anything, and `obtener_credencial`'s
+round trip and its own `SinCredencialError`. Existing suites updated for the new `construir_proveedor`
+kwarg and `FuenteConfig` fields: `test_proveedor.py`, `test_cli.py`, `test_main.py`.
+
+`.venv/Scripts/python.exe -m pytest -q` on the slice branch before the merge, tree
+`793545124df7ececc4becbfedb0483a8c713ff51` (slice commit `13ef57804aee98cb143c3b44ece7e4d14258ff14`):
+
+    237 passed, 7 skipped
+
+Tree identity proven before writing this entry, so that run was not repeated for the merge: merge
+commit `0ad504eb02ef19571aacf4f4e1bcf6be98de8918` has tree `793545124df7ececc4becbfedb0483a8c713ff51`,
+IDENTICAL to the slice branch's own tree, and `git diff HEAD feat/buzon-fuente-imap-1 --stat` against
+the merge commit was empty. The 7 skips are the same pre-existing Windows file-mode skips earlier
+slices already recorded, plus one more of the same kind in the new `test_credencial_imap.py`; none are
+a new KIND of skip.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration in the database sense -- this repository has no database; the new per-source
+`cursor_proveedor.json` and the two new `fuente.json` fields are files on disk, exactly the same category
+`BUZON-FUENTES-ESQUEMA-1` already classified this way. No customer-facing bytes: this repository has no
+product, no UI, and no customer or operator other than Carlos acting as this system's own administrator
+-- every new line this slice prints (`agregar-fuente`'s confirmation, `entrar`'s IMAP-login error) is
+that same operator-facing stdout/stderr. No cross-repo contract or DTO change: the wire's key set, types
+and endpoint are unchanged, and `fuente`'s value space already widened to an arbitrary string in the
+prior slice -- this one only adds another concrete value (`"imap:<id>"`), not a new field. All three
+conditions clear, so this slice merged on green without stopping for approval.
+
+### Attribution
+
+Carlos delegated this build (`ORCH-CARLOS-DELEGATES-TIER-1-1`); `BUZON-MULTI-FUENTE-OBS-1` recommended
+this provider and this slice is its build, against the interface `BUZON-FUENTES-ESQUEMA-1` named:
+`cliente_imap.py`'s IMAP client, `credencial_imap.py`'s app-password sign-in, `proveedor_errores.py`'s
+provider-agnostic failure categories, the parallel provider-cursor threaded through `graph.py`/
+`sincronizar.py`/`cursor.py`, and `fuentes.py`/`cli.py`/`__main__.py`'s new `agregar-fuente` command and
+IMAP branches.
+
+### Open follow-up
+
+**BUZON-FUENTE-IMAP-CARPETAS-1** -- `ClienteImap` only ever examines `INBOX`. Graph's own
+`listar_mensajes` deliberately reaches every folder (`graph.py`'s own docstring) since Carlos's inbox
+rules move mail out of the Inbox before this connector ever sees it; nothing in this slice's build
+instructions asked for the IMAP equivalent, and `legal@duna.solutions` has no such rules today, so it
+was not built. Worth deciding before an IMAP source that DOES file mail into other folders (Gmail,
+eventually) is added.
