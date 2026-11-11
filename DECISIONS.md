@@ -805,3 +805,103 @@ rules move mail out of the Inbox before this connector ever sees it; nothing in 
 instructions asked for the IMAP equivalent, and `legal@duna.solutions` has no such rules today, so it
 was not built. Worth deciding before an IMAP source that DOES file mail into other folders (Gmail,
 eventually) is added.
+
+---
+
+## BUZON-FUENTE-WIRE-CORREO-1 -- restore the wire `fuente` to the constant "correo" (2026-11-11)
+
+### Why, and the miss
+
+`BUZON-FUENTES-ESQUEMA-1` changed the wire `fuente` from the one constant `"correo"` every entry had
+always carried to `"<proveedor>:<id>"`, flagging it in its own ledger entry as an open unknown it could
+not verify ("this slice could NOT re-read `EntradaBuzonMeta`... the finanzas repository sits outside
+[the sandbox]"). It guessed wrong: Finanzas' own `src/duna_finanzas/web/buzon/schemas.py:37` declares
+`Fuente = Literal["correo", "sms", "notificacion"]`, and `storage/schema.py` carries a CHECK constraint
+`fuente_conocida` on `String(16)` besides (`storage/schema.py:6560`, repeated at `6709`/`6725`). Every
+entry this connector posted would have answered `422` on the next deploy, against a real Finanzas,
+including Carlos's own live Hotmail -- nothing caught it only because no deploy had happened yet.
+Finanzas (11 Nov) confirmed by delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): keep `fuente="correo"`,
+it is the CHANNEL; nothing source-specific belongs in it or in `id_externo`; a future optional `origen`
+field (`FIN-API-BUZON-ORIGEN-OBS-1`, not built anywhere yet) is where a source's own identity will
+eventually travel, if Finanzas ever needs it.
+
+### The fix
+
+`sincronizar.ejecutar_pasada` now builds every `MetaEntrada` with `fuente=limites.FUENTE_CORREO` (the
+constant `"correo"`), for every provider (`microsoft`, `imap` alike) -- no per-source branch, since the
+wire value no longer depends on which source built the entry. The `etiqueta_fuente` parameter this
+threaded through (`ejecutar_pasada`, and `cli.py`'s call into it) is gone; nothing downstream of the
+wire needs it anymore. `FuenteConfig.etiqueta_wire` (`fuentes.py`) is renamed `etiqueta_registro` and
+redocumented: the SAME `"<proveedor>:<id>"` value, now explicitly logs-and-status-only, never sent to
+Finanzas -- kept, not deleted, in case a future log line or `estado`/`fuentes` command output wants it.
+Nothing currently prints it; this slice's build instructions ("no new field") were read as covering
+operator-facing output too, so none was added.
+
+`id_externo`'s own construction (`mensaje.internet_message_id`, `sincronizar.py`) is verified
+byte-identical to `c4cb533`'s (the commit immediately before `BUZON-FUENTES-ESQUEMA-1`'s own code
+commit `2258a4b`) -- confirmed by reading both files at that ref: `git show c4cb533:src/duna_buzon/sincronizar.py`
+carried the identical `id_externo=mensaje.internet_message_id` line it carries today. Dedupe against
+whatever Finanzas already stored for the Microsoft source still works.
+
+### The contract test
+
+`limites.py` gained the mirror it should have had before `BUZON-FUENTES-ESQUEMA-1` ever shipped:
+`FuenteWire = Literal["correo", "sms", "notificacion"]` and `LIMITE_FUENTE: Final[int] = 16`, cited to
+the same two Finanzas file:line pairs above, plus `FUENTE_CORREO: Final[FuenteWire] = "correo"`, the
+one value this codebase ever constructs. `MetaEntrada.fuente`'s own type (`finanzas.py`) is restored
+from the `str` `BUZON-FUENTES-ESQUEMA-1` widened it to, back to a `Literal` -- now `limites.FuenteWire`
+rather than the old single-value `Literal["correo"]`, since the mirror itself has to admit all three
+values Finanzas accepts even though this connector only ever sends one.
+
+New `tests/test_limites.py` tests restate Finanzas' own `Literal` and cap verbatim
+(`typing.get_args(FuenteWire) == ("correo", "sms", "notificacion")`, `LIMITE_FUENTE == 16`), assert
+`MetaEntrada.fuente`'s type hint IS `FuenteWire` (not a bare `str`, so a wrong value is a type error at
+every call site), and assert the one value the code ever builds (`FUENTE_CORREO`) passes both halves
+of the contract. `tests/test_sincronizar.py` gained a direct assertion on the posted wire body
+(`meta_enviada["fuente"] == "correo"`) in an existing end-to-end test that already captures the
+multipart body. `tests/test_fuentes.py` renamed its `etiqueta_wire` test to match the rename.
+
+### What this slice could NOT verify
+
+Same sandbox limit the prior slice already recorded: no network and no filesystem access outside this
+repository's own working directory, so the two Finanzas file:line citations above (and the `9b9464e`-era
+citations elsewhere in this ledger) are taken from this slice's own build instructions verbatim, not
+independently re-read against `../finanzas/duna-finanzas-api` in this run. The build instructions'
+author is recorded as having validated them before dispatch; this slice did not re-derive them.
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest -q` on the slice branch before the merge, tree
+`24d8be6da63f77db7b20f460d2fa17ec52859153` (slice commit `b30e49a96e753ac63f042ce11f499ef4e94b2693`):
+
+    241 passed, 7 skipped in 8.36s
+
+Tree identity proven before writing this entry, so that run was not repeated for the merge: merge
+commit (recorded below once written) carries the SAME tree, `24d8be6da63f77db7b20f460d2fa17ec52859153`,
+and `git diff HEAD feat/buzon-fuente-wire-correo-1 --stat` against the merge commit was empty. The 7
+skips are the exact same pre-existing Windows file-mode skips `BUZON-FUENTE-IMAP-1` already recorded;
+none are a new kind.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, and no file layout changed; only a wire
+VALUE and some identifiers moved. No customer-facing bytes: no `print`/stdout/stderr string anywhere in
+this diff changed -- the fix is entirely in what gets POSTED to Finanzas and in internal naming, and
+Carlos (this system's own operator) sees no different console output. No cross-repo contract or DTO
+change: the wire's key set, types and endpoint are unchanged, and this slice RESTORES the value to what
+Finanzas' own existing contract already accepted -- the same reasoning `BUZON-FUENTES-ESQUEMA-1` used to
+clear this same condition when it (wrongly) changed the value the other way. All three conditions
+clear, so this slice merged on green without stopping for approval.
+
+### Attribution
+
+Finanzas (11 Nov, relayed by Carlos via `ORCH-CARLOS-DELEGATES-TIER-1-1`) named the fix: keep
+`fuente="correo"`, nothing source-specific in it or in `id_externo`, `origen` later if ever needed. This
+slice carried it out and added the contract test that should have existed before the field this fixes
+was ever touched.
+
+### Open follow-up
+
+**FIN-API-BUZON-ORIGEN-OBS-1** -- Finanzas' own follow-up, not this repository's: an optional `origen`
+field on buzon-v1, for a source's own identity, if and when Finanzas decides it needs one. Not started
+here; this connector will add it only once that field exists on the receiving end.
