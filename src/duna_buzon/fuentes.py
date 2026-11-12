@@ -33,6 +33,18 @@ belong to Finanzas. Absent (the default, and every `fuente.json` written
 before this slice) means today's behaviour exactly -- every selectable
 folder minus Trash/Junk/Sent/Drafts/All-Mail, Carlos's own personal mail
 included. See `cliente_imap.py`'s own docstring for how an entry matches.
+
+Extended to `proveedor == "microsoft"` (`BUZON-GRAPH-502-1`): the same field,
+parsed the same way, but there it narrows which `/me/mailFolders/{carpeta}/
+messages` calls `graph.py`'s `GraphClient` makes instead of one `/me/
+messages` call -- the lever for a mailbox too big for Graph to list as a
+whole (`parada=graph listar http=502`). Each entry is whatever Graph itself
+accepts there: a well-known folder name (`inbox`, `archive`, ...) or a
+folder id -- never validated against a live mailbox at parse time, only
+shaped (a non-empty list of non-empty strings), exactly like the `imap`
+case. Absent means today's behaviour exactly: `/me/messages`, every folder
+in one call. Not meaningful for `proveedor == "google"` -- unset there,
+same as before this slice.
 """
 
 from __future__ import annotations
@@ -85,14 +97,15 @@ class FuenteConfig:
     # `fuente.json` written before this slice (no `origen` key at all)
     # keeps meaning exactly what it always meant.
     origen: OrigenFuente = "local"
-    # Only meaningful for `proveedor == "imap"`. `None` (absent from
-    # `fuente.json`) means today's behaviour exactly: every selectable
-    # folder, minus Trash/Junk/Sent/Drafts/All-Mail. Present means ONLY
-    # folders whose LIST name equals one of these entries or sits under one
-    # of them in the server's own hierarchy -- still minus those same
-    # excluded kinds (BUZON-IMAP-CARPETAS-INCLUIDAS-1, so a shared-mailbox
-    # IMAP source never pulls in the signed-in account's own personal
-    # folders alongside it).
+    # Meaningful for `proveedor in ("imap", "microsoft")` only -- `None`
+    # (absent from `fuente.json`) means today's behaviour exactly: for
+    # `imap`, every selectable folder minus Trash/Junk/Sent/Drafts/All-Mail
+    # (BUZON-IMAP-CARPETAS-INCLUIDAS-1); for `microsoft`, one `/me/messages`
+    # call reaching every folder. Present means ONLY the named folders --
+    # for `imap`, whose LIST name equals one of these entries or sits under
+    # one of them in the server's own hierarchy, still minus those same
+    # excluded kinds; for `microsoft`, whatever Graph itself accepts as a
+    # `/me/mailFolders/{carpeta}/...` segment (BUZON-GRAPH-502-1).
     carpetas: tuple[str, ...] | None = None
 
     @property
@@ -171,17 +184,21 @@ def _fuente_desde_json(id_fuente: str, datos: dict) -> FuenteConfig:
             raise FuenteInvalidaError(
                 f"fuente.json for {id_fuente!r} is missing required field: port"
             )
-        if "carpetas" in datos and datos["carpetas"] is not None:
-            valor_carpetas = datos["carpetas"]
-            if (
-                not isinstance(valor_carpetas, list)
-                or not valor_carpetas
-                or not all(isinstance(c, str) and c for c in valor_carpetas)
-            ):
-                raise FuenteInvalidaError(
-                    f"fuente.json for {id_fuente!r} names an invalid carpetas: {valor_carpetas!r}"
-                )
-            carpetas = tuple(valor_carpetas)
+
+    # BUZON-GRAPH-502-1 -- `carpetas` is meaningful for `imap` (unchanged
+    # from before this slice) and now also for `microsoft`; parsed the same
+    # way for both, never for `google`.
+    if proveedor in ("imap", "microsoft") and "carpetas" in datos and datos["carpetas"] is not None:
+        valor_carpetas = datos["carpetas"]
+        if (
+            not isinstance(valor_carpetas, list)
+            or not valor_carpetas
+            or not all(isinstance(c, str) and c for c in valor_carpetas)
+        ):
+            raise FuenteInvalidaError(
+                f"fuente.json for {id_fuente!r} names an invalid carpetas: {valor_carpetas!r}"
+            )
+        carpetas = tuple(valor_carpetas)
 
     return FuenteConfig(
         id=id_fuente,

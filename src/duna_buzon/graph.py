@@ -7,19 +7,53 @@ request.
 
 `/me/messages` (never `/me/mailFolders/inbox/messages`) reaches every
 folder in the mailbox, since Carlos's own inbox rules move messages out of
-the Inbox before this connector ever sees them.
+the Inbox before this connector ever sees them -- UNLESS this source's own
+`carpetas` setting narrows it (see below).
 
 BUZON-GRAPH-TIMEOUT-1: every call carries `temporizadores.TIMEOUT_HTTPX`
 (never httpx's own 5-second default), and `_get` retries the TRANSIENT
-class only -- a transport failure (timeout, connection reset, ...) or a
-429/503 response -- at most twice, with backoff `_ESPERAS_BASE_SEGUNDOS`
-(1s, then 4s), capped at `_ESPERA_MAXIMA_SEGUNDOS` and overridden by the
-response's own `Retry-After` when one is present. Every other status
-(401, every other 4xx/5xx) still fails on the first attempt, exactly as
-before this slice. A pass that exhausts both retries stops exactly like
-today: cursor unchanged, stop reason recorded, service exits non-zero --
-`_get` still only ever raises `GraphAutenticacionError`/
+class only -- a transport failure (timeout, connection reset, ...) or one
+of `_CODIGOS_REINTENTABLES` -- at most twice, with backoff
+`_ESPERAS_BASE_SEGUNDOS` (1s, then 4s), capped at `_ESPERA_MAXIMA_SEGUNDOS`
+and overridden by the response's own `Retry-After` when one is present.
+Every other status (401, every other 4xx) still fails on the first
+attempt, exactly as before this slice. A pass that exhausts both retries
+stops exactly like today: cursor unchanged, stop reason recorded, service
+exits non-zero -- `_get` still only ever raises `GraphAutenticacionError`/
 `GraphErrorTransitorio`, never anything new.
+
+BUZON-GRAPH-502-1: `_CODIGOS_REINTENTABLES` now also carries 500, 502 and
+504 -- the production stop this slice fixes (`parada=graph listar
+http=502`) showed that a consumer Outlook.com mailbox answers `/me/
+messages` with the whole Graph 5xx "transient" class, not only 503, once
+the query is expensive enough (every folder, `$top=50`). Treated exactly
+like 503: same retry budget, same backoff, same `Retry-After` honouring.
+
+When the LIST call keeps failing with one of those codes even after its
+retry budget is spent, `_listar_pagina` degrades the PAGE SIZE before
+giving up: one single further attempt (no backoff sleep -- this is an
+escalation, not the same transient retry) at `$top=10`, then one more at
+`$top=1`, each only tried if the page's current size is still larger than
+it. `top_lista_usado` carries whichever `$top` was last in use -- the one
+that finally got a page through, or, if every size still failed, the
+smallest one tried -- for `cli.py` to put in `estado.json` next to the
+stop reason. The cursor and dedup semantics never change: a degraded page
+still asks for the exact same `$filter`/`$orderby`, just fewer rows per
+response, so the same messages come back in the same order, only spread
+over more pages.
+
+`carpetas` (mirroring `cliente_imap.py`'s own IMAP-only setting, extended
+here to this provider -- BUZON-GRAPH-502-1), when given, narrows this
+provider to reading ONLY those folders, one at a time in the order
+configured, via `/me/mailFolders/{carpeta}/messages` instead of `/me/
+messages` -- `carpeta` is whatever Graph itself accepts there: a
+well-known folder name (`inbox`, `archive`, ...) or a folder id. Each
+folder's own listing keeps every bit of today's shape (same `$filter`/
+`$orderby`/`$select`/`$top`, same pagination, same retry/degrade
+handling) -- this only changes WHERE the request points. `None` (the
+default, and every source before this slice) means today's behaviour
+exactly: `/me/messages`, reaching every folder in one call, byte for byte
+the same request this client has always sent.
 """
 
 from __future__ import annotations
@@ -40,14 +74,25 @@ _TIPO_ODATA_ADJUNTO_ARCHIVO = "#microsoft.graph.fileAttachment"
 
 _CAMPOS_RESUMEN = "id,internetMessageId,from,subject,receivedDateTime,hasAttachments"
 _TAMANO_PAGINA = "50"
+_TOP_INICIAL = 50
 
-# BUZON-GRAPH-TIMEOUT-1 -- retried, in-pass: a transport failure, or one of
-# these two status codes, both of which Graph itself documents as
-# "back off and try again" (429 throttling, 503 momentarily unavailable).
-# Every other status (401, every other 4xx/5xx) is never retried -- those
-# are either a real auth failure or a defect this connector should stop on
+# BUZON-GRAPH-502-1 -- the page-size ladder a persistently failing LIST page
+# degrades through, smallest last, before giving up: `$top=10`, then
+# `$top=1`. Each step is tried only if the page's current size is still
+# bigger than it (so a page already at 10 only ever tries 1, never 10
+# again).
+_TOPES_DEGRADADOS: tuple[int, ...] = (10, 1)
+
+# BUZON-GRAPH-TIMEOUT-1 (429/503), extended by BUZON-GRAPH-502-1 (500/502/
+# 504) -- retried, in-pass: a transport failure, or one of these status
+# codes, every one of which Graph itself documents or is observed in
+# production to mean "back off and try again" (429 throttling, 503
+# momentarily unavailable, 500/502/504 the rest of Graph's own transient
+# 5xx class, seen in production against a large consumer mailbox). Every
+# other status (401, every other 4xx) is never retried -- those are either
+# a real auth failure or a defect this connector should stop on
 # immediately, not paper over with a retry.
-_CODIGOS_REINTENTABLES = frozenset({429, 503})
+_CODIGOS_REINTENTABLES = frozenset({429, 500, 502, 503, 504})
 _REINTENTOS_MAXIMOS = 2
 _ESPERAS_BASE_SEGUNDOS: tuple[float, ...] = (1.0, 4.0)
 _ESPERA_MAXIMA_SEGUNDOS = 30.0
@@ -140,6 +185,31 @@ class MensajeCompleto:
     adjuntos_descartados: int = 0
 
 
+def _top_de(url: str, parametros: dict[str, str] | None) -> int:
+    """The `$top` a page's own request is currently using -- read from the
+    `parametros` dict for a fresh request, or parsed off `url`'s own query
+    string for a `@odata.nextLink` continuation (which already bakes its
+    `$top` into the URL). `_TOP_INICIAL` only as a last-resort fallback,
+    which a request this client built itself never actually needs."""
+    if parametros is not None and "$top" in parametros:
+        return int(parametros["$top"])
+    valor = httpx.URL(url).params.get("$top")
+    return int(valor) if valor is not None else _TOP_INICIAL
+
+
+def _con_top(
+    url: str, parametros: dict[str, str] | None, top_nuevo: int
+) -> tuple[str, dict[str, str] | None]:
+    """The same request, with `$top` replaced by `top_nuevo` -- every other
+    part of the query (`$filter`, `$orderby`, `$select`, or a nextLink's own
+    skip token) untouched."""
+    if parametros is not None:
+        nuevos = dict(parametros)
+        nuevos["$top"] = str(top_nuevo)
+        return url, nuevos
+    return str(httpx.URL(url).copy_set_param("$top", str(top_nuevo))), None
+
+
 def _formato_fecha_filtro(momento: datetime.datetime) -> str:
     momento_utc = (
         momento.astimezone(datetime.UTC) if momento.tzinfo else momento.replace(tzinfo=datetime.UTC)
@@ -170,6 +240,7 @@ class GraphClient:
         *,
         transport: httpx.BaseTransport | None = None,
         dormir: Callable[[float], None] = time.sleep,
+        carpetas: Sequence[str] | None = None,
     ) -> None:
         self._cliente = httpx.Client(
             base_url=URL_BASE,
@@ -178,31 +249,41 @@ class GraphClient:
             timeout=temporizadores.TIMEOUT_HTTPX,
         )
         self._dormir = dormir
+        self._carpetas = tuple(carpetas) if carpetas is not None else None
         # BUZON-GRAPH-TIMEOUT-1 -- total retries this client has performed
         # across every call so far this pass, for `estado.json` (`cli.py`
         # reads this once the pass ends, via `getattr(..., 0)` so a
         # provider with no such counter, e.g. IMAP or Gmail, reports 0).
         self.reintentos_usados = 0
+        # BUZON-GRAPH-502-1 -- the `$top` last in use for the LIST call,
+        # for `estado.json` the same way (`getattr(..., None)`, omitted for
+        # a provider with no such concept).
+        self.top_lista_usado = _TOP_INICIAL
 
     def cerrar(self) -> None:
         self._cliente.close()
 
     def _get(
-        self, url: str, *, paso: str, params: dict[str, str] | None = None
+        self,
+        url: str,
+        *,
+        paso: str,
+        params: dict[str, str] | None = None,
+        reintentos_maximos: int = _REINTENTOS_MAXIMOS,
     ) -> httpx.Response:
         intento = 0
         while True:
             try:
                 respuesta = self._cliente.get(url, params=params)
             except httpx.TransportError as exc:
-                if intento >= _REINTENTOS_MAXIMOS:
+                if intento >= reintentos_maximos:
                     raise GraphErrorTransitorio(paso, clase_excepcion=type(exc).__name__) from exc
                 self._dormir(_ESPERAS_BASE_SEGUNDOS[intento])
                 self.reintentos_usados += 1
                 intento += 1
                 continue
 
-            if respuesta.status_code in _CODIGOS_REINTENTABLES and intento < _REINTENTOS_MAXIMOS:
+            if respuesta.status_code in _CODIGOS_REINTENTABLES and intento < reintentos_maximos:
                 espera = _espera_retry_after(respuesta)
                 if espera is None:
                     espera = _ESPERAS_BASE_SEGUNDOS[intento]
@@ -221,19 +302,53 @@ class GraphClient:
             raise GraphAutenticacionError(paso, http_status=401)
         raise GraphErrorTransitorio(paso, http_status=respuesta.status_code)
 
-    def listar_mensajes(self, desde: datetime.datetime) -> Iterator[MensajeResumen]:
-        """Ascending order, `receivedDateTime` filtered from `desde` (the
-        caller applies the 10-minute overlap before calling this), every
-        folder, following `@odata.nextLink` to exhaustion."""
+    def _listar_pagina(
+        self, url: str, parametros: dict[str, str] | None, *, paso: str
+    ) -> httpx.Response:
+        """One LIST page, with the `$top`-degrade escalation
+        (BUZON-GRAPH-502-1): if the page still answers with one of
+        `_CODIGOS_REINTENTABLES` after `_get`'s own retry budget is spent,
+        try it again, ONCE per step (no backoff sleep -- this is a
+        separate escalation, not the same transient retry), at each size in
+        `_TOPES_DEGRADADOS` smaller than the page's current one, stopping
+        at the first that gets back anything else (success or a genuine
+        non-transient failure). `self.top_lista_usado` always ends up
+        naming whichever `$top` that last attempt used."""
+        top_actual = _top_de(url, parametros)
+        self.top_lista_usado = top_actual
+        respuesta = self._get(url, params=parametros, paso=paso)
+        if respuesta.status_code not in _CODIGOS_REINTENTABLES:
+            return respuesta
+
+        topes_restantes = [t for t in _TOPES_DEGRADADOS if t < top_actual]
+        for indice, top_nuevo in enumerate(topes_restantes):
+            url_degradada, parametros_degradados = _con_top(url, parametros, top_nuevo)
+            self.top_lista_usado = top_nuevo
+            es_el_ultimo = indice == len(topes_restantes) - 1
+            try:
+                respuesta = self._get(
+                    url_degradada, params=parametros_degradados, paso=paso, reintentos_maximos=0
+                )
+            except GraphErrorTransitorio:
+                if es_el_ultimo:
+                    raise
+                continue
+            if respuesta.status_code not in _CODIGOS_REINTENTABLES:
+                return respuesta
+        return respuesta
+
+    def _listar_mensajes_de(
+        self, desde: datetime.datetime, carpeta: str | None
+    ) -> Iterator[MensajeResumen]:
         parametros: dict[str, str] | None = {
             "$filter": f"receivedDateTime ge {_formato_fecha_filtro(desde)}",
             "$orderby": "receivedDateTime asc",
             "$select": _CAMPOS_RESUMEN,
             "$top": _TAMANO_PAGINA,
         }
-        url = "/me/messages"
+        url = f"/me/mailFolders/{carpeta}/messages" if carpeta is not None else "/me/messages"
         while True:
-            respuesta = self._get(url, params=parametros, paso="listar")
+            respuesta = self._listar_pagina(url, parametros, paso="listar")
             self._exigir_ok(respuesta, paso="listar")
             cuerpo = respuesta.json()
             for fila in cuerpo.get("value", []):
@@ -243,6 +358,17 @@ class GraphClient:
                 return
             url = siguiente
             parametros = None  # the nextLink already carries its own query
+
+    def listar_mensajes(self, desde: datetime.datetime) -> Iterator[MensajeResumen]:
+        """Ascending order, `receivedDateTime` filtered from `desde` (the
+        caller applies the 10-minute overlap before calling this), following
+        `@odata.nextLink` to exhaustion. Every folder in one call (`/me/
+        messages`) unless `self._carpetas` narrows this source to specific
+        ones -- in which case each named folder is read in full, in the
+        order configured, via its own `/me/mailFolders/{carpeta}/messages`."""
+        carpetas = self._carpetas if self._carpetas is not None else (None,)
+        for carpeta in carpetas:
+            yield from self._listar_mensajes_de(desde, carpeta)
 
     def listar_adjuntos_metadata(self, id_mensaje: str) -> list[AdjuntoMetadata]:
         """Metadata only -- names, sizes and which kind of attachment each

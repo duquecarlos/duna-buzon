@@ -1,6 +1,7 @@
-"""The one line a pass ever prints: counts, the pass's own finish time and
-retry count (BUZON-GRAPH-TIMEOUT-1) -- never a sender, a subject, a body,
-a filename, a token, a cache or a Graph message id."""
+"""The one line a pass ever prints: counts, the pass's own finish time,
+retry count (BUZON-GRAPH-TIMEOUT-1) and -- for a Graph source -- the `$top`
+the LIST call was last using (BUZON-GRAPH-502-1) -- never a sender, a
+subject, a body, a filename, a token, a cache or a Graph message id."""
 
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ def linea_resumen(
     *,
     finalizado_en: datetime.datetime | None = None,
     reintentos: int | None = None,
+    top: int | None = None,
 ) -> str:
     partes = [
         f"vistos={contadores.vistos}",
@@ -33,6 +35,8 @@ def linea_resumen(
     ]
     if reintentos is not None:
         partes.append(f"reintentos={reintentos}")
+    if top is not None:
+        partes.append(f"top={top}")
     if finalizado_en is not None:
         partes.append(f"finalizado_en={_formato_fecha_utc(finalizado_en)}")
     linea = " ".join(partes)

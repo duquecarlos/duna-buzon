@@ -683,6 +683,154 @@ def test_timeout_de_graph_persistente_detiene_la_pasada_sin_persistir_cursor(tmp
     assert cliente_graph.reintentos_usados == 2
 
 
+# ---------------------------------------------------------------------------
+# BUZON-GRAPH-502-1 -- 500/502/504 retried like 503, degraded `$top` when
+# they persist, cursor semantics unchanged either way.
+# ---------------------------------------------------------------------------
+
+
+def test_502_de_graph_se_reintenta_y_el_cursor_avanza(tmp_path) -> None:
+    mensajes = [MensajeFalso(id="m1", remitente="notificaciones@banco-ejemplo.com")]
+    transporte_base = _transporte_graph(mensajes)
+    llamadas = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 1 and request.url.path.endswith("/me/messages"):
+            return httpx.Response(502, text="bad gateway")
+        return transporte_base.handler(request)
+
+    cliente_graph = GraphClient(
+        "token", transport=httpx.MockTransport(handler), dormir=lambda segundos: None
+    )
+    cliente_finanzas = _cliente_finanzas(tmp_path, _finanzas_siempre_201)
+
+    resultado = ejecutar_pasada(
+        proveedor=cliente_graph,
+        cliente_finanzas=cliente_finanzas,
+        reglas=_reglas(),
+        cursor_inicial=_CURSOR_INICIAL,
+    )
+
+    assert resultado.contadores.reenviados == 1
+    assert resultado.debe_persistir_cursor
+    assert resultado.cursor_final == datetime.datetime(2026, 3, 1, 10, 0, tzinfo=datetime.UTC)
+    assert cliente_graph.top_lista_usado == 50
+
+
+def test_502_persistente_degradado_a_top_10_el_cursor_avanza(tmp_path) -> None:
+    mensajes = [MensajeFalso(id="m1", remitente="notificaciones@banco-ejemplo.com")]
+    transporte_base = _transporte_graph(mensajes)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/me/messages") and request.url.params.get("$top") != "10":
+            return httpx.Response(502, text="bad gateway")
+        return transporte_base.handler(request)
+
+    cliente_graph = GraphClient(
+        "token", transport=httpx.MockTransport(handler), dormir=lambda segundos: None
+    )
+    cliente_finanzas = _cliente_finanzas(tmp_path, _finanzas_siempre_201)
+
+    resultado = ejecutar_pasada(
+        proveedor=cliente_graph,
+        cliente_finanzas=cliente_finanzas,
+        reglas=_reglas(),
+        cursor_inicial=_CURSOR_INICIAL,
+    )
+
+    assert resultado.contadores.reenviados == 1
+    assert resultado.debe_persistir_cursor
+    assert resultado.cursor_final == datetime.datetime(2026, 3, 1, 10, 0, tzinfo=datetime.UTC)
+    assert cliente_graph.top_lista_usado == 10
+
+
+def test_502_persistente_en_todo_tamano_detiene_la_pasada_sin_persistir_cursor(tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="bad gateway")
+
+    cliente_graph = GraphClient(
+        "token", transport=httpx.MockTransport(handler), dormir=lambda segundos: None
+    )
+    cliente_finanzas = _cliente_finanzas(tmp_path, _finanzas_siempre_201)
+
+    resultado = ejecutar_pasada(
+        proveedor=cliente_graph,
+        cliente_finanzas=cliente_finanzas,
+        reglas=_reglas(),
+        cursor_inicial=_CURSOR_INICIAL,
+    )
+
+    assert resultado.detenida_por_error_transitorio
+    assert not resultado.debe_persistir_cursor
+    assert resultado.cursor_final == _CURSOR_INICIAL
+    assert resultado.motivo == "graph listar http=502"
+    assert cliente_graph.top_lista_usado == 1
+
+
+def test_carpetas_de_graph_lee_solo_las_configuradas_y_el_cursor_avanza(tmp_path) -> None:
+    """`carpetas` set on a Microsoft source: only the named folders are
+    read, in the order configured, and every message seen -- across both
+    folders -- still advances the cursor and reaches Finanzas exactly once
+    each (dedup intact)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        segmentos = [s for s in request.url.path.split("/") if s]
+        if segmentos[-2] == "attachments" or segmentos[-1] == "attachments":
+            return httpx.Response(200, json={"value": []})
+        if segmentos[-1] != "messages":
+            return httpx.Response(200, json={"body": {"content": "<p>cuerpo</p>"}})
+        carpeta = segmentos[-2]
+        datos = {
+            "inbox": [
+                {
+                    "id": "m1",
+                    "internetMessageId": "<m1@mail.example>",
+                    "from": {"emailAddress": {"address": "notificaciones@banco-ejemplo.com"}},
+                    "subject": "hola",
+                    "receivedDateTime": "2026-03-01T09:00:00Z",
+                    "hasAttachments": False,
+                }
+            ],
+            "archive": [
+                {
+                    "id": "m2",
+                    "internetMessageId": "<m2@mail.example>",
+                    "from": {"emailAddress": {"address": "notificaciones@banco-ejemplo.com"}},
+                    "subject": "hola de nuevo",
+                    "receivedDateTime": "2026-03-01T11:00:00Z",
+                    "hasAttachments": False,
+                }
+            ],
+        }
+        return httpx.Response(200, json={"value": datos[carpeta]})
+
+    cliente_graph = GraphClient(
+        "token", transport=httpx.MockTransport(handler), carpetas=("inbox", "archive")
+    )
+    enviados: list[str] = []
+
+    def finanzas_capturar(request: httpx.Request) -> httpx.Response:
+        enviados.append(_meta_json_desde_multipart(request.read())["id_externo"])
+        return httpx.Response(201, json={"id": "e1", "duplicada": False, "adjuntos_omitidos": 0})
+
+    cliente_finanzas = _cliente_finanzas(tmp_path, finanzas_capturar)
+
+    resultado = ejecutar_pasada(
+        proveedor=cliente_graph,
+        cliente_finanzas=cliente_finanzas,
+        reglas=_reglas(),
+        cursor_inicial=_CURSOR_INICIAL,
+    )
+
+    assert resultado.contadores.vistos == 2
+    assert resultado.contadores.reenviados == 2
+    assert enviados == ["<m1@mail.example>", "<m2@mail.example>"]  # no duplicate, folder order kept
+    assert resultado.debe_persistir_cursor
+    assert resultado.cursor_final == datetime.datetime(2026, 3, 1, 11, 0, tzinfo=datetime.UTC)
+
+
 def test_asunto_multibyte_sobre_el_tope_se_trunca_sin_romper_caracteres(tmp_path) -> None:
     # "🙂" is one Python character but four UTF-8 bytes -- a byte-based
     # truncation at the cap would split it. Python string slicing never

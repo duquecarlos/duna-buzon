@@ -9,7 +9,10 @@ multi-source by BUZON-FUENTES-ESQUEMA-1; gained a generic IMAP provider by BUZON
 that provider's own `INBOX`-only start to every folder by BUZON-FUENTE-IMAP-CARPETAS-1, then narrowed back down
 to a named allow-list for the shared-mailbox case by BUZON-IMAP-CARPETAS-INCLUIDAS-1; gained sources Carlos
 (or, eventually, any user) connects through Cuenta Duna's own OAuth -- Gmail and Microsoft alike, with a
-fresh token pulled every pass, never stored here -- by BUZON-FUENTES-PULL-1. See `CLAUDE.md` for the gate and
+fresh token pulled every pass, never stored here -- by BUZON-FUENTES-PULL-1; the Graph LIST call gained
+explicit outbound timeouts and in-pass retries for a transport failure or 429/503 by BUZON-GRAPH-TIMEOUT-1,
+then 500/502/504 joined that retried class and a persistently failing page degrades its own `$top` (and the
+same `carpetas` narrowing IMAP already had, extended to this provider) by BUZON-GRAPH-502-1. See `CLAUDE.md` for the gate and
 the invariants, `DECISIONS.md` for the ledger, and `deploy/host/README.md` for the operator steps.
 
 ## Shape
@@ -32,7 +35,8 @@ fuentes/<id>/cursor_proveedor.json -- this source's own provider-defined resume 
                                        "<uidvalidity>:<uid>" pair; absent for Microsoft and Google)
 fuentes/<id>/reglas.json           -- this source's own matching rules (never committed; see `reglas.py`)
 fuentes/<id>/estado.json           -- this source's own last-pass summary line: counts, when that pass
-                                       finished, and how many Graph retries it used
+                                       finished, how many Graph retries it used, and -- for a Microsoft
+                                       source -- the `$top` the LIST call was last using
 ```
 
 `host`/`port` are only set for `proveedor == "imap"` (`None` otherwise).
@@ -94,11 +98,14 @@ The commands:
   auth, a network error) logs its id and stop reason and does not stop the others; the pass exits non-zero if any
   source failed. Meant to run every 10 minutes under `duna-buzon.timer` on the host. Every outbound call (Graph,
   Gmail, Finanzas, Cuenta Duna, IMAP) carries an explicit timeout (`temporizadores.py`) instead of relying on a
-  library default; a Graph call that times out, or Graph answering 429/503, is retried up to twice inside the same
-  pass (1s then 4s backoff, honouring `Retry-After` up to 30s) before the pass stops the way it always has
-  (BUZON-GRAPH-TIMEOUT-1).
-- `estado` -- prints every source's own cursor and last-pass counts, when that pass finished, and how many Graph
-  retries it used. Nothing personal.
+  library default; a Graph call that times out, or Graph answering 429/500/502/503/504, is retried up to twice
+  inside the same pass (1s then 4s backoff, honouring `Retry-After` up to 30s) before the pass stops the way it
+  always has (BUZON-GRAPH-TIMEOUT-1, widened to the whole 5xx transient class by BUZON-GRAPH-502-1). If the LIST
+  call keeps failing even after that, BUZON-GRAPH-502-1 retries the same page once at `$top=10`, then once more at
+  `$top=1`, before finally giving up -- the same messages, in the same order, just fewer per page; see "When Graph
+  can't list the whole mailbox" below.
+- `estado` -- prints every source's own cursor and last-pass counts, when that pass finished, how many Graph
+  retries it used, and -- for a Microsoft source -- the `$top` it was last using. Nothing personal.
 - `fuentes` -- lists every configured source (id, provider, address, label, active/inactive). No secrets.
 - `carpetas <id>` -- read-only, for ONE imap source: signs in with its already-stored app password and prints
   every folder the server's `LIST` returns, with its flags and whether this source would read it today. Never
@@ -139,6 +146,19 @@ carpeta='Sent' banderas=\Sent leida=no
 Changing `carpetas` on an existing source takes effect the next `sincronizar` pass: a folder's own stored cursor
 (`cursor_proveedor.json`) is kept exactly where it was while that folder stays included, and dropped the moment it
 is not -- never carried forward silently for a folder this source no longer reads.
+
+### When Graph can't list the whole mailbox (BUZON-GRAPH-502-1)
+
+The retry and `$top`-degrade above handle a mailbox that is merely slow or momentarily unavailable. If a
+Microsoft source keeps failing even at `$top=1` -- Graph genuinely cannot answer `/me/messages` as a
+whole for it -- the same `carpetas` field `fuente.json` already supports for `imap` is now also read for
+`proveedor == "microsoft"`: a non-empty list of folder names (well-known, like `inbox`, or Graph folder
+ids). Set, this source reads each named folder on its own, in the order given, via `/me/mailFolders/
+{carpeta}/messages` instead of one `/me/messages` call across the whole mailbox -- a much cheaper query
+for Graph to answer, at the cost of never seeing mail outside those folders. Absent (the default, and
+every Microsoft `fuente.json` before this slice) means today's behaviour exactly: `/me/messages`, every
+folder in one call. There is no CLI for this on a Microsoft source today (unlike `agregar-fuente imap`'s
+own `--carpeta`) -- see `deploy/host/README.md` for editing `fuente.json` by hand.
 
 The FIRST time any command runs against a data directory still in the single-mailbox layout
 (`cache.bin`/`cursor.json`/`reglas.json`/`estado.json` directly under `$BUZON_DATOS`), it migrates itself

@@ -183,8 +183,16 @@ def _ejecutar_una_fuente(
     # TIMEOUT-1); every other provider (IMAP, Gmail) and every test fake
     # simply lacks it, so this reports 0 for them -- never a guess.
     reintentos = getattr(proveedor, "reintentos_usados", 0)
+    # `top_lista_usado` is `GraphClient`'s own (BUZON-GRAPH-502-1); every
+    # other provider has no such concept, so this omits it for them rather
+    # than guessing a number that means nothing there.
+    top_usado = getattr(proveedor, "top_lista_usado", None)
     linea = registro.linea_resumen(
-        resultado.contadores, resultado.motivo, finalizado_en=_ahora(), reintentos=reintentos
+        resultado.contadores,
+        resultado.motivo,
+        finalizado_en=_ahora(),
+        reintentos=reintentos,
+        top=top_usado,
     )
     cripto.asegurar_directorio_datos(Path(directorio))
     cripto.escribir_archivo_sensible(Path(directorio) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8"))

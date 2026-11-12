@@ -177,6 +177,36 @@ flag/move/delete command is ever sent (`src/duna_buzon/cliente_imap.py`; proven 
 Zoho's own rules file into a folder (invoices, contracts) is read exactly like `INBOX` is, matching
 the Microsoft source's own every-folder reach.
 
+## When Graph can't list the whole mailbox (BUZON-GRAPH-502-1)
+
+As of `BUZON-GRAPH-TIMEOUT-1` and `BUZON-GRAPH-502-1`, a Graph `/me/messages` LIST call that fails with
+500/502/503/504 is retried in-pass (same budget as 429), and -- if it still fails after that -- the
+connector retries the SAME page once at `$top=10`, then once more at `$top=1`, before finally giving up
+on that pass (`estado.json` records which `$top` got through, or, failing every size, the smallest one
+tried, next to `parada=graph listar http=<code>`). This handles a mailbox that is merely slow or
+momentarily unavailable on its own.
+
+If a mailbox keeps failing even at `$top=1` -- Graph genuinely cannot answer `/me/messages` as a whole
+for it, as happened against `hotmail-carlos`'s own full mailbox -- add an optional `carpetas` array to
+that source's `fuentes/<id>/fuente.json`, the same field `agregar-fuente imap` already supports, now also
+read for `proveedor: "microsoft"`:
+
+```json
+{
+  "...": "...",
+  "carpetas": ["inbox"]
+}
+```
+
+Each entry is whatever Graph itself accepts as a mail folder: a well-known name (`inbox`, `archive`,
+`sentitems`, ...) or a folder id. The connector then reads each named folder on its own, in the order
+given, via `/me/mailFolders/{carpeta}/messages` instead of one `/me/messages` call across the whole
+mailbox -- a much cheaper query for Graph to answer. There is no CLI for this on a Microsoft source
+today (unlike `agregar-fuente imap`'s own `--carpeta`): edit `fuente.json` by hand, as `duna`, and restart
+the next scheduled pass (or run one by hand with `systemd-run`, as in `status`'s own health check).
+Leaving `carpetas` out (the default, and every Microsoft `fuente.json` before this slice) keeps today's
+behaviour exactly: one `/me/messages` call reaching every folder.
+
 ## Trust boundary
 
 Whoever can push to this repository's `main` can run code as root on this host, as today -- this

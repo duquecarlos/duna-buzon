@@ -17,13 +17,19 @@ from duna_buzon.graph import (
 _DESDE = datetime.datetime(2026, 3, 1, tzinfo=datetime.UTC)
 
 
-def _mensaje_json(id_: str, *, remitente: str = "a@b.com", asunto: str | None = "hola") -> dict:
+def _mensaje_json(
+    id_: str,
+    *,
+    remitente: str = "a@b.com",
+    asunto: str | None = "hola",
+    recibido: str = "2026-03-01T10:00:00Z",
+) -> dict:
     return {
         "id": id_,
         "internetMessageId": f"<{id_}@mail.example>",
         "from": {"emailAddress": {"address": remitente}},
         "subject": asunto,
-        "receivedDateTime": "2026-03-01T10:00:00Z",
+        "receivedDateTime": recibido,
         "hasAttachments": False,
     }
 
@@ -553,23 +559,147 @@ def test_503_sin_retry_after_usa_el_backoff_por_defecto() -> None:
     assert dormidas == [1.0]
 
 
-def test_500_nunca_se_reintenta() -> None:
-    """500 is NOT in the retried class -- only a transport failure or
-    429/503 are. A single call, exactly like before this slice."""
+def test_500_se_reintenta_igual_que_503() -> None:
+    """BUZON-GRAPH-502-1: 500 joined the retried class alongside 429/503 --
+    before this slice it was never retried at all."""
     llamadas = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal llamadas
         llamadas += 1
-        return httpx.Response(500, text="boom")
+        if llamadas == 1:
+            return httpx.Response(500, text="boom")
+        return httpx.Response(200, json={"value": []})
 
     dormidas: list[float] = []
     cliente = GraphClient(
         "token-falso", transport=httpx.MockTransport(handler), dormir=dormidas.append
     )
-    with pytest.raises(GraphErrorTransitorio):
+    list(cliente.listar_mensajes(_DESDE))
+    cliente.cerrar()
+
+    assert llamadas == 2
+    assert dormidas == [1.0]
+
+
+# ---------------------------------------------------------------------------
+# BUZON-GRAPH-502-1 -- 500/502/504 join the retried class, and a LIST page
+# that keeps failing even after its retry budget is spent degrades its own
+# `$top` (50 -> 10 -> 1) before giving up.
+# ---------------------------------------------------------------------------
+
+
+def test_502_se_reintenta_y_tiene_exito() -> None:
+    llamadas = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 1:
+            return httpx.Response(502, text="bad gateway")
+        return httpx.Response(200, json={"value": [_mensaje_json("m1")]})
+
+    dormidas: list[float] = []
+    cliente = GraphClient(
+        "token-falso", transport=httpx.MockTransport(handler), dormir=dormidas.append
+    )
+    mensajes = list(cliente.listar_mensajes(_DESDE))
+    cliente.cerrar()
+
+    assert [m.id for m in mensajes] == ["m1"]
+    assert llamadas == 2
+    assert dormidas == [1.0]
+    assert cliente.top_lista_usado == 50
+
+
+def test_502_persistente_degrada_a_top_10_y_tiene_exito() -> None:
+    tops_vistos: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        top = request.url.params.get("$top")
+        tops_vistos.append(top)
+        if top == "10":
+            return httpx.Response(200, json={"value": [_mensaje_json("m1")]})
+        return httpx.Response(502, text="bad gateway")
+
+    cliente = GraphClient(
+        "token-falso", transport=httpx.MockTransport(handler), dormir=lambda segundos: None
+    )
+    mensajes = list(cliente.listar_mensajes(_DESDE))
+    cliente.cerrar()
+
+    assert [m.id for m in mensajes] == ["m1"]
+    # $top=50 tried three times (the original attempt plus its two
+    # retries), all 502, then the single degraded attempt at $top=10
+    # succeeds -- $top=1 is never even tried.
+    assert tops_vistos == ["50", "50", "50", "10"]
+    assert cliente.top_lista_usado == 10
+
+
+def test_502_persistente_en_todo_tamano_se_rinde_y_registra_el_top_mas_chico() -> None:
+    tops_vistos: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tops_vistos.append(request.url.params.get("$top"))
+        return httpx.Response(502, text="bad gateway")
+
+    cliente = GraphClient(
+        "token-falso", transport=httpx.MockTransport(handler), dormir=lambda segundos: None
+    )
+    with pytest.raises(GraphErrorTransitorio) as excinfo:
         list(cliente.listar_mensajes(_DESDE))
     cliente.cerrar()
 
-    assert llamadas == 1
-    assert dormidas == []
+    assert tops_vistos == ["50", "50", "50", "10", "1"]
+    assert excinfo.value.motivo == "graph listar http=502"
+    assert cliente.top_lista_usado == 1
+
+
+def test_carpetas_configuradas_lee_solo_esas_carpetas_en_orden_ascendente() -> None:
+    peticiones: list[str] = []
+    mensajes_por_carpeta = {
+        "inbox": [_mensaje_json("m1", recibido="2026-03-01T09:00:00Z")],
+        "archive": [_mensaje_json("m2", recibido="2026-03-01T11:00:00Z")],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        peticiones.append(request.url.path)
+        segmentos = [s for s in request.url.path.split("/") if s]
+        carpeta = segmentos[-2]
+        assert segmentos[-3] == "mailFolders"
+        return httpx.Response(200, json={"value": mensajes_por_carpeta[carpeta]})
+
+    cliente = GraphClient(
+        "token-falso", transport=httpx.MockTransport(handler), carpetas=("inbox", "archive")
+    )
+    mensajes = list(cliente.listar_mensajes(_DESDE))
+    cliente.cerrar()
+
+    assert [m.id for m in mensajes] == ["m1", "m2"]  # no duplicate, folder order kept
+    assert [m.recibido_en for m in mensajes] == sorted(m.recibido_en for m in mensajes)
+    assert any(p.endswith("/me/mailFolders/inbox/messages") for p in peticiones)
+    assert any(p.endswith("/me/mailFolders/archive/messages") for p in peticiones)
+    assert not any(p.endswith("/me/messages") for p in peticiones)
+
+
+def test_carpetas_no_configuradas_mantiene_la_peticion_de_hoy_byte_a_byte() -> None:
+    capturadas: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        capturadas.append(request)
+        return httpx.Response(200, json={"value": []})
+
+    cliente = GraphClient("token-falso", transport=httpx.MockTransport(handler))
+    list(cliente.listar_mensajes(_DESDE))
+    cliente.cerrar()
+
+    assert len(capturadas) == 1
+    peticion = capturadas[0]
+    assert peticion.url.path.endswith("/me/messages")
+    assert "mailFolders" not in peticion.url.path
+    assert dict(peticion.url.params) == {
+        "$filter": "receivedDateTime ge 2026-03-01T00:00:00Z",
+        "$orderby": "receivedDateTime asc",
+        "$select": "id,internetMessageId,from,subject,receivedDateTime,hasAttachments",
+        "$top": "50",
+    }

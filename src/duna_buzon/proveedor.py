@@ -50,7 +50,7 @@ def construir_proveedor(
     transport: httpx.BaseTransport | None = None,
 ) -> Proveedor:
     if fuente.proveedor == "microsoft":
-        return GraphClient(token, transport=transport)
+        return GraphClient(token, transport=transport, carpetas=fuente.carpetas)
     if fuente.proveedor == "google":
         return GmailClient(token, transport=transport)
     if fuente.proveedor == "imap":
