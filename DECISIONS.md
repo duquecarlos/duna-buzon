@@ -1771,3 +1771,120 @@ slice (`BUZON-GRAPH-502-1`) widened Graph's retried status-code class to the who
 added the `$top`-degrade escalation for a page that still fails past that, extended `carpetas` from
 `imap`-only to also cover `microsoft` sources, and taught `estado.json`/`estado` to carry the `$top`
 last in use.
+
+---
+
+## BUZON-CARPETAS-MICROSOFT-CLI-1 -- CLI for `carpetas` on an existing microsoft (or imap) source (2026-11-12)
+
+### Why
+
+`BUZON-GRAPH-502-1` made `carpetas` work for `proveedor == "microsoft"`, but `deploy/host/README.md`
+still said there was no CLI for it -- an operator had to hand-edit `fuente.json` as `duna`. On 12 Nov,
+right after that slice shipped, `hotmail-carlos` needed exactly that (Graph 502 even at `$top=1` against
+`/me/messages`), and Carlos ran a python one-liner by hand to set it. Main reaches the host only through
+`deploy/host/duna-deploy-buzon`, so this was the gap: operator tooling over an existing setting, no wire
+(`ORCH-CARLOS-DELEGATES-TIER-1-1`).
+
+### What changed
+
+**`fijar-carpetas <id> [--carpeta X ...] [--todas]`** (`__main__.py`'s `_parsear_fijar_carpetas`,
+`cli.py`'s `comando_fijar_carpetas`) -- sets `carpetas` on an existing `imap` or `microsoft` source to
+exactly the folders given, or, with `--todas`, removes it entirely (back to today's default: every
+folder). Validates the id exists (`fuentes.cargar_fuente`, which already raises `FuenteInvalidaError`
+for an unknown one) and the provider is `imap` or `microsoft` before writing anything; prints the before
+and after lists; never touches `credencial.bin` or the cursor.
+
+**The write is atomic** (`fuentes.guardar_fuente_atomico`, new) -- a temp file in the SAME directory
+(`tempfile.mkstemp`, mode 0600 where the OS supports it) followed by `os.replace`, never a truncate-in-
+place window where a concurrent `sincronizar` pass or a reader could see a half-written `fuente.json`.
+Every other writer of `fuente.json` keeps `guardar_fuente`'s own truncate-in-place write, unchanged --
+both now share one `_contenido_fuente_json` for the JSON shape, so "preserving every other key" is
+exact: whatever `FuenteConfig`'s own round trip already carries (id, proveedor, direccion, etiqueta,
+token_finanzas_ref, activa, host, port, origen, carpetas), nothing invented or dropped.
+
+**`carpetas-graph <id>`** (`cli.py`'s `comando_carpetas_graph`, `graph.py`'s `GraphClient.listar_carpetas`)
+-- the `microsoft`-source twin of the existing `imap`-only `carpetas <id>`: signs in with the already-
+stored token and lists every TOP-LEVEL Graph mail folder's display name and id, plus its well-known name
+(`inbox`, `archive`, `sentitems`, `drafts`, `deleteditems`, `junkemail`, `outbox`) where one applies, so
+an operator can choose a `carpetas` entry without guessing. One `/me/mailFolders` LIST call plus one
+`/me/mailFolders/{nombre}` GET per well-known name probed (a 404 just means that mailbox lacks it, not an
+error) -- every one of them a GET, like every other call `GraphClient` makes; Graph's own `mailFolder`
+resource carries no field naming a folder's well-known name, so this is how `graph.py`'s own docstring
+explains finding it. Never called from the sync path (`listar_mensajes`).
+
+**Both exposed through `deploy/host/duna-deploy-buzon`:**
+- `carpetas <id>` -- reads the source's own `proveedor` straight from its `fuente.json` (never a secret;
+  root can read any file on the host) via the new pure, path-parameterized `_proveedor_desde_archivo`
+  (same technique `_archivo_cambio`/`_forma_sudoers_es_estricta` already use), then runs `python -m
+  duna_buzon carpetas <id>` for `imap` or `carpetas-graph <id>` for `microsoft`, read-only, as `duna`.
+- `fijar-carpetas <id> <carpeta>...` / `fijar-carpetas <id> --todas` -- forwards to `python -m duna_buzon
+  fijar-carpetas`, translating each positional folder name into its own `--carpeta` argument; every
+  folder name reaches python as its own argv element inside an array (`comando+=(...)`,
+  `"${comando[@]}"`), never built into a shell string, never `eval`'d.
+- An id must match `[a-z0-9-]+` and a folder name `[A-Za-z0-9_ .-]+` (or a Graph id, same shape),
+  checked in `parse_args` BEFORE `require_root`, same ordering every other subcommand already uses.
+  `--todas` mixed with any other positional argument is refused by name as the ambiguous shape it is,
+  rather than silently read as a folder literally named `--todas` (which would otherwise fit the
+  allowlist, since `-` is a permitted character). The sudoers rule (`carlos ALL=(root) NOPASSWD: /usr/
+  local/sbin/duna-deploy-buzon`, no argument list) already allows any argument to this one fixed path --
+  unchanged.
+
+**`deploy/host/README.md`** -- the "There is no CLI for this on a Microsoft source today ... edit
+`fuente.json` by hand" sentence is replaced by a new "Choosing and setting `carpetas`" section
+documenting both verbs; the "Use" block gained the two new invocation lines. **Top-level `README.md`**
+gained `carpetas-graph`/`fijar-carpetas` bullets next to the existing `carpetas <id>` one, and a
+sentence in "When Graph can't list the whole mailbox" pointing at them instead of "no CLI".
+
+### Tests, measured
+
+30 new `def test_` functions (`git diff bbfafe8 feat/buzon-carpetas-microsoft-cli-1 -- tests/`, zero
+removed), several of them `@pytest.mark.parametrize`d into multiple collected cases: `test_graph.py`
+(`listar_carpetas` marks the well-known match and sorts by name; no well-known match at all; 401 still
+raises `GraphAutenticacionError` -- 3); `test_cli.py` (`carpetas-graph` lists name/id/well-known and
+refuses a non-microsoft source, an unknown id, and "no account" the same way `carpetas` already does;
+`fijar-carpetas` sets then removes with `--todas`, works for `imap` too, refuses an unknown id and a
+`google` source, preserves every other key including `credencial.bin`, and leaves no `.tmp` behind --
+10); `test_main.py` (`carpetas-graph`/`fijar-carpetas` usage-shape rejections and dispatch,
+`--carpeta`+`--todas` together refused, `--carpeta` with no value refused -- 8);
+`test_host_deploy_entry_script.py` (9 functions, several parametrized: the id/carpeta allowlist accepts
+the valid shapes and rejects the invalid ones -- including shell metacharacters and the
+`--todas`-mixed-with-a-folder ambiguity -- for both `carpetas` and `fijar-carpetas`;
+`_proveedor_desde_archivo` reads the field or refuses by name; `cmd_carpetas` routes `imap`/`microsoft`
+to the right python subcommand and refuses `google`; the array-based systemd-run call never interpolates
+into a string).
+
+### Gate, measured
+
+`uv run pytest -q` on the slice branch (`feat/buzon-carpetas-microsoft-cli-1`), tree
+`1fb7b935a054eabae5ab6e9f3d563181cfee34c7` (slice commit `4ef010fa393b24c3add34ca174495d9862bd3433`):
+
+    434 passed, 7 skipped in 47.66s
+
+`git diff bbfafe8 feat/buzon-carpetas-microsoft-cli-1 -- tests/` shows 30 new `def test_` lines and zero
+removed, some of them `@pytest.mark.parametrize`d into several collected cases each -- consistent with
+434, though this entry does not re-run `main`'s own pre-slice total to reconcile the exact arithmetic
+(the closest prior figure in this ledger, `BUZON-GRAPH-502-1`'s 392, was measured on an earlier tree and
+several unrelated slices have landed on `main` since, so it is not directly comparable). Merge commit
+`fc895e0a9e16c1089c9c6a10aa116fb9b2ddf9d9` has tree `1fb7b935a054eabae5ab6e9f3d563181cfee34c7`, IDENTICAL
+to the slice branch's own tree, so that run was not repeated for the merge. The 7 skips are the same
+pre-existing Windows file-mode and bash-availability skips every earlier slice in this ledger has
+recorded; none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, same as every earlier entry. No
+customer-facing bytes -- every new byte here is operator-facing: a CLI's own stdout (`carpetas-graph`,
+`fijar-carpetas`), a root-owned shell script's own stdout/stderr, and a `fuente.json` field read and
+written only by Carlos acting as this system's own administrator -- the same reasoning `BUZON-GRAPH-
+502-1` and `BUZON-GRAPH-TIMEOUT-1` recorded for `top=<n>`/`reintentos`/`finalizado_en`. No cross-repo
+contract -- nothing here touches the Finanzas wire or the Cuenta Duna wire; every change is this
+connector's own internal CLI and its own deploy script. All three conditions clear, and the spec body
+names the merge as a required step ("Full gate ..., merge to main (--no-ff), DECISIONS.md") -- merged on
+green, no waiting.
+
+### Attribution
+
+Carlos's own production incident (12 Nov, Graph 502 at `$top=1` against `hotmail-carlos`) needed a python
+one-liner run by hand because this CLI did not exist yet; this slice (`BUZON-CARPETAS-MICROSOFT-CLI-1`)
+closes that gap with `fijar-carpetas`/`carpetas-graph` and their own `duna-deploy-buzon` wrapper, so the
+next such incident needs no hand edit and no python one-liner.
