@@ -9,6 +9,7 @@ duna-cuenta-api's own `tests/test_host_deploy_entry_script.py` does.
 from __future__ import annotations
 
 import re
+import shlex
 import shutil
 import subprocess
 
@@ -37,6 +38,20 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def _source_and_call(funcion: str, *args: str) -> subprocess.CompletedProcess[str]:
+    # Sources the script (defines every function, including autoactualizar's
+    # own helpers; __main never runs, since BASH_SOURCE[0] != $0 under -c)
+    # and calls one PURE, read-only helper directly, with no root required --
+    # the same technique duna-cuenta-api's own test file uses for the parts
+    # of its entry script that need no privilege to exercise for real.
+    comando = "source {script}; if {funcion} {args}; then echo __TRUE__; else echo __FALSE__; fi".format(
+        script=shlex.quote(str(ENTRY_SCRIPT)),
+        funcion=funcion,
+        args=" ".join(shlex.quote(a) for a in args),
+    )
+    return subprocess.run([_BASH, "-c", comando], check=False, capture_output=True, text=True)
 
 
 def test_el_script_existe_y_usa_solo_lf() -> None:
@@ -106,7 +121,7 @@ def test_rechazo_por_euid() -> None:
     assert "euid" in resultado.stderr.lower() or "0" in resultado.stderr
 
 
-@pytest.mark.parametrize("subcomando", ["status", "deploy", "entrar"])
+@pytest.mark.parametrize("subcomando", ["status", "deploy", "entrar", "rollback-script"])
 def test_rechazo_por_euid_cubre_cada_subcomando(subcomando: str) -> None:
     resultado = _run(subcomando)
     assert resultado.returncode == 1
@@ -294,3 +309,195 @@ def test_unidades_systemd_existen_con_la_forma_correcta() -> None:
     assert "Persistent=true" in temporizador
     assert "Unit=duna-buzon.service" in temporizador
     assert "WantedBy=timers.target" in temporizador
+
+
+# HOST-AUTOACTUALIZAR-BUZON-1: `deploy` installs its own newer entry script
+# and sudoers rule, right after the pull, so Carlos never has to SSH in by
+# hand just to pick up a changed deploy script.
+
+
+def test_constantes_de_autoactualizar_son_fijas_y_nunca_vienen_de_argv() -> None:
+    contenido = _contenido()
+    assert 'ENTRY_INSTALADO="/usr/local/sbin/duna-deploy-buzon"' in contenido
+    assert 'SUDOERS_INSTALADO="/etc/sudoers.d/duna-deploy-buzon"' in contenido
+    assert 'ENTRY_PREV="/usr/local/sbin/duna-deploy-buzon.prev"' in contenido
+    assert 'SUDOERS_PREV="/etc/sudoers.d/.duna-deploy-buzon.prev"' in contenido
+    assert not re.search(r'ENTRY_INSTALADO="?\$[12@]', contenido)
+    assert not re.search(r'SUDOERS_PREV="?\$[12@]', contenido)
+
+
+def test_sudoers_prev_queda_fuera_del_patron_includedir() -> None:
+    # /etc/sudoers.d's own #includedir skips any file beginning with "." --
+    # the backup must never itself be read as a live rule.
+    contenido = _contenido()
+    indice = contenido.index('SUDOERS_PREV="')
+    valor = contenido[indice:].split('"')[1]
+    assert valor.rsplit("/", 1)[1].startswith(".")
+
+
+def test_autoactualizar_corre_justo_despues_del_pull_y_antes_de_uv_sync() -> None:
+    contenido = _contenido()
+    bloque_cmd_deploy = contenido[contenido.index("cmd_deploy() {") : contenido.index("cmd_entrar() {")]
+    indice_pull = bloque_cmd_deploy.index('runuser -u "$owner" -- git -C "$REPO" pull --ff-only')
+    indice_autoactualizar = bloque_cmd_deploy.index("autoactualizar", indice_pull)
+    indice_uv_sync = bloque_cmd_deploy.index("uv sync --frozen", indice_autoactualizar)
+    assert indice_pull < indice_autoactualizar < indice_uv_sync
+
+
+def test_autoactualizar_se_omite_cuando_reexec_esta_activo() -> None:
+    contenido = _contenido()
+    bloque_cmd_deploy = contenido[contenido.index("cmd_deploy() {") : contenido.index("cmd_entrar() {")]
+    assert 'if [[ "$reexec" != "1" ]]; then\n        autoactualizar' in bloque_cmd_deploy
+
+
+def test_bandera_interna_reexec_no_es_publica() -> None:
+    contenido = _contenido()
+    assert "--internal-reexec" in contenido
+    indice_usage_fn = contenido.index("usage() {")
+    indice_usage_fin = contenido.index("}", indice_usage_fn)
+    bloque_usage = contenido[indice_usage_fn:indice_usage_fin]
+    assert "--internal-reexec" not in bloque_usage
+
+
+def test_autoactualizar_reexec_pasa_la_bandera_interna_una_sola_vez() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("autoactualizar() {") : contenido.index("_desc_estado_health() {")]
+    assert bloque.count("--internal-reexec") == 1
+    assert 'exec "$ENTRY_INSTALADO" deploy --internal-reexec' in bloque
+
+
+def test_autoactualizar_informa_up_to_date_antes_de_tocar_nada() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("autoactualizar() {") : contenido.index("_desc_estado_health() {")]
+    assert "entry script: up to date" in bloque
+    indice_up_to_date = bloque.index("entry script: up to date")
+    indice_primer_install = bloque.index("install -o root -g root")
+    assert indice_up_to_date < indice_primer_install
+
+
+def test_validacion_de_sudoers_ocurre_antes_de_instalar_cualquier_cosa() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("autoactualizar() {") : contenido.index("_desc_estado_health() {")]
+    indice_forma = bloque.index("_forma_sudoers_es_estricta")
+    indice_visudo = bloque.index("visudo -cf")
+    indice_primer_diff = bloque.index("diff -u")
+    indice_primer_install = bloque.index("install -o root -g root")
+    assert indice_forma < indice_visudo < indice_primer_diff < indice_primer_install
+
+
+def test_autoactualizar_guarda_los_prev_antes_de_instalar_la_version_nueva() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("autoactualizar() {") : contenido.index("_desc_estado_health() {")]
+    indice_backup_entry = bloque.index('"$ENTRY_INSTALADO" "$ENTRY_PREV"')
+    indice_backup_sudoers = bloque.index('"$SUDOERS_INSTALADO" "$SUDOERS_PREV"')
+    indice_install_entry_final = bloque.index('"$entry_pulled" "$ENTRY_INSTALADO"')
+    indice_install_sudoers_final = bloque.index('"$sudoers_pulled" "$SUDOERS_INSTALADO"')
+    assert indice_backup_entry < indice_install_entry_final
+    assert indice_backup_sudoers < indice_install_sudoers_final
+
+
+def test_dry_run_incluye_el_plan_de_autoactualizar_y_sigue_sin_ejecutar_nada() -> None:
+    contenido = _contenido()
+    bloque_cmd_deploy = contenido[contenido.index("cmd_deploy() {") : contenido.index("cmd_entrar() {")]
+    indice_dry_run = bloque_cmd_deploy.index('if [[ "$dry_run" == "1" ]]')
+    indice_fin_dry_run = bloque_cmd_deploy.index("return 0", indice_dry_run)
+    bloque_dry_run = bloque_cmd_deploy[indice_dry_run : indice_fin_dry_run + len("return 0")]
+
+    assert "autoactualizar" in bloque_dry_run
+    assert "visudo -cf" in bloque_dry_run
+    assert "ENTRY_PREV" in bloque_dry_run
+    assert "SUDOERS_PREV" in bloque_dry_run
+    assert "--internal-reexec" in bloque_dry_run
+
+    # Same invariant test_deploy_dry_run_no_ejecuta_nada_real checks for the
+    # whole block -- re-checked here so a future edit to JUST the new
+    # autoactualizar lines cannot slip in a bare (non-echo) statement.
+    for numero, linea in enumerate(bloque_dry_run.splitlines()[1:-1], start=1):
+        despojada = linea.strip()
+        if not despojada:
+            continue
+        assert despojada.startswith("echo "), (
+            f"line {numero} of the --dry-run branch is not an echo: {despojada!r}"
+        )
+
+
+def test_rollback_script_es_subcomando_reconocido_y_rechaza_argumentos() -> None:
+    contenido = _contenido()
+    assert "rollback-script)" in contenido
+    assert "cmd_rollback_script" in contenido
+
+    resultado = _run("rollback-script", "algo-mas")
+    assert resultado.returncode == 2
+    assert "usage" in resultado.stderr.lower()
+
+
+def test_rollback_script_restaura_desde_los_prev_y_falla_sin_ellos() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("cmd_rollback_script() {") : contenido.index("dispatch() {")]
+
+    assert '-f "$ENTRY_PREV"' in bloque
+    assert '-f "$SUDOERS_PREV"' in bloque
+    assert 'install -o root -g root -m 0755 "$ENTRY_PREV" "$ENTRY_INSTALADO"' in bloque
+    assert 'install -o root -g root -m 0440 "$SUDOERS_PREV" "$SUDOERS_INSTALADO"' in bloque
+
+    indice_restaurado_cero = bloque.index("restaurado=0")
+    indice_check_final = bloque.index('if [[ "$restaurado" -eq 0 ]]')
+    assert indice_restaurado_cero < indice_check_final
+    assert "exit 1" in bloque[indice_check_final:]
+
+
+def test_archivo_cambio_detecta_identico_diferente_y_faltante(tmp_path: Path) -> None:
+    instalado = tmp_path / "instalado"
+    candidato = tmp_path / "candidato"
+    instalado.write_text("hola\n", encoding="utf-8")
+    candidato.write_text("hola\n", encoding="utf-8")
+
+    resultado = _source_and_call("_archivo_cambio", str(instalado), str(candidato))
+    assert "__FALSE__" in resultado.stdout, resultado.stderr  # identical -> not changed
+
+    candidato.write_text("adios\n", encoding="utf-8")
+    resultado = _source_and_call("_archivo_cambio", str(instalado), str(candidato))
+    assert "__TRUE__" in resultado.stdout, resultado.stderr  # different -> changed
+
+    instalado.unlink()
+    resultado = _source_and_call("_archivo_cambio", str(instalado), str(candidato))
+    assert "__TRUE__" in resultado.stdout, resultado.stderr  # missing installed copy -> changed
+
+
+@pytest.mark.parametrize(
+    "contenido,esperado_ok",
+    [
+        ("carlos ALL=(root) NOPASSWD: /usr/local/sbin/duna-deploy-buzon\n", True),
+        ("# comentario\ncarlos ALL=(root) NOPASSWD: /usr/local/sbin/duna-deploy-buzon\n", True),
+        ("carlos ALL=(root) NOPASSWD: /usr/local/sbin/duna-deploy-*\n", False),
+        ("carlos ALL=(root) NOPASSWD: ALL\n", False),
+        ("carlos ALL=(root) NOPASSWD: /usr/local/sbin/duna-deploy-buzon, /bin/rm\n", False),
+        (
+            "carlos ALL=(root) NOPASSWD: /usr/local/sbin/duna-deploy-buzon\n"
+            "carlos ALL=(root) NOPASSWD: /bin/ls\n",
+            False,
+        ),
+        ("", False),
+        ("carlos ALL=(root) NOPASSWD: /usr/local/sbin/other-script\n", False),
+        ("carlos ALL=(root) PASSWD: /usr/local/sbin/duna-deploy-buzon\n", False),
+    ],
+)
+def test_forma_sudoers_estricta_acepta_solo_la_regla_exacta(
+    tmp_path: Path, contenido: str, esperado_ok: bool
+) -> None:
+    candidato = tmp_path / "sudoers"
+    candidato.write_bytes(contenido.encode("utf-8"))
+
+    resultado = _source_and_call("_forma_sudoers_es_estricta", str(candidato))
+    if esperado_ok:
+        assert "__TRUE__" in resultado.stdout, resultado.stderr
+    else:
+        assert "__FALSE__" in resultado.stdout, resultado.stderr
+        assert "refusing" in resultado.stderr.lower()
+
+
+def test_readme_documenta_autoactualizar_y_el_bootstrap_manual() -> None:
+    contenido = HOST_README.read_text(encoding="utf-8")
+    assert "autoactualizar" in contenido.lower()
+    assert "rollback-script" in contenido
+    assert "bootstrap" in contenido.lower() or "manual" in contenido.lower()

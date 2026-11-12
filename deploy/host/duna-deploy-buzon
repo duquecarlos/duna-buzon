@@ -8,14 +8,29 @@
 #   sudo -n /usr/local/sbin/duna-deploy-buzon status
 #   sudo -n /usr/local/sbin/duna-deploy-buzon deploy [--dry-run]
 #   sudo -n /usr/local/sbin/duna-deploy-buzon entrar
+#   sudo -n /usr/local/sbin/duna-deploy-buzon rollback-script
 #
 # `entrar` is the one subcommand meant for Carlos himself, run directly in
 # his own SSH terminal (not over a batch/no-tty session) -- it signs in
 # interactively, printing Microsoft's device-code URL to whatever terminal
 # called it, and so is the one subcommand that never uses systemd-run.
 #
+# `deploy` self-updates (HOST-AUTOACTUALIZAR-BUZON-1): right after the pull
+# and before anything that depends on the new code, it compares the pulled
+# copy of this script and its sudoers fragment against what is actually
+# installed, prints a diff of whatever changed, refuses a sudoers fragment
+# that is not EXACTLY one NOPASSWD rule on this one path, keeps the previous
+# installed copies (`.prev`) so `rollback-script` can restore them, installs
+# the new copies, and re-execs itself under the newly installed script --
+# once, never looping -- so the rest of that same deploy runs under the new
+# code. The FIRST install of a new version of this script is still manual
+# (deploy/host/README.md's "Update" section) -- autoactualizar only takes
+# over from the second `deploy` onward.
+#
 # Every path below is a CONSTANT, never taken from argv or the environment:
-# the only things argv may select are the three subcommands and --dry-run.
+# the only things argv may select are the four subcommands, --dry-run, and
+# --internal-reexec (set only by autoactualizar's own re-exec, never meant
+# to be typed by a caller).
 set -Eeuo pipefail
 
 # Fixed PATH, independent of the caller's shell -- this script trusts no
@@ -30,8 +45,17 @@ SERVICIO="duna-buzon.service"
 TIMER="duna-buzon.timer"
 UNIDADES_DIR="/etc/systemd/system"
 
+# autoactualizar's own fixed paths (HOST-AUTOACTUALIZAR-BUZON-1) -- constants,
+# like every other path above, never taken from argv or the environment.
+ENTRY_INSTALADO="/usr/local/sbin/duna-deploy-buzon"
+SUDOERS_INSTALADO="/etc/sudoers.d/duna-deploy-buzon"
+ENTRY_PREV="/usr/local/sbin/duna-deploy-buzon.prev"
+# Leading dot: outside /etc/sudoers.d's own #includedir pattern, which skips
+# any file beginning with "." -- this backup is never itself read as a rule.
+SUDOERS_PREV="/etc/sudoers.d/.duna-deploy-buzon.prev"
+
 usage() {
-    echo "usage: duna-deploy-buzon {status|deploy [--dry-run]|entrar}" >&2
+    echo "usage: duna-deploy-buzon {status|deploy [--dry-run]|entrar|rollback-script}" >&2
     exit 2
 }
 
@@ -44,15 +68,23 @@ parse_args() {
     SUBCOMMAND="$1"
     shift
     DRY_RUN=0
+    # --internal-reexec is set only by autoactualizar's own re-exec of this
+    # same script, never meant to be typed by a caller -- it just tells THIS
+    # invocation to skip autoactualizar, so a re-exec never loops.
+    REEXEC=0
     case "$SUBCOMMAND" in
-        status | entrar)
+        status | entrar | rollback-script)
             [[ $# -eq 0 ]] || usage
             ;;
         deploy)
-            if [[ $# -gt 0 ]]; then
-                [[ $# -eq 1 && "$1" == "--dry-run" ]] || usage
-                DRY_RUN=1
-            fi
+            local arg
+            for arg in "$@"; do
+                case "$arg" in
+                    --dry-run) DRY_RUN=1 ;;
+                    --internal-reexec) REEXEC=1 ;;
+                    *) usage ;;
+                esac
+            done
             ;;
         *)
             usage
@@ -77,6 +109,100 @@ _desc_head_as_owner() {
 
 _desc_pull_as_owner() {
     printf 'runuser -u "$(stat -c %%U %s)" -- git -C %s pull --ff-only' "$1" "$1"
+}
+
+# True (exit 0) when $2 (the pulled candidate) differs from $1 (the
+# installed copy), or $1 does not exist yet. False (exit 1) when they are
+# byte-identical. Read-only, no root required -- this is why it is its own
+# function instead of being inlined into autoactualizar.
+_archivo_cambio() {
+    local instalado="$1" candidato="$2"
+    [[ -f "$instalado" ]] || return 0
+    ! cmp -s "$instalado" "$candidato"
+}
+
+# True (exit 0) only when $1 holds EXACTLY one non-comment, non-blank line,
+# and that line is EXACTLY "<user> ALL=(root) NOPASSWD:
+# /usr/local/sbin/duna-deploy-buzon" -- no wildcard, no second command, no
+# ALL in the command position, nothing else in the file. Prints why on a
+# refusal. Read-only, no root required -- a pure text check, deliberately
+# kept separate from the `visudo -cf` syntax check below.
+_forma_sudoers_es_estricta() {
+    local archivo="$1"
+    local lineas n
+    lineas="$(grep -vE '^[[:space:]]*(#.*)?$' "$archivo" 2>/dev/null || true)"
+    n=0
+    if [[ -n "$lineas" ]]; then
+        n="$(printf '%s\n' "$lineas" | grep -c '[^[:space:]]')"
+    fi
+    if [[ "$n" -ne 1 ]]; then
+        echo "duna-deploy-buzon: refusing: sudoers fragment must hold exactly one rule (found $n)" >&2
+        return 1
+    fi
+    if ! printf '%s\n' "$lineas" | grep -qE '^[A-Za-z_][A-Za-z0-9_-]*[[:space:]]+ALL=\(root\)[[:space:]]+NOPASSWD:[[:space:]]+/usr/local/sbin/duna-deploy-buzon$'; then
+        echo "duna-deploy-buzon: refusing: sudoers rule must be exactly 'NOPASSWD: /usr/local/sbin/duna-deploy-buzon' -- no wildcard, no extra command, no ALL" >&2
+        return 1
+    fi
+    return 0
+}
+
+# The autoactualizar step itself (HOST-AUTOACTUALIZAR-BUZON-1): compares the
+# just-pulled copies of this script and its sudoers fragment against what is
+# installed, refuses before installing anything if the sudoers fragment
+# changed into something wider than one exact rule, prints a diff of
+# whatever changed, keeps the previous installed copies, installs the new
+# ones, and re-execs itself so the rest of THIS deploy runs under the new
+# code. Called only from cmd_deploy's real (non-dry-run) branch, after the
+# pull and before anything that depends on the new code.
+autoactualizar() {
+    local entry_pulled="$REPO/deploy/host/duna-deploy-buzon"
+    local sudoers_pulled="$REPO/deploy/host/duna-deploy-buzon.sudoers"
+
+    local cambio_entry=0 cambio_sudoers=0
+    _archivo_cambio "$ENTRY_INSTALADO" "$entry_pulled" && cambio_entry=1
+    _archivo_cambio "$SUDOERS_INSTALADO" "$sudoers_pulled" && cambio_sudoers=1
+
+    if [[ "$cambio_entry" -eq 0 && "$cambio_sudoers" -eq 0 ]]; then
+        echo "entry script: up to date"
+        return 0
+    fi
+
+    if [[ "$cambio_sudoers" -eq 1 ]]; then
+        if ! _forma_sudoers_es_estricta "$sudoers_pulled"; then
+            echo "duna-deploy-buzon: refusing: deploy stopped before installing anything" >&2
+            exit 1
+        fi
+        if ! visudo -cf "$sudoers_pulled" >/dev/null 2>&1; then
+            echo "duna-deploy-buzon: refusing: visudo -cf rejected the pulled sudoers fragment; deploy stopped before installing anything" >&2
+            exit 1
+        fi
+    fi
+
+    if [[ "$cambio_entry" -eq 1 ]]; then
+        echo "duna-deploy-buzon: entry script changed:"
+        diff -u "$ENTRY_INSTALADO" "$entry_pulled" || true
+    fi
+    if [[ "$cambio_sudoers" -eq 1 ]]; then
+        echo "duna-deploy-buzon: sudoers fragment changed:"
+        diff -u "$SUDOERS_INSTALADO" "$sudoers_pulled" || true
+    fi
+
+    if [[ "$cambio_entry" -eq 1 && -f "$ENTRY_INSTALADO" ]]; then
+        install -o root -g root -m 0755 "$ENTRY_INSTALADO" "$ENTRY_PREV"
+    fi
+    if [[ "$cambio_sudoers" -eq 1 && -f "$SUDOERS_INSTALADO" ]]; then
+        install -o root -g root -m 0440 "$SUDOERS_INSTALADO" "$SUDOERS_PREV"
+    fi
+
+    if [[ "$cambio_entry" -eq 1 ]]; then
+        install -o root -g root -m 0755 "$entry_pulled" "$ENTRY_INSTALADO"
+    fi
+    if [[ "$cambio_sudoers" -eq 1 ]]; then
+        install -o root -g root -m 0440 "$sudoers_pulled" "$SUDOERS_INSTALADO"
+    fi
+
+    echo "duna-deploy-buzon: entry script updated; re-executing under the new copy"
+    exec "$ENTRY_INSTALADO" deploy --internal-reexec
 }
 
 _desc_estado_health() {
@@ -124,9 +250,19 @@ cmd_status() {
 # the SAME health check `status` runs.
 cmd_deploy() {
     local dry_run="$1"
+    local reexec="${2:-0}"
     if [[ "$dry_run" == "1" ]]; then
         echo "+ $(_desc_head_as_owner "$REPO")"
         echo "+ $(_desc_pull_as_owner "$REPO")"
+        echo "+ autoactualizar: compare $REPO/deploy/host/duna-deploy-buzon(.sudoers) against $ENTRY_INSTALADO / $SUDOERS_INSTALADO"
+        echo "+ diff -u $ENTRY_INSTALADO $REPO/deploy/host/duna-deploy-buzon (only if the script changed)"
+        echo "+ diff -u $SUDOERS_INSTALADO $REPO/deploy/host/duna-deploy-buzon.sudoers (only if the sudoers fragment changed)"
+        echo "+ visudo -cf $REPO/deploy/host/duna-deploy-buzon.sudoers (only if the sudoers fragment changed)"
+        echo "+ install -o root -g root -m 0755 $ENTRY_INSTALADO $ENTRY_PREV (only if the script changed)"
+        echo "+ install -o root -g root -m 0440 $SUDOERS_INSTALADO $SUDOERS_PREV (only if the sudoers fragment changed)"
+        echo "+ install -o root -g root -m 0755 $REPO/deploy/host/duna-deploy-buzon $ENTRY_INSTALADO (only if the script changed)"
+        echo "+ install -o root -g root -m 0440 $REPO/deploy/host/duna-deploy-buzon.sudoers $SUDOERS_INSTALADO (only if the sudoers fragment changed)"
+        echo "+ exec $ENTRY_INSTALADO deploy --internal-reexec (only if anything changed, so the rest of the deploy runs under the new code)"
         echo "+ runuser -u \"\$(stat -c %U $REPO)\" -- uv sync --frozen (cwd $REPO)"
         echo "+ install -d -o duna -g duna -m 0700 $DATOS_DIR"
         echo "+ install -o root -g root -m 644 $REPO/deploy/systemd/duna-buzon.service $UNIDADES_DIR/$SERVICIO"
@@ -142,6 +278,13 @@ cmd_deploy() {
     before="$(runuser -u "$owner" -- git -C "$REPO" rev-parse HEAD)"
     echo "deploy: before=$before"
     runuser -u "$owner" -- git -C "$REPO" pull --ff-only
+
+    if [[ "$reexec" != "1" ]]; then
+        autoactualizar
+    else
+        echo "entry script: re-executed under the newly installed copy"
+    fi
+
     runuser -u "$owner" -- env --chdir="$REPO" uv sync --frozen
 
     if [[ ! -d "$DATOS_DIR" ]]; then
@@ -190,19 +333,42 @@ cmd_entrar() {
     ' 3<"$ENV_CLIENTE" 4<"$ENV_TOKEN"
 }
 
+# Restores the installed entry script and/or sudoers fragment from the
+# `.prev` copies autoactualizar kept, undoing its most recent install. A
+# no-op left by autoactualizar never happening yet (no `.prev` copy at all)
+# is refused by name, not silently treated as success.
+cmd_rollback_script() {
+    local restaurado=0
+    if [[ -f "$ENTRY_PREV" ]]; then
+        install -o root -g root -m 0755 "$ENTRY_PREV" "$ENTRY_INSTALADO"
+        echo "duna-deploy-buzon: restored $ENTRY_INSTALADO from $ENTRY_PREV"
+        restaurado=1
+    fi
+    if [[ -f "$SUDOERS_PREV" ]]; then
+        install -o root -g root -m 0440 "$SUDOERS_PREV" "$SUDOERS_INSTALADO"
+        echo "duna-deploy-buzon: restored $SUDOERS_INSTALADO from $SUDOERS_PREV"
+        restaurado=1
+    fi
+    if [[ "$restaurado" -eq 0 ]]; then
+        echo "duna-deploy-buzon: refusing: no previous copy found to roll back to" >&2
+        exit 1
+    fi
+}
+
 dispatch() {
-    local subcommand="$1" dry_run="$2"
+    local subcommand="$1" dry_run="$2" reexec="$3"
     case "$subcommand" in
         status) cmd_status "$dry_run" ;;
-        deploy) cmd_deploy "$dry_run" ;;
+        deploy) cmd_deploy "$dry_run" "$reexec" ;;
         entrar) cmd_entrar ;;
+        rollback-script) cmd_rollback_script ;;
     esac
 }
 
 __main() {
     parse_args "$@"
     require_root
-    dispatch "$SUBCOMMAND" "$DRY_RUN"
+    dispatch "$SUBCOMMAND" "$DRY_RUN" "$REEXEC"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

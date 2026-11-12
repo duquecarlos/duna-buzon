@@ -19,11 +19,39 @@ installing or editing a fragment there.
 
 ## Update
 
-The script (and the two systemd unit files it installs) change only when re-installed -- a `git pull`
-on the repository does NOT update `/usr/local/sbin/duna-deploy-buzon` by itself. After changing
-`deploy/host/duna-deploy-buzon` or its `.sudoers` fragment, re-run the exact same three lines above.
+As of `HOST-AUTOACTUALIZAR-BUZON-1`, `deploy` installs its own newer copy of this script and its
+sudoers fragment BY ITSELF, as the first step after the pull and before anything that depends on the
+new code (`autoactualizar`, inside `deploy/host/duna-deploy-buzon`):
+
+1. Compares the just-pulled `deploy/host/duna-deploy-buzon` and `.sudoers` fragment against what is
+   actually installed (`/usr/local/sbin/duna-deploy-buzon`, `/etc/sudoers.d/duna-deploy-buzon`).
+   Identical: prints `entry script: up to date` and the rest of `deploy` continues unchanged.
+2. If the sudoers fragment changed, it REFUSES before installing anything unless the new fragment is
+   EXACTLY one `NOPASSWD` rule on this one path -- no wildcard, no second command, no `ALL` -- and
+   `visudo -cf` accepts it.
+3. Prints the full unified diff of every file about to change.
+4. Keeps the previous installed copies (`/usr/local/sbin/duna-deploy-buzon.prev`,
+   `/etc/sudoers.d/.duna-deploy-buzon.prev` -- the leading dot keeps it outside `#includedir`'s own
+   pattern, so it is never itself read as a rule).
+5. Installs the new copies (`install -o root -g root`, mode 0755 for the script, mode 0440 for the
+   sudoers fragment), then RE-EXECS itself under the newly installed script -- once, never looping --
+   so the rest of THAT SAME `deploy` runs under the new code.
+
+`sudo -n /usr/local/sbin/duna-deploy-buzon rollback-script` restores both files from their `.prev`
+copies, undoing autoactualizar's most recent install; it refuses by name if neither `.prev` copy exists.
+
+`deploy --dry-run` prints this whole plan (the comparison, the diff, the planned backup and install, the
+re-exec) without changing anything.
+
+**Bootstrap (still manual, every time):** autoactualizar only runs INSIDE `deploy`, so the FIRST time a
+new version of this script exists -- including the very first install, and this `HOST-AUTOACTUALIZAR-
+BUZON-1` version itself landing on a host that only has an older copy installed -- it still needs the
+exact three `sudo install`/`visudo -c` lines above, run by hand, once. From the SECOND `deploy` after
+that onward, autoactualizar keeps the installed copy current on its own.
+
 A change to `deploy/systemd/duna-buzon.service` or `.timer` takes effect the next time `deploy` runs
-(it re-installs both unconditionally).
+(it re-installs both unconditionally) -- that was already true before this slice and is unrelated to
+autoactualizar, which only concerns this entry script and its sudoers fragment.
 
 ## Remove
 
@@ -39,15 +67,18 @@ sudo visudo -c
 sudo -n /usr/local/sbin/duna-deploy-buzon status
 sudo -n /usr/local/sbin/duna-deploy-buzon deploy [--dry-run]
 sudo -n /usr/local/sbin/duna-deploy-buzon entrar
+sudo -n /usr/local/sbin/duna-deploy-buzon rollback-script
 ```
 
 `status` is read-only: the owner's own `git` HEAD, both units' `systemctl is-active`, and a health run
-of `python -m duna_buzon estado` under `systemd-run`. `deploy` pulls and `uv sync --frozen` as the
-repository's owner, creates `/srv/duna/data/buzon` (mode 0700, owned by `duna`) if it does not already
-exist -- and never deletes it -- installs `duna-buzon.service`/`duna-buzon.timer`, enables the timer,
-and finishes with the same health check. `entrar` is the one subcommand for CARLOS HIMSELF, run
-directly in his own SSH terminal (never through an automated, no-tty session): it signs in
-interactively and prints Microsoft's own device-code URL to that terminal.
+of `python -m duna_buzon estado` under `systemd-run`. `deploy` autoactualizes itself (see "Update"
+above), pulls and `uv sync --frozen` as the repository's owner, creates `/srv/duna/data/buzon` (mode
+0700, owned by `duna`) if it does not already exist -- and never deletes it -- installs `duna-buzon.
+service`/`duna-buzon.timer`, enables the timer, and finishes with the same health check. `entrar` is
+the one subcommand for CARLOS HIMSELF, run directly in his own SSH terminal (never through an automated,
+no-tty session): it signs in interactively and prints Microsoft's own device-code URL to that terminal.
+`rollback-script` restores this entry script and its sudoers fragment from the `.prev` copies
+autoactualizar kept, undoing its most recent install.
 
 ## Operator steps (first deploy, by Carlos)
 
