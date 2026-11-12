@@ -1031,3 +1031,156 @@ conditions clear, so this slice merged on green without stopping for approval.
 Carlos delegated this build (`ORCH-CARLOS-DELEGATES-TIER-1-1`); Main decided the exclusion rule (SPECIAL-
 USE first, name fallback second) this slice's own approval reason states verbatim. The open follow-up
 this closes was written by `BUZON-FUENTE-IMAP-1` itself.
+
+---
+
+## BUZON-FUENTES-PULL-1 -- pull mailbox sources connected through Cuenta Duna (2026-11-11)
+
+### Why
+
+Carlos, 11 Nov (relayed verbatim by the Personal desk): "Also we have to work in the App to let the user
+connect their own emails and in some way each day the Agent or the app should propose the money
+movements". `ORCH-BUZON-OAUTH-CALLBACK-1` decided the OAuth itself ends at Cuenta Duna, never here --
+this connector stays loopback-only and read-only, and only PULLS short-lived tokens. Cuenta Duna now
+serves them (`CUENTA-API-FUENTES-CONECTADAS-1`); this slice is the pull side.
+
+### The wire, restated verbatim in the build instructions, not re-read at a ref
+
+The build instructions carried `GET /servicio/fuentes/{sub}`'s exact shape (HTTP Basic, client `buzon`;
+`{"fuentes": [{"id", "proveedor": "google"|"microsoft", "direccion", "access_token",
+"expira_en_segundos"}]}`, active sources only, 404 `cuenta_no_encontrada` for an unknown/erased `sub` or a
+non-`buzon` caller) verbatim from `duna-cuenta-api`'s own `src/duna_cuenta/web/fuentes.py`,
+`domain/fuentes_conectadas.py:fuente_a_wire`, `web/servicio.py`. This slice could not re-read that
+repository at a ref (same sandbox limit `BUZON-FUENTES-ESQUEMA-1` and `BUZON-FUENTE-WIRE-CORREO-1` already
+recorded: no filesystem access outside this repository's own working directory) -- taken on the build
+instructions' own word, which records having validated them before dispatch.
+
+### What changed
+
+New `src/duna_buzon/cuenta.py`: `CuentaClient.listar_fuentes()` does the ONE pull `cli.py`'s
+`comando_sincronizar` makes per pass (`_pull_fuentes_cuenta`), returning `FuenteCuenta` rows with a FRESH
+access token each. The token lives in the dict `_pull_fuentes_cuenta` returns, for that one run, and is
+NEVER written to disk anywhere in this slice's code -- no `credencial.bin` is ever created for a
+`origen="cuenta"` source. A 404 or any transport failure raises `CuentaPullError` (status or exception
+class only, mirroring `graph.GraphError`'s own shape); `cli.py` catches it, prints one count-only line
+(`cuenta: cuenta fuentes http=404`, say) to stderr, and runs every LOCAL source exactly as if the pull had
+never been attempted.
+
+`fuentes.py`'s `FuenteConfig` gains `origen: Literal["local", "cuenta"]` (default `"local"`, so every
+`fuente.json` written before this slice keeps meaning exactly what it always meant) and `ProveedorId`
+widens to add `"google"`. Validated both ways: `origen="cuenta"` only ever pairs with `proveedor` in
+`{"microsoft", "google"}` (what Cuenta Duna's wire can return); `origen="local"` only ever pairs with
+`proveedor` in `{"microsoft", "imap"}` (what `entrar` can sign into) -- a hand-edited `fuente.json` naming
+an impossible combination is refused at load, the same discipline `_PROVEEDORES_VALIDOS` already enforced
+for an unknown provider string.
+
+Each Cuenta-origin source is kept under `fuentes/cuenta-<id>/` (`fuentes.id_fuente_cuenta`), `<id>` being
+Cuenta Duna's OWN id for it -- so a reconnect after a revoke resumes the identical cursor and rules rather
+than starting over under a new local id, per this slice's own build instructions. `cli._pull_fuentes_cuenta`
+rewrites that source's `fuente.json` on every successful pull (never its `credencial.bin` -- it has none)
+and, on success, also marks any PREVIOUSLY-active Cuenta-origin source no longer returned as `activa=False`
+without touching its cursor or its rules ("a revoked source simply stops appearing"). A source whose token
+was not pulled THIS run (pull failed, not configured, or Cuenta Duna simply did not return it) is skipped
+for the pass -- not a failure of the pass, and its cursor is left untouched for the next pull.
+`cli.comando_entrar` refuses a `origen="cuenta"` source outright (connect/reconnect those at Cuenta Duna's
+own screen, never here) rather than letting an operator accidentally start a device-code or IMAP sign-in
+flow against a source this connector does not hold a local credential for.
+
+New `src/duna_buzon/gmail.py`: `GmailClient`, read-only (no `modify`/`trash`/`delete`/`send` call exists
+anywhere in the class), satisfying `proveedor.Proveedor` structurally with no change to that shape.
+`users.messages.list` returns only ids -- Gmail's `format=metadata` cannot say whether a message has an
+attachment at all (headers only, no `payload.parts`) -- so this client fetches each candidate message ONCE,
+`format=full`, and caches the parsed MIME structure for the rest of the pass; `listar_adjuntos_metadata`/
+`obtener_mensaje_completo` reuse that cache, and attachment CONTENT is still its own call per attachment
+(`users.messages.attachments.get`), fetched only once a message has matched a rule -- mirroring Graph's own
+split between metadata and content. `id_externo` is the RFC 822 `Message-ID` header, exactly as
+`cliente_imap.py` already does, falling back to Gmail's own stable message id when a message carries none.
+
+**Decision this slice made, not otherwise specified: the since-date query and the absence of a
+provider-defined resume cursor.** Gmail's `after:` search operator is not documented to a precision finer
+than a day, so this client queries one day EARLIER than `desde` and then filters exactly in Python
+(`recibido_en < desde` skipped) -- the identical discipline `cliente_imap.py`'s own SINCE-date fallback
+already uses for the same reason. Unlike IMAP's UID (an incrementing integer within one mailbox,
+`BUZON-FUENTE-IMAP-1`'s own `cursor_proveedor`), a Gmail message id is not incrementing, so there is no
+cheap "resume from the last one" primitive to build a second cursor from -- this provider, like the
+Microsoft one, relies entirely on the existing datetime cursor plus Finanzas' own idempotency on
+`id_externo` to absorb a re-scanned overlap window. `proveedor.construir_proveedor` gained one branch:
+`proveedor == "google"` builds a `GmailClient`.
+
+### Tests, measured
+
+New `tests/test_cuenta.py` (6 tests): a successful pull with two sources, an empty list, HTTP Basic auth
+headers present, 404, a transport error, and a 500 -- all against `httpx.MockTransport`, no network.
+
+New `tests/test_gmail.py` (14 tests): GET-only guard; simple listing; `nextPageToken` paging (same `q` on
+every page); the exact `after:<epoch - 1 day>` query; a message dated before `desde` filtered out in Python
+despite the server returning it; 401/500/connection-error on listing; the Gmail-id fallback when
+`Message-ID` is absent; attachment detection, download and inline-skip; HTML preferred over plain text when
+both exist; exactly ONE `format=full` fetch per message even though listing, metadata and content all read
+off it (the caching guard); and a 401 while fetching attachment CONTENT (the pulled token expiring
+mid-pass) raising the same generic `GmailAutenticacionError` every other provider error already does, with
+no special-case code needed in `sincronizar.py`.
+
+`tests/test_config.py` (+5 functions, +10 collected -- two are `@pytest.mark.parametrize`d over 4 and 3
+values respectively): Cuenta absent entirely is valid; all four present parses; each of the four set alone
+is refused by name, naming only the missing variable, never the one that was set; an invalid/empty/wrong-
+scheme `BUZON_CUENTA_URL` is refused (3 cases); `https://` is accepted.
+
+`tests/test_fuentes.py` (+7): `origen` defaults to `"local"`; a `fuente.json` with no `origen` key at all
+(written before this slice) still reads as `"local"`; a Cuenta-origin `fuente.json` round-trips;
+`id_fuente_cuenta` prefixes correctly; an unknown `origen` string, a `"google"` source claiming
+`origen="local"`, and an `"imap"` source claiming `origen="cuenta"` are each refused at load.
+
+`tests/test_proveedor.py` (+2): `proveedor="google"` builds a `GmailClient`; it satisfies `Proveedor`
+structurally via `runtime_checkable`.
+
+`tests/test_cli.py` (+5, end-to-end through `comando_sincronizar`): Cuenta not configured never constructs
+a `CuentaClient` at all; a successful pull runs the Cuenta source with the EXACT pulled token (never calling
+`auth.obtener_token` for it), writes a `fuente.json` with no credential anywhere and no trace of the token
+string in it; a 404 pull logs one line and the local source still runs to completion; a revoked source (the
+second pull returns an empty list) is marked `activa=False` and is not executed, with its `reglas.json`
+left in place; a reconnected source (a pre-existing `cursor.json` under `fuentes/cuenta-<id>/`, written
+before `fuente.json` ever existed, simulating a prior connect-then-revoke) resumes that EXACT cursor rather
+than `reglas.json`'s own `desde`.
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest -q` on the slice branch before the merge, tree
+`edbd2de7ec5bda7a29dbba876b42fb87b1777782` (slice commit `ad4118aa8e97ea87cbde85ce18004ead4c4ec6d9`):
+
+    292 passed, 7 skipped in 24.26s
+
+Tree identity proven before writing this entry, so that run was not repeated for the merge: merge commit
+`5a68b66a52134544fa5ac7093ee18730937f0f9d` has tree `edbd2de7ec5bda7a29dbba876b42fb87b1777782`, IDENTICAL to
+the slice branch's own tree, and `git diff HEAD feat/buzon-fuentes-pull-1 --stat` against the merge commit
+was empty.
+
+292 = the 248 `BUZON-FUENTE-IMAP-CARPETAS-1` recorded (the most recent count on `main` before this slice)
+plus this slice's 44 new collected tests: 6 (`test_cuenta.py`) + 14 (`test_gmail.py`) + 10
+(`test_config.py`, 5 functions, 2 parametrized) + 7 (`test_fuentes.py`) + 2 (`test_proveedor.py`) + 5
+(`test_cli.py`) = 44. The 7 skips are the same pre-existing Windows file-mode skips every earlier slice in
+this ledger already recorded; none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database; the new `origen` field and the `"google"`
+provider are, like every earlier addition to `fuente.json`, a file on disk, not a table or a model. No
+cross-repo contract or DTO change: this slice only CONSUMES Cuenta Duna's own, already-built
+`GET /servicio/fuentes/{sub}` contract and Gmail's own public API -- it defines or changes no contract any
+other repository reads, and the Finanzas buzon-v1 wire (the one contract this repository's own output
+affects) is untouched: every message, from every provider, still posts with `fuente="correo"`. No
+customer-facing bytes, same reasoning every earlier entry in this ledger has recorded: this repository has
+no product, no UI, and no customer or operator other than Carlos acting as this system's own administrator
+-- the new stderr line (`cuenta: cuenta fuentes http=...`) and the new `entrar` refusal message are that
+same operator-facing diagnostic output, not a product surface a customer, operator or owner reads inside a
+Duna product. All three conditions clear, so this slice merged on green without stopping for approval, per
+its own approval reason ("Merge on a green gate").
+
+### Attribution
+
+Carlos named the surface (connect your own mailboxes, get money movements proposed automatically) and
+`ORCH-CARLOS-DELEGATES-TIER-1-1` authorized this Tier 1 build, implementing `ORCH-BUZON-OAUTH-CALLBACK-1`'s
+own decision that OAuth ends at Cuenta Duna and this connector only pulls tokens. This slice
+(`BUZON-FUENTES-PULL-1`) built the pull side end to end: `cuenta.py`'s `CuentaClient`, `gmail.py`'s Gmail
+provider, `fuentes.py`'s `origen` field and validation, and `cli.py`'s `_pull_fuentes_cuenta` and its
+wiring into `sincronizar`/`entrar`.
