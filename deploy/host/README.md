@@ -106,6 +106,17 @@ autoactualizar kept, undoing its most recent install.
 6. Confirm `sudo -n /usr/local/sbin/duna-deploy-buzon status` reports the timer active and the health
    check passing. The timer then runs a pass every 10 minutes on its own.
 
+## Turning on `origen` (BUZON-ORIGEN-WIRE-1)
+
+**Turn on only after Finanzas Release 37 is live** -- Finanzas merged the `origen` field
+(`FIN-API-BUZON-ORIGEN-1`) but its `EntradaBuzonMeta` schema is `extra="forbid"`, so this connector sending it
+before that release deploys gets every entry refused with a `422`. Until then, leave it off (the default).
+
+Once Release 37 is live, add `BUZON_ENVIAR_ORIGEN=1` to `/srv/duna/env/buzon.env` (not a secret -- no need for
+the piped-generation dance step 1 above uses for the encryption key) and restart the next scheduled pass, or run
+one by hand with `systemd-run` as in `status`'s own health check. Every entry's `meta` then carries `origen`: the
+source's own identity (`imap:<id>` or `google:cuenta-<uuid>`), used for exact-label routing on Finanzas' side.
+
 ## No backup subcommand
 
 `/srv/duna/data/buzon/` holds only `fuentes/<id>/credencial.bin` (the encrypted MSAL token cache or

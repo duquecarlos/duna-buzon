@@ -75,6 +75,11 @@ def ejecutar_pasada(
     reglas: Reglas,
     cursor_inicial: datetime.datetime,
     cursor_proveedor_inicial: str | None = None,
+    # The wire `origen` value for every entry this pass sends, already
+    # resolved by the caller (`cli.py`): `None` with `BUZON_ENVIAR_ORIGEN`
+    # unset or this source's own label over its wire cap
+    # (`BUZON-ORIGEN-WIRE-1`).
+    etiqueta_origen: str | None = None,
 ) -> ResultadoPasada:
     contadores = Contadores()
     cursor_final = cursor_inicial
@@ -125,6 +130,7 @@ def ejecutar_pasada(
                 asunto=asunto,
                 recibido_en=mensaje.recibido_en,
                 cuerpo_texto=cuerpo_texto,
+                origen=etiqueta_origen,
             )
             empaque = empacar(
                 meta.como_json(),

@@ -28,12 +28,19 @@ from duna_buzon.config import Config
 from duna_buzon.cuenta import CuentaClient, CuentaPullError
 from duna_buzon.finanzas import FinanzasClient
 from duna_buzon.fuentes import FuenteConfig
+from duna_buzon.limites import LIMITE_ORIGEN
 from duna_buzon.proveedor import construir_proveedor
 from duna_buzon.reglas import ReglasInvalidasError, cargar_reglas
 from duna_buzon.sincronizar import Contadores, ejecutar_pasada
 
 NOMBRE_ARCHIVO_REGLAS = "reglas.json"
 NOMBRE_ARCHIVO_ESTADO = "estado.json"
+
+# BUZON-ORIGEN-WIRE-1 -- a manual (`agregar-fuente`) source id longer than
+# this is refused at add time, well under `limites.LIMITE_ORIGEN` (64) once
+# combined with its provider prefix ("imap:"), so `etiqueta_registro` never
+# needs the >64 fallback below for a source this connector itself created.
+LIMITE_ID_FUENTE_AGREGAR = 48
 
 
 def _migrar_si_necesario(config: Config) -> None:
@@ -132,6 +139,18 @@ def _ejecutar_una_fuente(
     cursor_inicial = modulo_cursor.cargar_cursor(directorio, valor_inicial=reglas.desde)
     cursor_proveedor_inicial = modulo_cursor.cargar_cursor_proveedor(directorio)
 
+    etiqueta_origen: str | None = None
+    if config.enviar_origen:
+        etiqueta = fuente.etiqueta_registro
+        if len(etiqueta) <= LIMITE_ORIGEN:
+            etiqueta_origen = etiqueta
+        else:
+            print(
+                f"fuente={fuente.id} warning: origen label exceeds {LIMITE_ORIGEN} "
+                "characters, sending without origen",
+                file=sys.stderr,
+            )
+
     proveedor = construir_proveedor(fuente, token, cursor_proveedor_inicial=cursor_proveedor_inicial)
     try:
         resultado = ejecutar_pasada(
@@ -140,6 +159,7 @@ def _ejecutar_una_fuente(
             reglas=reglas,
             cursor_inicial=cursor_inicial,
             cursor_proveedor_inicial=cursor_proveedor_inicial,
+            etiqueta_origen=etiqueta_origen,
         )
     finally:
         proveedor.cerrar()
@@ -324,6 +344,14 @@ def comando_agregar_fuente(
     `BUZON-FUENTE-IMAP-1`)."""
     if proveedor != "imap":
         print(f"error: agregar-fuente does not support provider {proveedor!r} yet", file=sys.stderr)
+        return 1
+
+    if len(id_fuente) > LIMITE_ID_FUENTE_AGREGAR:
+        print(
+            f"error: source id {id_fuente!r} is {len(id_fuente)} characters, "
+            f"over the {LIMITE_ID_FUENTE_AGREGAR}-character limit",
+            file=sys.stderr,
+        )
         return 1
 
     _migrar_si_necesario(config)

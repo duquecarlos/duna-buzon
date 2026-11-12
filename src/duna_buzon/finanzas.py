@@ -5,9 +5,10 @@ read from `../finanzas/duna-finanzas-api` at `main` `9b9464e`
 `src/duna_finanzas/web/buzon/schemas.py`), never guessed.
 
 Multipart: a `meta` form part (a JSON string -- `fuente`, `id_externo`,
-`remitente`, `asunto`, `recibido_en`, `cuerpo_texto`, no other key, since
-`EntradaBuzonMeta.model_config = {"extra": "forbid"}` answers `422` for one)
-plus up to 10 `archivos` file parts, `Authorization: Bearer
+`remitente`, `asunto`, `recibido_en`, `cuerpo_texto`, and, behind
+`Config.enviar_origen` only (`BUZON-ORIGEN-WIRE-1`), `origen` -- no other
+key, since `EntradaBuzonMeta.model_config = {"extra": "forbid"}` answers
+`422` for one) plus up to 10 `archivos` file parts, `Authorization: Bearer
 <FINANZAS_BUZON_TOKEN>`. `httpx.Client` is constructed once, over `base_url`
 from `Config.url_finanzas`, already refused non-loopback by `config.py`.
 """
@@ -49,9 +50,9 @@ class ResultadoEnvio:
 
 @dataclass(frozen=True)
 class MetaEntrada:
-    """The `meta` form part's own fields -- exactly these six keys, in
-    `EntradaBuzonMeta`'s own names; no other key, or the wire answers
-    `422`.
+    """The `meta` form part's own fields -- these six keys, in
+    `EntradaBuzonMeta`'s own names, plus the optional seventh (`origen`);
+    no other key, or the wire answers `422`.
 
     `fuente` is the CHANNEL, not a source's own identity: always
     `"correo"` (`limites.FUENTE_CORREO`) for every mail source, Microsoft or
@@ -59,9 +60,16 @@ class MetaEntrada:
     here instead, which Finanzas' own `Literal["correo", "sms",
     "notificacion"]` (`limites.FuenteWire`, mirrored from
     `src/duna_finanzas/web/buzon/schemas.py:37`) would answer `422` to on
-    every entry -- fixed by `BUZON-FUENTE-WIRE-CORREO-1`. A source's own
-    identity, when Finanzas needs it, is `fuentes.FuenteConfig.etiqueta_registro`
-    -- logs and status only, never this field."""
+    every entry -- fixed by `BUZON-FUENTE-WIRE-CORREO-1`.
+
+    `origen` IS `fuentes.FuenteConfig.etiqueta_registro` -- a source's own
+    identity -- sent on the wire only when the caller passes it
+    (`BUZON-ORIGEN-WIRE-1`, behind `Config.enviar_origen`). `None` (the
+    default, and every caller before this slice) omits the key entirely,
+    rather than sending it as JSON `null`: `EntradaBuzonMeta`'s
+    `extra="forbid"` answers `422` to an unknown key regardless of its
+    value, and before Finanzas Release 37 deploys `origen` is an unknown
+    key."""
 
     fuente: FuenteWire
     id_externo: str
@@ -69,18 +77,20 @@ class MetaEntrada:
     asunto: str | None
     recibido_en: datetime.datetime
     cuerpo_texto: str | None
+    origen: str | None = None
 
     def como_json(self) -> str:
-        return json.dumps(
-            {
-                "fuente": self.fuente,
-                "id_externo": self.id_externo,
-                "remitente": self.remitente,
-                "asunto": self.asunto,
-                "recibido_en": self.recibido_en.isoformat(),
-                "cuerpo_texto": self.cuerpo_texto,
-            }
-        )
+        datos: dict[str, object] = {
+            "fuente": self.fuente,
+            "id_externo": self.id_externo,
+            "remitente": self.remitente,
+            "asunto": self.asunto,
+            "recibido_en": self.recibido_en.isoformat(),
+            "cuerpo_texto": self.cuerpo_texto,
+        }
+        if self.origen is not None:
+            datos["origen"] = self.origen
+        return json.dumps(datos)
 
 
 class FinanzasClient:

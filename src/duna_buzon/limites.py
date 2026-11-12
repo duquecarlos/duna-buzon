@@ -20,6 +20,15 @@ same way: `src/duna_finanzas/web/buzon/schemas.py:37`'s
 a source's own identity (`BUZON-FUENTE-WIRE-CORREO-1`, correcting
 `BUZON-FUENTES-ESQUEMA-1`, which sent `"<proveedor>:<id>"` here and Finanzas
 would have rejected every entry with a `422`).
+
+`LIMITE_ORIGEN` mirrors the wire's optional `origen` field
+(`BUZON-ORIGEN-WIRE-1`): Finanzas merged `FIN-API-BUZON-ORIGEN-1`
+(`duna-finanzas-api` `main` `38a9e6d1`, migration `530cb968d327`) --
+`EntradaBuzonMeta.origen` (`web/buzon/schemas.py:66`), an optional string
+capped at 64 characters by the DB CHECK `origen_acotado`; 65+ is a `422`
+before any write. NOT live until Finanzas Release 37 deploys, so this
+connector only ever sends it behind `Config.enviar_origen`
+(`BUZON_ENVIAR_ORIGEN`), off by default.
 """
 
 from __future__ import annotations
@@ -33,6 +42,13 @@ LIMITE_ASUNTO: Final[int] = 998
 FuenteWire = Literal["correo", "sms", "notificacion"]
 LIMITE_FUENTE: Final[int] = 16
 FUENTE_CORREO: Final[FuenteWire] = "correo"
+
+# BUZON-ORIGEN-WIRE-1 -- the wire's own cap on `origen` (DB CHECK
+# `origen_acotado`). Unlike `asunto`, a label over this cap is never
+# truncated -- truncating it would produce a different label than the rest
+# of that source's entries, breaking the exact-label routing match -- so a
+# violation is skipped (never sent) rather than cut down.
+LIMITE_ORIGEN: Final[int] = 64
 
 
 def excede_limites_no_truncables(*, id_externo: str, remitente: str) -> bool:

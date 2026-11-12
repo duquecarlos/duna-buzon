@@ -16,6 +16,13 @@ _VAR_FINANZAS_TOKEN = "FINANZAS_BUZON_TOKEN"
 _VAR_DATOS = "BUZON_DATOS"
 _VAR_FINANZAS_URL = "BUZON_FINANZAS_URL"
 
+# BUZON-ORIGEN-WIRE-1 -- OFF unless set to exactly "1" or "true": Finanzas'
+# `origen` field (`EntradaBuzonMeta`, `extra="forbid"`) is not live until
+# Finanzas Release 37 deploys, and sending it before then gets every entry
+# refused with a 422. See README.md / deploy/host/README.md.
+_VAR_ENVIAR_ORIGEN = "BUZON_ENVIAR_ORIGEN"
+_VALORES_ENVIAR_ORIGEN_VERDADEROS = frozenset({"1", "true"})
+
 # Cuenta Duna (CUENTA-API-FUENTES-CONECTADAS-1) -- OPTIONAL as a group: a
 # deployment that has not yet connected any source through Cuenta Duna sets
 # none of these four, and this connector works exactly as before, with only
@@ -133,6 +140,10 @@ class Config:
     cuenta_client_id: str | None = None
     cuenta_client_secret: str | None = None
     cuenta_sub: str | None = None
+    # BUZON-ORIGEN-WIRE-1 -- see `_VAR_ENVIAR_ORIGEN` above. False for every
+    # deployment that never set the variable, which is every deployment
+    # before this slice.
+    enviar_origen: bool = False
 
     @property
     def cuenta_configurada(self) -> bool:
@@ -148,6 +159,7 @@ class Config:
             entorno.get(_VAR_FINANZAS_URL, _FINANZAS_URL_PREDETERMINADA)
         )
         cuenta_url, cuenta_client_id, cuenta_client_secret, cuenta_sub = _cuenta_desde_entorno(entorno)
+        enviar_origen = entorno.get(_VAR_ENVIAR_ORIGEN) in _VALORES_ENVIAR_ORIGEN_VERDADEROS
         return cls(
             graph_client_id=graph_client_id,
             clave_cifrado=clave_cifrado,
@@ -158,4 +170,5 @@ class Config:
             cuenta_client_id=cuenta_client_id,
             cuenta_client_secret=cuenta_client_secret,
             cuenta_sub=cuenta_sub,
+            enviar_origen=enviar_origen,
         )
