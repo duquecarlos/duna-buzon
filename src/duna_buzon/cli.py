@@ -1,9 +1,20 @@
 """The four commands -- `entrar`, `sincronizar`, `estado`, `fuentes` -- wired
 to one `Config` and iterating `fuentes.py`'s own per-source layout.
-`__main__.py` is the thin argument-parsing shell around this module."""
+`__main__.py` is the thin argument-parsing shell around this module.
+
+`sincronizar` ALSO pulls every source Carlos connected through Cuenta Duna
+(`_pull_fuentes_cuenta`, `BUZON-FUENTES-PULL-1`) before running the pass:
+one `GET /servicio/fuentes/{sub}` against `cuenta.py`'s `CuentaClient`,
+refreshing each returned source's `fuente.json` (never its credential --
+Cuenta sources have none on disk) and marking any Cuenta-origin source no
+longer returned as inactive. A failed or unconfigured pull is not an
+error: it is logged in one count-only line and every LOCAL source still
+runs exactly as before this slice.
+"""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -13,6 +24,7 @@ from duna_buzon import cursor as modulo_cursor
 from duna_buzon import fuentes as modulo_fuentes
 from duna_buzon import registro
 from duna_buzon.config import Config
+from duna_buzon.cuenta import CuentaClient, CuentaPullError
 from duna_buzon.finanzas import FinanzasClient
 from duna_buzon.fuentes import FuenteConfig
 from duna_buzon.proveedor import construir_proveedor
@@ -46,6 +58,13 @@ def comando_entrar(config: Config, id_fuente: str | None) -> int:
             print(f"error: no such source: {id_fuente}", file=sys.stderr)
             return 1
 
+    if fuente.origen == "cuenta":
+        print(
+            f"error: {fuente.id!r} is managed by Cuenta Duna (connect it there, not with entrar)",
+            file=sys.stderr,
+        )
+        return 1
+
     directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
 
     if fuente.proveedor == "microsoft":
@@ -65,7 +84,11 @@ def comando_entrar(config: Config, id_fuente: str | None) -> int:
 
 
 def _ejecutar_una_fuente(
-    config: Config, fuente: FuenteConfig, cliente_finanzas: FinanzasClient
+    config: Config,
+    fuente: FuenteConfig,
+    cliente_finanzas: FinanzasClient,
+    *,
+    token_cuenta: str | None = None,
 ) -> tuple[str, str | None]:
     """Runs one source's own pass end to end and returns `(linea, motivo)`
     -- the summary line this source's `estado.json` carries, and the stop
@@ -73,7 +96,12 @@ def _ejecutar_una_fuente(
     is this source's own (auth, rules, the provider, Finanzas): a source
     that cannot even sign in is reported exactly like one that signs in and
     then has its pass stopped, so one source's trouble never stops
-    another's."""
+    another's.
+
+    `token_cuenta` is the access token `_pull_fuentes_cuenta` already
+    pulled for a `origen="cuenta"` source THIS run -- such a source has no
+    `credencial.bin` to read, so this never calls `auth`/`credencial_imap`
+    for it."""
     directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
 
     def _detenida(motivo: str) -> tuple[str, str | None]:
@@ -83,7 +111,10 @@ def _ejecutar_una_fuente(
         return linea, motivo
 
     try:
-        if fuente.proveedor == "microsoft":
+        if fuente.origen == "cuenta":
+            assert token_cuenta is not None
+            token = token_cuenta
+        elif fuente.proveedor == "microsoft":
             token = auth.obtener_token(config, directorio)
         else:
             assert fuente.proveedor == "imap"
@@ -123,8 +154,76 @@ def _ejecutar_una_fuente(
     return linea, resultado.motivo
 
 
+def _pull_fuentes_cuenta(config: Config) -> dict[str, str] | None:
+    """One pull of every source Carlos connected through Cuenta Duna
+    (`BUZON-FUENTES-PULL-1`). Returns `{id_fuente: access_token}` for every
+    source ACTIVE this run, or `None` the moment Cuenta Duna is not
+    configured at all or the pull itself failed -- in neither case is this
+    an error for the pass as a whole: the caller (`comando_sincronizar`)
+    just runs every LOCAL source exactly as if this function did not
+    exist.
+
+    On success (even an empty list), this also:
+    - writes/refreshes a `fuente.json` for every returned source, keyed by
+      `fuentes.id_fuente_cuenta` -- never a `credencial.bin`: the token
+      lives only in the dict this function returns, for this one run.
+    - marks any PREVIOUSLY-active `origen="cuenta"` source that Cuenta
+      Duna no longer returns as inactive, without touching its cursor or
+      its rules -- "a revoked source simply stops appearing", per this
+      slice's own build instructions, and a later reconnect resumes them
+      unchanged.
+    """
+    if not config.cuenta_configurada:
+        return None
+
+    assert config.cuenta_url is not None
+    assert config.cuenta_client_id is not None
+    assert config.cuenta_client_secret is not None
+    assert config.cuenta_sub is not None
+    cliente = CuentaClient(
+        url_base=config.cuenta_url,
+        client_id=config.cuenta_client_id,
+        client_secret=config.cuenta_client_secret,
+        sub=config.cuenta_sub,
+    )
+    try:
+        fuentes_pulladas = cliente.listar_fuentes()
+    except CuentaPullError as exc:
+        print(f"cuenta: {exc.motivo}", file=sys.stderr)
+        return None
+    finally:
+        cliente.cerrar()
+
+    tokens: dict[str, str] = {}
+    presentes: set[str] = set()
+    for pullada in fuentes_pulladas:
+        id_fuente = modulo_fuentes.id_fuente_cuenta(pullada.id)
+        presentes.add(id_fuente)
+        tokens[id_fuente] = pullada.access_token
+        modulo_fuentes.guardar_fuente(
+            config.directorio_datos,
+            FuenteConfig(
+                id=id_fuente,
+                proveedor=pullada.proveedor,
+                direccion=pullada.direccion,
+                etiqueta=pullada.direccion,
+                token_finanzas_ref=config.cuenta_sub,
+                activa=True,
+                origen="cuenta",
+            ),
+        )
+
+    for existente in modulo_fuentes.listar_fuentes(config.directorio_datos):
+        if existente.origen == "cuenta" and existente.activa and existente.id not in presentes:
+            modulo_fuentes.guardar_fuente(config.directorio_datos, dataclasses.replace(existente, activa=False))
+
+    return tokens
+
+
 def comando_sincronizar(config: Config) -> int:
     _migrar_si_necesario(config)
+    tokens_cuenta = _pull_fuentes_cuenta(config)
+
     activas = modulo_fuentes.fuentes_activas(config.directorio_datos)
     if not activas:
         print("error: no active sources configured", file=sys.stderr)
@@ -134,7 +233,19 @@ def comando_sincronizar(config: Config) -> int:
     algun_fallo = False
     try:
         for fuente in activas:
-            linea, motivo = _ejecutar_una_fuente(config, fuente, cliente_finanzas)
+            if fuente.origen == "cuenta":
+                token_cuenta = (tokens_cuenta or {}).get(fuente.id)
+                if token_cuenta is None:
+                    # The pull failed, was not configured, or this source
+                    # simply was not in THIS pull's result -- it does not
+                    # run this pass, and that is not a failure of the pass:
+                    # its cursor is untouched, ready for the next pull.
+                    continue
+                linea, motivo = _ejecutar_una_fuente(
+                    config, fuente, cliente_finanzas, token_cuenta=token_cuenta
+                )
+            else:
+                linea, motivo = _ejecutar_una_fuente(config, fuente, cliente_finanzas)
             print(f"fuente={fuente.id} {linea}")
             if motivo is not None:
                 print(f"fuente={fuente.id} parada: {motivo}", file=sys.stderr)

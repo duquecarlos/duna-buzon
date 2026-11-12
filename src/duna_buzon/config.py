@@ -16,6 +16,19 @@ _VAR_FINANZAS_TOKEN = "FINANZAS_BUZON_TOKEN"
 _VAR_DATOS = "BUZON_DATOS"
 _VAR_FINANZAS_URL = "BUZON_FINANZAS_URL"
 
+# Cuenta Duna (CUENTA-API-FUENTES-CONECTADAS-1) -- OPTIONAL as a group: a
+# deployment that has not yet connected any source through Cuenta Duna sets
+# none of these four, and this connector works exactly as before, with only
+# its local (`entrar`-signed) sources. The moment ANY one of them is set,
+# all four are required -- a half-configured group is refused by name,
+# never silently treated as "not configured" (that would hide a real
+# operator mistake behind a connector that quietly never pulls anything).
+_VAR_CUENTA_URL = "BUZON_CUENTA_URL"
+_VAR_CUENTA_CLIENT_ID = "BUZON_CUENTA_CLIENT_ID"
+_VAR_CUENTA_CLIENT_SECRET = "BUZON_CUENTA_CLIENT_SECRET"
+_VAR_CUENTA_SUB = "BUZON_CUENTA_SUB"
+_VARS_CUENTA = (_VAR_CUENTA_URL, _VAR_CUENTA_CLIENT_ID, _VAR_CUENTA_CLIENT_SECRET, _VAR_CUENTA_SUB)
+
 _DATOS_PREDETERMINADO = "/srv/duna/data/buzon"
 _FINANZAS_URL_PREDETERMINADA = "http://127.0.0.1:8010"
 
@@ -77,6 +90,33 @@ def _validar_url_finanzas(url: str) -> str:
     return url
 
 
+def _validar_url_cuenta(url: str) -> str:
+    # Cuenta Duna is a separate service, not this connector's own loopback
+    # peer -- no loopback requirement here, only a sane scheme. Unlike
+    # Finanzas (invariant 3), nothing in this slice's build instructions
+    # asked for this URL to be loopback-only.
+    partes = urlsplit(url)
+    if partes.scheme not in ("http", "https") or not partes.hostname:
+        raise ConfigError(f"{_VAR_CUENTA_URL} must be an http:// or https:// URL, got {url!r}")
+    return url
+
+
+def _cuenta_desde_entorno(entorno: Mapping[str, str]) -> tuple[str | None, str | None, str | None, str | None]:
+    valores = {nombre: entorno.get(nombre) or None for nombre in _VARS_CUENTA}
+    presentes = {nombre: valor for nombre, valor in valores.items() if valor}
+    if not presentes:
+        return None, None, None, None
+    if len(presentes) != len(_VARS_CUENTA):
+        faltante = next(nombre for nombre in _VARS_CUENTA if not valores[nombre])
+        raise ConfigError(f"missing required environment variable: {faltante}")
+    return (
+        _validar_url_cuenta(valores[_VAR_CUENTA_URL]),  # type: ignore[arg-type]
+        valores[_VAR_CUENTA_CLIENT_ID],
+        valores[_VAR_CUENTA_CLIENT_SECRET],
+        valores[_VAR_CUENTA_SUB],
+    )
+
+
 @dataclass(frozen=True)
 class Config:
     """Everything the connector reads from the environment."""
@@ -86,6 +126,17 @@ class Config:
     finanzas_token: str
     directorio_datos: str
     url_finanzas: str
+    # Cuenta Duna -- all four `None` when not configured at all; see
+    # `_VARS_CUENTA` above. `cuenta_configurada` is the one thing callers
+    # should check before building a `CuentaClient`.
+    cuenta_url: str | None = None
+    cuenta_client_id: str | None = None
+    cuenta_client_secret: str | None = None
+    cuenta_sub: str | None = None
+
+    @property
+    def cuenta_configurada(self) -> bool:
+        return self.cuenta_url is not None
 
     @classmethod
     def desde_entorno(cls, entorno: Mapping[str, str]) -> "Config":
@@ -96,10 +147,15 @@ class Config:
         url_finanzas = _validar_url_finanzas(
             entorno.get(_VAR_FINANZAS_URL, _FINANZAS_URL_PREDETERMINADA)
         )
+        cuenta_url, cuenta_client_id, cuenta_client_secret, cuenta_sub = _cuenta_desde_entorno(entorno)
         return cls(
             graph_client_id=graph_client_id,
             clave_cifrado=clave_cifrado,
             finanzas_token=finanzas_token,
             directorio_datos=directorio_datos,
             url_finanzas=url_finanzas,
+            cuenta_url=cuenta_url,
+            cuenta_client_id=cuenta_client_id,
+            cuenta_client_secret=cuenta_client_secret,
+            cuenta_sub=cuenta_sub,
         )

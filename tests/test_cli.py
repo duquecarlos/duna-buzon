@@ -7,6 +7,7 @@ import pytest
 
 from duna_buzon import auth, cli, credencial_imap, cripto
 from duna_buzon.config import Config
+from duna_buzon.cuenta import CuentaPullError, FuenteCuenta
 from duna_buzon.fuentes import FuenteConfig, guardar_fuente
 
 from .conftest import CLAVE_VALIDA_BASE64
@@ -508,3 +509,235 @@ def test_migracion_automatica_desde_sincronizar(
     assert "fuente=hotmail-carlos vistos=5" in salida.out
     assert not (tmp_path / "cursor.json").exists()
     assert (tmp_path / "fuentes" / "hotmail-carlos" / "cursor.json").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Cuenta Duna pull (BUZON-FUENTES-PULL-1)
+# ---------------------------------------------------------------------------
+
+
+def _config_con_cuenta(tmp_path: Path) -> Config:
+    return Config.desde_entorno(
+        {
+            "BUZON_GRAPH_CLIENT_ID": "cliente",
+            "BUZON_CLAVE_CIFRADO": CLAVE_VALIDA_BASE64,
+            "FINANZAS_BUZON_TOKEN": "token",
+            "BUZON_DATOS": str(tmp_path),
+            "BUZON_FINANZAS_URL": "http://127.0.0.1:8010",
+            "BUZON_CUENTA_URL": "https://cuenta.duna.internal",
+            "BUZON_CUENTA_CLIENT_ID": "buzon",
+            "BUZON_CUENTA_CLIENT_SECRET": "secreto-cuenta",
+            "BUZON_CUENTA_SUB": "sub-carlos",
+        }
+    )
+
+
+def _escribir_reglas_vacias_en(directorio: Path) -> None:
+    directorio.mkdir(parents=True, exist_ok=True)
+    (directorio / "reglas.json").write_text(
+        '{"desde": "2026-01-01T00:00:00+00:00", "remitentes": [], "palabras": []}',
+        encoding="utf-8",
+    )
+
+
+class _CuentaClienteFalso:
+    """Replaces `cli.CuentaClient` -- never touches the network. `resultado`
+    is either a `list[FuenteCuenta]` (pull succeeds) or a `CuentaPullError`
+    instance (pull fails)."""
+
+    def __init__(self, resultado: list[FuenteCuenta] | CuentaPullError, **kwargs) -> None:
+        self._resultado = resultado
+        self.cerrado = False
+
+    def listar_fuentes(self) -> list[FuenteCuenta]:
+        if isinstance(self._resultado, CuentaPullError):
+            raise self._resultado
+        return self._resultado
+
+    def cerrar(self) -> None:
+        self.cerrado = True
+
+
+def test_sin_cuenta_configurada_nunca_construye_un_cuenta_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)  # no BUZON_CUENTA_* set at all
+    assert config.cuenta_configurada is False
+    _escribir_fuente_y_reglas(tmp_path)
+
+    def _nunca_llamar(*args, **kwargs):
+        raise AssertionError("CuentaClient must never be constructed when Cuenta is not configured")
+
+    monkeypatch.setattr(cli, "CuentaClient", _nunca_llamar)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+
+
+def test_pull_exitoso_ejecuta_la_fuente_de_cuenta_con_el_token_pulled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.fuentes import cargar_fuente
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta(tmp_path)
+    _escribir_reglas_vacias_en(tmp_path / "fuentes" / "cuenta-abc123")
+
+    fuente_cuenta = FuenteCuenta(
+        id="abc123",
+        proveedor="google",
+        direccion="carlos@gmail.com",
+        access_token="token-cuenta-secreto",
+        expira_en_segundos=3600,
+    )
+    monkeypatch.setattr(cli, "CuentaClient", lambda **kw: _CuentaClienteFalso([fuente_cuenta]))
+
+    tokens_vistos: list[str] = []
+
+    def falso_construir_proveedor(fuente, token, cursor_proveedor_inicial=None):
+        tokens_vistos.append(token)
+        return _ProveedorFalso()
+
+    monkeypatch.setattr(cli, "construir_proveedor", falso_construir_proveedor)
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=2))
+    )
+
+    def _nunca_auth_local(*args, **kwargs):
+        raise AssertionError("a cuenta-origin source must never call auth.obtener_token")
+
+    monkeypatch.setattr(auth, "obtener_token", _nunca_auth_local)
+
+    assert cli.comando_sincronizar(config) == 0
+    salida = capsys.readouterr()
+    assert "fuente=cuenta-abc123 vistos=2" in salida.out
+    assert tokens_vistos == ["token-cuenta-secreto"]
+
+    fuente = cargar_fuente(str(tmp_path), "cuenta-abc123")
+    assert fuente.proveedor == "google"
+    assert fuente.direccion == "carlos@gmail.com"
+    assert fuente.origen == "cuenta"
+    assert fuente.activa is True
+
+    # Never writes a credential, and never writes the pulled token to disk
+    # anywhere -- not in `fuente.json`, not in a `credencial.bin`.
+    directorio_cuenta = tmp_path / "fuentes" / "cuenta-abc123"
+    assert not (directorio_cuenta / "credencial.bin").exists()
+    assert "token-cuenta-secreto" not in (directorio_cuenta / "fuente.json").read_text(encoding="utf-8")
+
+
+def test_pull_404_omite_fuentes_de_cuenta_pero_las_locales_siguen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)  # the usual LOCAL "hotmail-carlos" source
+
+    monkeypatch.setattr(cli, "CuentaClient", lambda **kw: _CuentaClienteFalso(CuentaPullError(http_status=404)))
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=3))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    salida = capsys.readouterr()
+    assert "cuenta: cuenta fuentes http=404" in salida.err
+    assert "fuente=hotmail-carlos vistos=3" in salida.out
+
+
+def test_fuente_de_cuenta_revocada_se_marca_inactiva_y_deja_de_ejecutarse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.fuentes import cargar_fuente
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta(tmp_path)
+    _escribir_reglas_vacias_en(tmp_path / "fuentes" / "cuenta-abc123")
+
+    fuente_cuenta = FuenteCuenta(
+        id="abc123",
+        proveedor="google",
+        direccion="carlos@gmail.com",
+        access_token="token-1",
+        expira_en_segundos=3600,
+    )
+    monkeypatch.setattr(cli, "CuentaClient", lambda **kw: _CuentaClienteFalso([fuente_cuenta]))
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    assert cargar_fuente(str(tmp_path), "cuenta-abc123").activa is True
+    capsys.readouterr()
+
+    # Second pass: Cuenta Duna no longer returns this source (revoked).
+    monkeypatch.setattr(cli, "CuentaClient", lambda **kw: _CuentaClienteFalso([]))
+    llamadas_ejecutadas: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "ejecutar_pasada",
+        lambda **kwargs: (
+            llamadas_ejecutadas.append("llamado") or ResultadoPasada(contadores=Contadores(vistos=1))
+        ),
+    )
+
+    assert cli.comando_sincronizar(config) == 1  # no active sources left at all
+    fuente_revocada = cargar_fuente(str(tmp_path), "cuenta-abc123")
+    assert fuente_revocada.activa is False
+    assert not llamadas_ejecutadas
+    # The cursor/rules directory itself is untouched -- a reconnect can
+    # resume it.
+    assert (tmp_path / "fuentes" / "cuenta-abc123" / "reglas.json").is_file()
+
+
+def test_fuente_de_cuenta_reconectada_reanuda_el_cursor_existente(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import datetime
+
+    from duna_buzon import cursor as modulo_cursor
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta(tmp_path)
+    directorio_cuenta = tmp_path / "fuentes" / "cuenta-abc123"
+    _escribir_reglas_vacias_en(directorio_cuenta)
+    cursor_previo = datetime.datetime(2026, 6, 1, tzinfo=datetime.UTC)
+    modulo_cursor.guardar_cursor(str(directorio_cuenta), cursor_previo)
+
+    fuente_cuenta = FuenteCuenta(
+        id="abc123",
+        proveedor="google",
+        direccion="carlos@gmail.com",
+        access_token="token-reconectado",
+        expira_en_segundos=3600,
+    )
+    monkeypatch.setattr(cli, "CuentaClient", lambda **kw: _CuentaClienteFalso([fuente_cuenta]))
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+
+    cursores_vistos: list[datetime.datetime] = []
+
+    def falso_ejecutar_pasada(*, cursor_inicial, **kwargs):
+        cursores_vistos.append(cursor_inicial)
+        return ResultadoPasada(contadores=Contadores(vistos=1))
+
+    monkeypatch.setattr(cli, "ejecutar_pasada", falso_ejecutar_pasada)
+
+    assert cli.comando_sincronizar(config) == 0
+    assert cursores_vistos == [cursor_previo]
