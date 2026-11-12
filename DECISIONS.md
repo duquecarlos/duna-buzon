@@ -1888,3 +1888,107 @@ Carlos's own production incident (12 Nov, Graph 502 at `$top=1` against `hotmail
 one-liner run by hand because this CLI did not exist yet; this slice (`BUZON-CARPETAS-MICROSOFT-CLI-1`)
 closes that gap with `fijar-carpetas`/`carpetas-graph` and their own `duna-deploy-buzon` wrapper, so the
 next such incident needs no hand edit and no python one-liner.
+
+---
+
+## BUZON-ENTRADA-UNIDADES-REGISTROS-1 -- diff-install every unit, a drift report, a `registros` verb (2026-11-12)
+
+### Why
+
+Two gaps measured in `duna-pagos` on 12 Nov apply here too (`ORCH-CARLOS-DELEGATES-TIER-1-1`): (a) a
+deploy that only ever diffed and installed the main `.service` would leave any other job unit on the
+host stale (`PAGOS-DEPLOY-INSTALA-UNIDADES-1`, pagos `ba4ab93`); (b) with no log verb, a failing job
+could not be diagnosed without Carlos running `journalctl` by hand (`PAGOS-ENTRADA-REGISTROS-1`, pagos
+`5582345`). Carlos named the second half directly: `duna-buzon.service` had failed all evening on a
+Microsoft 502 and only `status`'s one summary line was readable.
+
+### What changed
+
+**`deploy`'s unit install is now diffed, not blind.** For each of `duna-buzon.service`/
+`duna-buzon.timer` (the `UNIDADES` array, a fixed constant), `_archivo_cambio` compares the repository's
+own `deploy/systemd/<unit>` against what is installed under `/etc/systemd/system/<unit>`; only a unit
+that differs (or is missing) gets `install -o root -g root -m 644`'d, and each is printed as `sin
+cambios` or `actualizada`. Exactly one `systemctl daemon-reload` runs after the per-unit loop, then
+`systemctl enable --now duna-buzon.timer` -- unchanged from before, since this repo has only the one
+timer. `--dry-run` describes the same plan without installing or reloading anything (`deploy/host/
+duna-deploy-buzon`'s `cmd_deploy`). The main service's restart policy (none) and its health check
+(`python -m duna_buzon estado` under `systemd-run`) are untouched.
+
+**`status` gained a read-only drift report.** A new `_estado_unidad` prints `coincide`/`distinta`/
+`falta` per unit (same comparison `_archivo_cambio` already made, reworked as a three-way read); a new
+`_user_de_unidad` prints the installed `User=` of `duna-buzon.service` (the one job unit, `UNIDADES_JOB`);
+and `status` now also prints `/srv/duna/data/buzon`'s owner and mode (`stat -c '%U:%G'`/`stat -c '%a'`).
+When `duna-buzon.service`'s own `systemctl is-active` reports `failed`, `status` automatically prints
+its last 30 redacted journal lines -- the exact gap Carlos hit: only the summary line was readable while
+the service failed all evening.
+
+**A new read-only verb, `registros <unidad> [n]`** (same contract as `duna-pagos`'): `<unidad>` is
+checked against the fixed `UNIDADES` allowlist (`_unidad_permitida`, membership only, never a regex);
+`n` is normalized by `_normaliza_n` -- empty defaults to 40, anything over 200 is capped to 200, anything
+that is not a positive integer is refused with `usage` before `require_root` runs (same ordering every
+other subcommand's shape check already uses). `cmd_registros` runs exactly `journalctl -u "$unidad" -n
+"$n" --no-pager -o cat`, the unit name passed as `journalctl`'s own `-u` argument and never built into a
+shell string, piped through a new `_redactar` filter shared with `status`'s own auto-print: the
+credentials half of a `postgres://`/`postgresql://` URL and the value of any
+`...SECRET=`/`...TOKEN=`/`...PASSWORD=`/`...KEY=` assignment each become `***`.
+
+**`deploy/host/README.md`** documents the diffed install, the drift report's new fields, and a new
+"Reading a unit's own log (`registros`)" section.
+
+### A pre-existing test guard was too broad, fixed rather than widened around
+
+`test_ningun_valor_de_entorno_se_imprime`/`test_los_archivos_de_entorno_nunca_se_leen_con_cat`
+(`tests/test_host_deploy_entry_script.py`) banned the bare substring `"cat "` anywhere in an `echo`/
+`printf` line or in the whole script, to catch an actual `cat` of the two secret env files. Journalctl's
+own mandatory `-o cat` output-format flag (required by this spec) contains that exact substring and is
+not a shell `cat` invocation, so both guards false-positived against it. Measured, not guessed: the
+first run after this slice's changes failed exactly those two tests and no others (68 passed, 2 failed).
+Fixed by tightening the regex to `(?<!-o )\bcat\b` -- a `cat` word not immediately preceded by `-o ` --
+which still catches a real `cat $ENV_CLIENTE`/`cat $ENV_TOKEN` and now also lets `-o cat` through; both
+tests pass clean afterward.
+
+### Tests, measured
+
+31 new/changed `def test_` functions in `tests/test_host_deploy_entry_script.py`
+(`_estado_unidad`'s three outcomes; `_user_de_unidad` with/without a `User=` line and a missing file;
+`_unidad_permitida`'s allowlist, parametrized over valid and foreign unit names; `_normaliza_n`'s
+default/cap/rejection, parametrized over 11 cases; `_redactar` against a postgres URL and four
+secret-style assignments in one stream, alongside an untouched plain line; `registros`'s recognized-
+subcommand check; its invalid-shape rejections (missing unit, unknown unit, `n=0`/negative/non-numeric,
+a shell-metacharacter unit, extra arguments), parametrized over 7 cases; its valid shapes failing only on
+EUID, parametrized over 5 cases; a static check that the unit name never reaches `journalctl` through a
+built string; a static check that `cmd_deploy`'s per-unit loop only installs inside its own
+`_archivo_cambio` conditional and runs exactly one `daemon-reload` after the whole loop; a static check
+that `status`'s real branch calls `_estado_unidad`/`_user_de_unidad`/`_mostrar_registros` and prints the
+data directory's owner). Two pre-existing tests tightened per the deviation above.
+
+`uv run pytest -q` on the slice branch (`feat/buzon-entrada-unidades-registros-1`), tree
+`944d86578dd4728b2f423be39f369a35005de84b` (slice commit `c0fb8dc3dc40e23ee8dbc3efc3ee479f9c9efde1`):
+
+    465 passed, 7 skipped in 50.37s
+
+Merge commit `5d0d368811f0a14d5983969c75bc95162e0108ec` has tree
+`944d86578dd4728b2f423be39f369a35005de84b`, IDENTICAL to the slice branch's own tree (`git diff
+feat/buzon-entrada-unidades-registros-1 HEAD` empty), so that run was not repeated for the merge. The 7
+skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger has recorded;
+none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, same as every earlier entry. No
+customer-facing bytes -- every new byte here is operator-facing: a root-owned shell script's own stdout
+(`sin cambios`/`actualizada`, the drift report, `registros`' own journal output), and `deploy/host/
+README.md`, read and acted on only by Carlos as this system's own administrator -- the same reasoning
+`BUZON-CARPETAS-MICROSOFT-CLI-1` and `BUZON-GRAPH-502-1` recorded for their own operator-facing fields.
+No cross-repo contract -- nothing here touches the Finanzas wire or the Cuenta Duna wire; every change is
+this connector's own deploy script and its own systemd units. All three conditions clear, and the spec
+body itself names the merge as a required step ("Full gate ..., merge to main (--no-ff), DECISIONS.md
+entry") -- merged on green, no waiting.
+
+### Attribution
+
+Carlos delegated this as an operational gap, the same shape as `duna-pagos`' own fix, no wire, no data
+shape (`ORCH-CARLOS-DELEGATES-TIER-1-1`). This slice (`BUZON-ENTRADA-UNIDADES-REGISTROS-1`) diffs every
+unit this repo ships instead of blindly overwriting it, gives `status` a drift report and an automatic
+failure excerpt, and adds the read-only `registros` verb Carlos needed the evening `duna-buzon.service`
+failed against Microsoft's own 502 with nothing but a summary line to read.
