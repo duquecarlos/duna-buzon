@@ -206,6 +206,62 @@ def test_cargar_fuente_carpetas_no_es_lista_se_rechaza(tmp_path: Path) -> None:
         cargar_fuente(str(tmp_path), "legal-duna")
 
 
+# ---------------------------------------------------------------------------
+# BUZON-GRAPH-502-1 -- `carpetas` extended to `proveedor == "microsoft"`.
+# ---------------------------------------------------------------------------
+
+
+def test_carpetas_en_microsoft_por_defecto_es_none() -> None:
+    assert _fuente().carpetas is None
+
+
+def test_guardar_y_cargar_fuente_microsoft_con_carpetas_ida_y_vuelta(tmp_path: Path) -> None:
+    fuente_microsoft = _fuente(carpetas=("inbox",))
+    guardar_fuente(str(tmp_path), fuente_microsoft)
+    assert cargar_fuente(str(tmp_path), "hotmail-carlos") == fuente_microsoft
+
+
+def test_fuente_json_microsoft_sin_campo_carpetas_se_lee_como_none(tmp_path: Path) -> None:
+    # Every `fuente.json` for a Microsoft source written before this slice
+    # never had a `carpetas` key at all -- absent must keep meaning exactly
+    # what it always meant: `/me/messages`, every folder in one call.
+    ruta = tmp_path / "fuentes" / "hotmail-carlos"
+    ruta.mkdir(parents=True)
+    (ruta / "fuente.json").write_text(
+        json.dumps(
+            {
+                "proveedor": "microsoft",
+                "direccion": "carlos@hotmail.com",
+                "etiqueta": "Hotmail",
+                "token_finanzas_ref": "carlos",
+                "activa": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert cargar_fuente(str(tmp_path), "hotmail-carlos").carpetas is None
+
+
+def test_cargar_fuente_microsoft_carpetas_vacia_se_rechaza(tmp_path: Path) -> None:
+    ruta = tmp_path / "fuentes" / "hotmail-carlos"
+    ruta.mkdir(parents=True)
+    (ruta / "fuente.json").write_text(
+        json.dumps(
+            {
+                "proveedor": "microsoft",
+                "direccion": "carlos@hotmail.com",
+                "etiqueta": "Hotmail",
+                "token_finanzas_ref": "carlos",
+                "activa": True,
+                "carpetas": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(FuenteInvalidaError):
+        cargar_fuente(str(tmp_path), "hotmail-carlos")
+
+
 def test_cargar_fuente_carpetas_vacia_se_rechaza(tmp_path: Path) -> None:
     ruta = tmp_path / "fuentes" / "legal-duna"
     ruta.mkdir(parents=True)

@@ -347,6 +347,67 @@ def test_sincronizar_registra_finalizado_en_y_reintentos_en_estado(
     assert "finalizado_en=2026-11-12T17:05:00Z" in salida_estado.out
 
 
+def test_sincronizar_registra_el_top_de_graph_en_estado(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """BUZON-GRAPH-502-1: `estado.json` (and `estado`'s own stdout) now
+    also carry the `$top` the Graph LIST call was last using, next to the
+    stop reason -- a provider with no such concept (IMAP, Gmail, every
+    test fake that is not `GraphClient`) simply omits the field."""
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+
+    class _ProveedorConTop:
+        reintentos_usados = 1
+        top_lista_usado = 10
+
+        def cerrar(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        cli,
+        "construir_proveedor",
+        lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorConTop(),
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1, reenviados=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    salida = capsys.readouterr()
+    assert "top=10" in salida.out
+
+    assert cli.comando_estado(config) == 0
+    salida_estado = capsys.readouterr()
+    assert "top=10" in salida_estado.out
+
+
+def test_sincronizar_sin_top_de_graph_no_lo_imprime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A provider with no `top_lista_usado` at all (IMAP, Gmail, the plain
+    `_ProveedorFalso` test fake) never gets a guessed `top=` in the status
+    line."""
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1, reenviados=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    salida = capsys.readouterr()
+    assert "top=" not in salida.out
+
+
 def test_sincronizar_sin_enviar_origen_no_pasa_etiqueta_ni_imprime_nada(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
