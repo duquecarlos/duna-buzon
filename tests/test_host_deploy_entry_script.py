@@ -251,6 +251,13 @@ def test_status_y_deploy_nunca_usan_pty() -> None:
     assert "systemd-run --pipe --quiet --wait" in contenido
 
 
+# `-o cat` is journalctl's own output-format flag (BUZON-ENTRADA-UNIDADES-
+# REGISTROS-1's `registros`/`status` auto-print), not a shell `cat`
+# invocation -- excluded here so it does not trip these two guards, which
+# exist to catch an actual `cat` of the two secret env files.
+_CAT_REAL = re.compile(r"(?<!-o )\bcat\b")
+
+
 def test_ningun_valor_de_entorno_se_imprime() -> None:
     contenido = _contenido()
     lineas_con_salida = [
@@ -258,14 +265,13 @@ def test_ningun_valor_de_entorno_se_imprime() -> None:
     ]
     assert lineas_con_salida
     for linea in lineas_con_salida:
-        assert "cat " not in linea
+        assert not _CAT_REAL.search(linea)
         assert "$FINANZAS_BUZON_TOKEN" not in linea
         assert "$BUZON_CLAVE_CIFRADO" not in linea
 
 
 def test_los_archivos_de_entorno_nunca_se_leen_con_cat() -> None:
-    assert "cat " not in _contenido()
-    assert "cat\n" not in _contenido()
+    assert not _CAT_REAL.search(_contenido())
 
 
 def test_fragmento_sudoers_es_exactamente_una_linea() -> None:
@@ -632,3 +638,194 @@ def test_cmd_carpetas_rechaza_proveedor_google() -> None:
     assert "microsoft) subcomando_py=\"carpetas-graph\"" in bloque
     assert 'imap) subcomando_py="carpetas"' in bloque
     assert "has no carpetas listing" in bloque
+
+
+# ---------------------------------------------------------------------------
+# BUZON-ENTRADA-UNIDADES-REGISTROS-1 -- unit install diffing, status drift
+# report, and the read-only `registros <unidad> [n]` verb.
+# ---------------------------------------------------------------------------
+
+
+def _source_and_pipe(funcion: str, entrada: str, *args: str) -> subprocess.CompletedProcess[str]:
+    # Like `_source_and_echo`, but for a helper that reads STDIN (`_redactar`).
+    comando = "source {script}; {funcion} {args}".format(
+        script=shlex.quote(str(ENTRY_SCRIPT)),
+        funcion=funcion,
+        args=" ".join(shlex.quote(a) for a in args),
+    )
+    return subprocess.run(
+        [_BASH, "-c", comando], input=entrada, check=False, capture_output=True, text=True
+    )
+
+
+def test_estado_unidad_detecta_coincide_distinta_y_falta(tmp_path: Path) -> None:
+    instalado = tmp_path / "instalado.service"
+    candidato = tmp_path / "candidato.service"
+    instalado.write_text("uno\n", encoding="utf-8")
+    candidato.write_text("uno\n", encoding="utf-8")
+
+    resultado = _source_and_echo("_estado_unidad", str(instalado), str(candidato))
+    assert resultado.stdout.strip() == "coincide", resultado.stderr
+
+    candidato.write_text("dos\n", encoding="utf-8")
+    resultado = _source_and_echo("_estado_unidad", str(instalado), str(candidato))
+    assert resultado.stdout.strip() == "distinta", resultado.stderr
+
+    instalado.unlink()
+    resultado = _source_and_echo("_estado_unidad", str(instalado), str(candidato))
+    assert resultado.stdout.strip() == "falta", resultado.stderr
+
+
+def test_user_de_unidad_lee_la_linea_user(tmp_path: Path) -> None:
+    archivo = tmp_path / "duna-buzon.service"
+    archivo.write_text("[Service]\nType=oneshot\nUser=duna\n", encoding="utf-8")
+    resultado = _source_and_echo("_user_de_unidad", str(archivo))
+    assert resultado.stdout.strip() == "duna", resultado.stderr
+
+    sin_user = tmp_path / "duna-buzon.timer"
+    sin_user.write_text("[Timer]\nUnit=duna-buzon.service\n", encoding="utf-8")
+    resultado = _source_and_echo("_user_de_unidad", str(sin_user))
+    assert resultado.stdout.strip() == "", resultado.stderr
+
+    faltante = tmp_path / "no-existe.service"
+    resultado = _source_and_echo("_user_de_unidad", str(faltante))
+    assert resultado.stdout.strip() == "", resultado.stderr
+
+
+def test_unidad_permitida_acepta_solo_las_unidades_del_repo() -> None:
+    resultado = _source_and_call("_unidad_permitida", "duna-buzon.service")
+    assert "__TRUE__" in resultado.stdout, resultado.stderr
+
+    resultado = _source_and_call("_unidad_permitida", "duna-buzon.timer")
+    assert "__TRUE__" in resultado.stdout, resultado.stderr
+
+    for ajena in ("otraunidad.service", "duna-buzon.service.bak", "../etc/passwd"):
+        resultado = _source_and_call("_unidad_permitida", ajena)
+        assert "__FALSE__" in resultado.stdout, resultado.stderr
+
+
+@pytest.mark.parametrize(
+    "valor,esperado",
+    [("", "40"), ("1", "1"), ("40", "40"), ("200", "200"), ("201", "200"), ("500", "200")],
+)
+def test_normaliza_n_aplica_el_default_y_el_tope(valor: str, esperado: str) -> None:
+    resultado = _source_and_echo("_normaliza_n", valor)
+    assert resultado.returncode == 0, resultado.stderr
+    assert resultado.stdout.strip() == esperado
+
+
+@pytest.mark.parametrize("valor", ["0", "-1", "abc", "3.5", "1 2"])
+def test_normaliza_n_rechaza_lo_que_no_es_un_entero_positivo(valor: str) -> None:
+    resultado = _source_and_echo("_normaliza_n", valor)
+    assert resultado.returncode != 0, resultado.stdout
+
+
+def test_redactar_oculta_credenciales_postgres_y_variables_secretas() -> None:
+    entrada = (
+        "conectando a postgres://carlos:unaclave@db.internal:5432/duna\n"
+        "FINANZAS_BUZON_TOKEN=abc123xyz en el entorno\n"
+        "BUZON_API_SECRET=otrovalor\n"
+        "linea normal sin nada sensible\n"
+        "DB_PASSWORD=hunter2 y mas texto\n"
+    )
+    resultado = _source_and_pipe("_redactar", entrada)
+    assert resultado.returncode == 0, resultado.stderr
+    salida = resultado.stdout
+
+    assert "unaclave" not in salida
+    assert "postgres://***@db.internal:5432/duna" in salida
+    assert "abc123xyz" not in salida
+    assert "FINANZAS_BUZON_TOKEN=***" in salida
+    assert "otrovalor" not in salida
+    assert "BUZON_API_SECRET=***" in salida
+    assert "hunter2" not in salida
+    assert "DB_PASSWORD=***" in salida
+    assert "linea normal sin nada sensible" in salida
+
+
+def test_registros_es_subcomando_reconocido() -> None:
+    contenido = _contenido()
+    assert "registros)" in contenido
+    assert "cmd_registros" in contenido
+    assert "_unidad_permitida" in contenido
+    assert "_normaliza_n" in contenido
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("registros",),
+        ("registros", "duna-buzon.service", "40", "extra"),
+        ("registros", "unidad-que-no-existe"),
+        ("registros", "duna-buzon.service", "0"),
+        ("registros", "duna-buzon.service", "-5"),
+        ("registros", "duna-buzon.service", "abc"),
+        ("registros", "duna-buzon.service;rm -rf /"),
+    ],
+)
+def test_registros_formas_invalidas_se_rechazan_con_uso(argumentos: tuple[str, ...]) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 2
+    assert "usage" in resultado.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("registros", "duna-buzon.service"),
+        ("registros", "duna-buzon.timer"),
+        ("registros", "duna-buzon.service", "40"),
+        ("registros", "duna-buzon.service", "200"),
+        ("registros", "duna-buzon.service", "500"),
+    ],
+)
+def test_registros_forma_valida_pasa_el_chequeo_de_forma_y_solo_falla_por_euid(
+    argumentos: tuple[str, ...],
+) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 1
+    assert "root" in resultado.stderr.lower()
+    assert "usage" not in resultado.stderr.lower()
+
+
+def test_registros_nunca_interpola_la_unidad_en_una_cadena_de_shell() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("_mostrar_registros() {") : contenido.index("_forma_sudoers_es_estricta() {")]
+    assert 'journalctl -u "$unidad" -n "$n" --no-pager -o cat | _redactar' in bloque
+    assert "eval" not in bloque
+
+
+def test_cmd_deploy_instala_solo_las_unidades_que_difieren() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("cmd_deploy() {") : contenido.index("_proveedor_desde_archivo() {")]
+    bloque_real = bloque[bloque.index('owner="$(_owner_of "$REPO")"') :]
+
+    indice_for = bloque_real.index('for unidad in "${UNIDADES[@]}"')
+    indice_fin_for = bloque_real.index("done", indice_for)
+    bloque_for = bloque_real[indice_for : indice_fin_for + len("done")]
+
+    assert 'if _archivo_cambio "$instalada" "$pulled"; then' in bloque_for
+    indice_if = bloque_for.index('if _archivo_cambio')
+    indice_install = bloque_for.index("install -o root -g root -m 644")
+    indice_else = bloque_for.index("else", indice_install)
+    indice_sin_cambios = bloque_for.index("sin cambios")
+    assert indice_if < indice_install < indice_else < indice_sin_cambios
+
+    # Exactly one daemon-reload, after the per-unit loop, regardless of how
+    # many units changed.
+    assert bloque_real.count("systemctl daemon-reload") == 1
+    indice_daemon_reload = bloque_real.index("systemctl daemon-reload")
+    assert indice_fin_for < indice_daemon_reload
+
+
+def test_status_reporta_drift_user_y_datos_dir() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("cmd_status() {") : contenido.index("cmd_deploy() {")]
+    bloque_real = bloque[bloque.index('owner="$(_owner_of "$REPO")"') :]
+
+    assert '_estado_unidad "$UNIDADES_DIR/$unidad" "$REPO/deploy/systemd/$unidad"' in bloque_real
+    assert "User=:" in bloque_real
+    assert "_user_de_unidad" in bloque_real
+    assert "$DATOS_DIR: owner=" in bloque_real
+    assert '"$valor" == "failed"' in bloque_real
+    assert "_mostrar_registros" in bloque_real

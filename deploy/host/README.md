@@ -49,9 +49,11 @@ BUZON-1` version itself landing on a host that only has an older copy installed 
 exact three `sudo install`/`visudo -c` lines above, run by hand, once. From the SECOND `deploy` after
 that onward, autoactualizar keeps the installed copy current on its own.
 
-A change to `deploy/systemd/duna-buzon.service` or `.timer` takes effect the next time `deploy` runs
-(it re-installs both unconditionally) -- that was already true before this slice and is unrelated to
-autoactualizar, which only concerns this entry script and its sudoers fragment.
+A change to `deploy/systemd/duna-buzon.service` or `.timer` takes effect the next time `deploy` runs:
+as of `BUZON-ENTRADA-UNIDADES-REGISTROS-1`, each unit is diffed against what is installed and only
+copied if it differs, printed as `sin cambios` or `actualizada`, with exactly one `systemctl
+daemon-reload` after both -- this is unrelated to autoactualizar, which only concerns this entry script
+and its sudoers fragment.
 
 ## Remove
 
@@ -71,19 +73,28 @@ sudo -n /usr/local/sbin/duna-deploy-buzon rollback-script
 sudo -n /usr/local/sbin/duna-deploy-buzon carpetas <id>
 sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> <carpeta>...
 sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> --todas
+sudo -n /usr/local/sbin/duna-deploy-buzon registros <unidad> [n]
 ```
 
-`status` is read-only: the owner's own `git` HEAD, both units' `systemctl is-active`, and a health run
-of `python -m duna_buzon estado` under `systemd-run`. `deploy` autoactualizes itself (see "Update"
-above), pulls and `uv sync --frozen` as the repository's owner, creates `/srv/duna/data/buzon` (mode
-0700, owned by `duna`) if it does not already exist -- and never deletes it -- installs `duna-buzon.
-service`/`duna-buzon.timer`, enables the timer, and finishes with the same health check. `entrar` is
-the one subcommand for CARLOS HIMSELF, run directly in his own SSH terminal (never through an automated,
-no-tty session): it signs in interactively and prints Microsoft's own device-code URL to that terminal.
+`status` is read-only: the owner's own `git` HEAD, `duna-buzon.timer`'s `systemctl is-active`,
+`duna-buzon.service`'s `systemctl is-active` (automatically followed by its own last 30 redacted
+journal lines when it is `failed`), a drift line per unit (`coincide`/`distinta`/`falta`, comparing
+`/etc/systemd/system/<unit>` against this repository's own `deploy/systemd/<unit>`), the installed
+`User=` of `duna-buzon.service`, the owner and mode of `/srv/duna/data/buzon`, and a health run of
+`python -m duna_buzon estado` under `systemd-run`. `deploy` autoactualizes itself (see "Update" above),
+pulls and `uv sync --frozen` as the repository's owner, creates `/srv/duna/data/buzon` (mode 0700, owned
+by `duna`) if it does not already exist -- and never deletes it -- then, for each of
+`duna-buzon.service`/`duna-buzon.timer`, diffs the repository's own copy against what is installed
+under `/etc/systemd/system/`, installs only the ones that differ, and prints each as `sin cambios` or
+`actualizada` (`BUZON-ENTRADA-UNIDADES-REGISTROS-1`) -- then runs exactly one `systemctl daemon-reload`,
+`systemctl enable --now duna-buzon.timer`, and finishes with the same health check. `entrar` is the one
+subcommand for CARLOS HIMSELF, run directly in his own SSH terminal (never through an automated, no-tty
+session): it signs in interactively and prints Microsoft's own device-code URL to that terminal.
 `rollback-script` restores this entry script and its sudoers fragment from the `.prev` copies
 autoactualizar kept, undoing its most recent install. `carpetas <id>` and `fijar-carpetas <id> ...` are
 `BUZON-CARPETAS-MICROSOFT-CLI-1`'s operator tooling over an existing source's `carpetas` setting -- see
-"Choosing and setting `carpetas`" below.
+"Choosing and setting `carpetas`" below. `registros <unidad> [n]` is read-only: see "Reading a unit's
+own log (`registros`)" below.
 
 ## Operator steps (first deploy, by Carlos)
 
@@ -230,6 +241,25 @@ health check. A source id is `[a-z0-9-]+` and a folder name is `[A-Za-z0-9_ .-]+
 folder name outside that shape (for instance an IMAP folder path with a `/` in it) needs `python -m
 duna_buzon fijar-carpetas` run directly as `duna`, bypassing this root-owned wrapper's narrower
 allowlist.
+
+## Reading a unit's own log (`registros`)
+
+As of `BUZON-ENTRADA-UNIDADES-REGISTROS-1`, there is a read-only verb to read a unit's own journal
+without SSH'ing in to run `journalctl` by hand:
+
+```
+sudo -n /usr/local/sbin/duna-deploy-buzon registros <unidad> [n]
+```
+
+`<unidad>` is `duna-buzon.service` or `duna-buzon.timer` -- a fixed allowlist, never a pattern. `n` is a
+positive integer, capped at 200, defaulting to 40 when left out. This runs exactly `journalctl -u
+<unidad> -n <n> --no-pager -o cat` -- the unit name is passed as `journalctl`'s own `-u` argument, never
+built into a shell string -- and pipes the result through a redaction filter before printing it: the
+credentials half of any `postgres://`/`postgresql://` URL, and the value of any
+`...SECRET=`/`...TOKEN=`/`...PASSWORD=`/`...KEY=` assignment, each become `***`. `status` runs this same
+redacted `journalctl` call on its own, automatically, for the last 30 lines of `duna-buzon.service`
+whenever that unit's `systemctl is-active` reports `failed` -- so a failing pass is diagnosable from
+`status` alone, without a separate `registros` call.
 
 ## Trust boundary
 
