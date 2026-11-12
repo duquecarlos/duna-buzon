@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 
+import httpx
+
 from duna_buzon import auth, cli, credencial_imap, cripto
 from duna_buzon.config import Config
 from duna_buzon.cuenta import CuentaPullError, FuenteCuenta
-from duna_buzon.fuentes import FuenteConfig, guardar_fuente
+from duna_buzon.fuentes import FuenteConfig, cargar_fuente, guardar_fuente
 
 from .conftest import CLAVE_VALIDA_BASE64
 
@@ -880,6 +882,186 @@ def test_comando_carpetas_sin_credencial_es_error(
     _escribir_fuente(tmp_path, id="legal-duna", proveedor="imap", direccion="legal@duna.solutions")
     assert cli.comando_carpetas(config, "legal-duna") == 1
     assert "entrar" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# `carpetas-graph <id>` (BUZON-CARPETAS-MICROSOFT-CLI-1)
+# ---------------------------------------------------------------------------
+
+
+def test_comando_carpetas_graph_lista_nombre_id_y_bien_conocida(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.graph import GraphClient
+
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        segmentos = [s for s in request.url.path.split("/") if s]
+        assert request.method == "GET"
+        if segmentos[-1] == "mailFolders":
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {"displayName": "Bandeja de entrada", "id": "AAA"},
+                        {"displayName": "Archivo", "id": "BBB"},
+                    ]
+                },
+            )
+        # A well-known-name probe: only "inbox" exists in this fake mailbox.
+        if segmentos[-1] == "inbox":
+            return httpx.Response(200, json={"id": "AAA"})
+        return httpx.Response(404, json={"error": "not found"})
+
+    monkeypatch.setattr(
+        cli, "GraphClient", lambda token: GraphClient(token, transport=httpx.MockTransport(handler))
+    )
+    assert cli.comando_carpetas_graph(config, "hotmail-carlos") == 0
+
+    salida = capsys.readouterr().out
+    assert "carpeta='Archivo' bien_conocida=- id=BBB" in salida
+    assert "carpeta='Bandeja de entrada' bien_conocida=inbox id=AAA" in salida
+
+
+def test_comando_carpetas_graph_id_desconocido_es_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    assert cli.comando_carpetas_graph(config, "no-existe") == 1
+    assert "no-existe" in capsys.readouterr().err
+
+
+def test_comando_carpetas_graph_fuente_no_microsoft_es_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="legal-duna", proveedor="imap", direccion="legal@duna.solutions")
+    assert cli.comando_carpetas_graph(config, "legal-duna") == 1
+    assert "not a microsoft source" in capsys.readouterr().err
+
+
+def test_comando_carpetas_graph_sin_cuenta_es_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+
+    def falso_obtener_token(cfg: Config, directorio_fuente: str) -> str:
+        raise auth.SinCuentaError("no account is signed in: run entrar")
+
+    monkeypatch.setattr(auth, "obtener_token", falso_obtener_token)
+    assert cli.comando_carpetas_graph(config, "hotmail-carlos") == 1
+    assert "entrar" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# `fijar-carpetas <id> ...` (BUZON-CARPETAS-MICROSOFT-CLI-1)
+# ---------------------------------------------------------------------------
+
+
+def test_fijar_carpetas_fija_y_luego_quita_con_todas(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+
+    assert (
+        cli.comando_fijar_carpetas(
+            config, "hotmail-carlos", carpetas=["inbox", "archive"], todas=False
+        )
+        == 0
+    )
+    salida = capsys.readouterr().out
+    assert "antes=[]" in salida
+    assert "despues=['inbox', 'archive']" in salida
+    assert cargar_fuente(str(tmp_path), "hotmail-carlos").carpetas == ("inbox", "archive")
+
+    assert cli.comando_fijar_carpetas(config, "hotmail-carlos", carpetas=None, todas=True) == 0
+    salida = capsys.readouterr().out
+    assert "antes=['inbox', 'archive']" in salida
+    assert "despues=[]" in salida
+    assert cargar_fuente(str(tmp_path), "hotmail-carlos").carpetas is None
+
+
+def test_fijar_carpetas_funciona_para_imap(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="legal-duna", proveedor="imap", direccion="legal@duna.solutions")
+
+    assert (
+        cli.comando_fijar_carpetas(config, "legal-duna", carpetas=["Legal"], todas=False) == 0
+    )
+    assert cargar_fuente(str(tmp_path), "legal-duna").carpetas == ("Legal",)
+
+
+def test_fijar_carpetas_id_desconocido_es_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    assert cli.comando_fijar_carpetas(config, "no-existe", carpetas=["inbox"], todas=False) == 1
+    assert "no-existe" in capsys.readouterr().err
+
+
+def test_fijar_carpetas_proveedor_google_es_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    guardar_fuente(
+        str(tmp_path),
+        FuenteConfig(
+            id="cuenta-abc",
+            proveedor="google",
+            direccion="carlos@gmail.com",
+            etiqueta="carlos@gmail.com",
+            token_finanzas_ref="carlos",
+            activa=True,
+            origen="cuenta",
+        ),
+    )
+    assert cli.comando_fijar_carpetas(config, "cuenta-abc", carpetas=["inbox"], todas=False) == 1
+    assert "google" in capsys.readouterr().err
+
+
+def test_fijar_carpetas_preserva_las_otras_claves(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(
+        tmp_path,
+        id="legal-duna",
+        proveedor="imap",
+        direccion="legal@duna.solutions",
+        etiqueta="Legal Duna",
+        token_finanzas_ref="ref-legal",
+        activa=True,
+    )
+    cripto.escribir_archivo_sensible(directorio / "credencial.bin", b"no-tocar")
+
+    assert (
+        cli.comando_fijar_carpetas(config, "legal-duna", carpetas=["Legal"], todas=False) == 0
+    )
+
+    fuente = cargar_fuente(str(tmp_path), "legal-duna")
+    assert fuente.direccion == "legal@duna.solutions"
+    assert fuente.etiqueta == "Legal Duna"
+    assert fuente.token_finanzas_ref == "ref-legal"
+    assert fuente.activa is True
+    assert fuente.host == "imap.zoho.com"
+    assert fuente.port == 993
+    assert (directorio / "credencial.bin").read_bytes() == b"no-tocar"
+
+
+def test_fijar_carpetas_escritura_es_atomica_y_no_deja_tmp(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+
+    assert (
+        cli.comando_fijar_carpetas(config, "hotmail-carlos", carpetas=["inbox"], todas=False) == 0
+    )
+
+    nombres = [p.name for p in directorio.iterdir()]
+    assert "fuente.json" in nombres
+    assert not any(n.endswith(".tmp") for n in nombres)
 
 
 def test_migracion_automatica_desde_sincronizar(

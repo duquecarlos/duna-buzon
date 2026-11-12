@@ -28,7 +28,8 @@ from duna_buzon.cliente_imap import ClienteImap, ClienteImapError
 from duna_buzon.config import Config
 from duna_buzon.cuenta import CuentaClient, CuentaPullError
 from duna_buzon.finanzas import FinanzasClient
-from duna_buzon.fuentes import FuenteConfig
+from duna_buzon.fuentes import FuenteConfig, FuenteInvalidaError
+from duna_buzon.graph import GraphClient, GraphError
 from duna_buzon.limites import LIMITE_ORIGEN
 from duna_buzon.proveedor import construir_proveedor
 from duna_buzon.reglas import ReglasInvalidasError, cargar_reglas
@@ -447,4 +448,82 @@ def comando_carpetas(config: Config, id_fuente: str) -> int:
     for nombre, banderas, incluida in listado:
         banderas_txt = ",".join(banderas) if banderas else "-"
         print(f"carpeta={nombre!r} banderas={banderas_txt} leida={'si' if incluida else 'no'}")
+    return 0
+
+
+def comando_carpetas_graph(config: Config, id_fuente: str) -> int:
+    """Read-only: the microsoft-source twin of `comando_carpetas` above
+    (`BUZON-CARPETAS-MICROSOFT-CLI-1`) -- signs in with the already-stored
+    token and prints every top-level mail folder Graph's own
+    `/me/mailFolders` returns: display name, id, and well-known name
+    where one applies, so the operator can choose a `carpetas` entry for
+    `fijar-carpetas` without guessing. Never prints message content."""
+    _migrar_si_necesario(config)
+    todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
+    try:
+        fuente = next(f for f in todas if f.id == id_fuente)
+    except StopIteration:
+        print(f"error: no such source: {id_fuente}", file=sys.stderr)
+        return 1
+
+    if fuente.proveedor != "microsoft":
+        print(f"error: {id_fuente!r} is not a microsoft source", file=sys.stderr)
+        return 1
+
+    directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
+    try:
+        token = auth.obtener_token(config, directorio)
+    except auth.SinCuentaError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    cliente = GraphClient(token)
+    try:
+        listado = cliente.listar_carpetas()
+    except GraphError as exc:
+        print(f"error: {exc.motivo}", file=sys.stderr)
+        return 1
+    finally:
+        cliente.cerrar()
+
+    for carpeta in listado:
+        bien_conocida = carpeta.bien_conocida or "-"
+        print(f"carpeta={carpeta.nombre!r} bien_conocida={bien_conocida} id={carpeta.id}")
+    return 0
+
+
+def comando_fijar_carpetas(
+    config: Config, id_fuente: str, *, carpetas: list[str] | None, todas: bool
+) -> int:
+    """Sets (`carpetas` given) or, with `todas`, removes `carpetas` on an
+    existing imap or microsoft source's `fuente.json` -- the operator
+    tool `deploy/host/README.md` used to say did not exist for a
+    microsoft source (BUZON-CARPETAS-MICROSOFT-CLI-1; `agregar-fuente
+    imap`'s own `--carpeta` already covers it at CREATE time, but not for
+    an EXISTING source of either provider). Writes atomically
+    (`fuentes.guardar_fuente_atomico`), preserving every other field, and
+    never touches `credencial.bin` or the cursor."""
+    _migrar_si_necesario(config)
+    try:
+        fuente = modulo_fuentes.cargar_fuente(config.directorio_datos, id_fuente)
+    except FuenteInvalidaError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if fuente.proveedor not in ("imap", "microsoft"):
+        print(
+            f"error: {id_fuente!r} is a {fuente.proveedor!r} source; fijar-carpetas only "
+            "supports imap and microsoft sources",
+            file=sys.stderr,
+        )
+        return 1
+
+    antes = list(fuente.carpetas) if fuente.carpetas else []
+    nuevas: tuple[str, ...] | None = None if todas else tuple(carpetas or [])
+    modulo_fuentes.guardar_fuente_atomico(
+        config.directorio_datos, dataclasses.replace(fuente, carpetas=nuevas or None)
+    )
+    despues = list(nuevas) if nuevas else []
+    print(f"fuente={id_fuente} carpetas antes={antes}")
+    print(f"fuente={id_fuente} carpetas despues={despues}")
     return 0

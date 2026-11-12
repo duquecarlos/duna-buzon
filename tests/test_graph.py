@@ -703,3 +703,68 @@ def test_carpetas_no_configuradas_mantiene_la_peticion_de_hoy_byte_a_byte() -> N
         "$select": "id,internetMessageId,from,subject,receivedDateTime,hasAttachments",
         "$top": "50",
     }
+
+
+# ---------------------------------------------------------------------------
+# `listar_carpetas` (BUZON-CARPETAS-MICROSOFT-CLI-1) -- read-only operator
+# helper, never called from the sync path above.
+# ---------------------------------------------------------------------------
+
+
+def test_listar_carpetas_marca_la_bien_conocida_y_ordena_por_nombre() -> None:
+    llamadas: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        llamadas.append(request.method)
+        assert request.method == "GET"
+        segmentos = [s for s in request.url.path.split("/") if s]
+        if segmentos[-1] == "mailFolders":
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {"displayName": "Archivo", "id": "BBB"},
+                        {"displayName": "Bandeja de entrada", "id": "AAA"},
+                    ]
+                },
+            )
+        if segmentos[-1] == "inbox":
+            return httpx.Response(200, json={"id": "AAA"})
+        return httpx.Response(404, json={"error": {"message": "not found"}})
+
+    cliente = _cliente_con(handler)
+    carpetas = cliente.listar_carpetas()
+    cliente.cerrar()
+
+    assert all(metodo == "GET" for metodo in llamadas)
+    assert [c.nombre for c in carpetas] == ["Archivo", "Bandeja de entrada"]  # sorted by name
+    archivo, bandeja = carpetas
+    assert archivo.id == "BBB"
+    assert archivo.bien_conocida is None
+    assert bandeja.id == "AAA"
+    assert bandeja.bien_conocida == "inbox"
+
+
+def test_listar_carpetas_sin_ninguna_bien_conocida() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        segmentos = [s for s in request.url.path.split("/") if s]
+        if segmentos[-1] == "mailFolders":
+            return httpx.Response(200, json={"value": [{"displayName": "Clientes", "id": "X1"}]})
+        return httpx.Response(404, json={"error": {"message": "not found"}})
+
+    cliente = _cliente_con(handler)
+    carpetas = cliente.listar_carpetas()
+    cliente.cerrar()
+
+    assert len(carpetas) == 1
+    assert carpetas[0].bien_conocida is None
+
+
+def test_listar_carpetas_401_lanza_error_de_autenticacion() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "nope"})
+
+    cliente = _cliente_con(handler)
+    with pytest.raises(GraphAutenticacionError):
+        cliente.listar_carpetas()
+    cliente.cerrar()

@@ -501,3 +501,134 @@ def test_readme_documenta_autoactualizar_y_el_bootstrap_manual() -> None:
     assert "autoactualizar" in contenido.lower()
     assert "rollback-script" in contenido
     assert "bootstrap" in contenido.lower() or "manual" in contenido.lower()
+
+
+# ---------------------------------------------------------------------------
+# `carpetas <id>` / `fijar-carpetas <id> ...` (BUZON-CARPETAS-MICROSOFT-CLI-1)
+# ---------------------------------------------------------------------------
+
+
+def _source_and_echo(funcion: str, *args: str) -> subprocess.CompletedProcess[str]:
+    # Like `_source_and_call`, but for a helper that ECHOES a value on
+    # success instead of signalling true/false -- `_proveedor_desde_archivo`.
+    comando = "source {script}; {funcion} {args}".format(
+        script=shlex.quote(str(ENTRY_SCRIPT)),
+        funcion=funcion,
+        args=" ".join(shlex.quote(a) for a in args),
+    )
+    return subprocess.run([_BASH, "-c", comando], check=False, capture_output=True, text=True)
+
+
+def test_carpetas_y_fijar_carpetas_son_subcomandos_reconocidos() -> None:
+    contenido = _contenido()
+    assert "carpetas)" in contenido
+    assert "fijar-carpetas)" in contenido
+    assert "cmd_carpetas" in contenido
+    assert "cmd_fijar_carpetas" in contenido
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("carpetas",),
+        ("carpetas", "legal-duna", "algo-mas"),
+        ("carpetas", "Mayusculas-No-Validas"),
+        ("carpetas", "con espacio"),
+        ("carpetas", "con;punto-y-coma"),
+    ],
+)
+def test_carpetas_formas_invalidas_se_rechazan_con_uso(argumentos: tuple[str, ...]) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 2
+    assert "usage" in resultado.stderr.lower()
+
+
+def test_carpetas_forma_valida_pasa_el_chequeo_de_forma_y_solo_falla_por_euid() -> None:
+    # Not root: refused at require_root, which only runs AFTER parse_args
+    # accepted the shape -- proves the id regex itself did not reject it.
+    resultado = _run("carpetas", "legal-duna")
+    assert resultado.returncode == 1
+    assert "root" in resultado.stderr.lower()
+    assert "usage" not in resultado.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("fijar-carpetas",),
+        ("fijar-carpetas", "legal-duna"),
+        ("fijar-carpetas", "Mayusculas-No-Validas", "--todas"),
+        ("fijar-carpetas", "legal-duna", "--todas", "Inbox"),
+        ("fijar-carpetas", "legal-duna", "Inbox", "--todas"),
+        ("fijar-carpetas", "legal-duna", "carpeta;rm -rf /"),
+        ("fijar-carpetas", "legal-duna", "carpeta$(whoami)"),
+    ],
+)
+def test_fijar_carpetas_formas_invalidas_se_rechazan_con_uso(argumentos: tuple[str, ...]) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 2
+    assert "usage" in resultado.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("fijar-carpetas", "legal-duna", "--todas"),
+        ("fijar-carpetas", "legal-duna", "Inbox"),
+        ("fijar-carpetas", "legal-duna", "Inbox", "Archive Folder"),
+    ],
+)
+def test_fijar_carpetas_formas_validas_pasan_el_chequeo_de_forma_y_solo_fallan_por_euid(
+    argumentos: tuple[str, ...],
+) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 1
+    assert "root" in resultado.stderr.lower()
+    assert "usage" not in resultado.stderr.lower()
+
+
+def test_fijar_carpetas_nunca_interpola_las_carpetas_en_una_cadena_de_shell() -> None:
+    # Every folder name is pushed onto the array and handed to systemd-run
+    # as its own argv element (`"${comando[@]}"`), never built into a
+    # single quoted/unquoted shell string the way a naive `eval` would.
+    contenido = _contenido()
+    bloque = contenido[contenido.index("cmd_fijar_carpetas() {") : contenido.index("dispatch() {")]
+    assert 'comando+=("--carpeta" "$carpeta")' in bloque
+    assert "-- \"${comando[@]}\"" in bloque
+    assert "eval" not in bloque
+
+
+def test_proveedor_desde_archivo_lee_el_campo_proveedor(tmp_path: Path) -> None:
+    archivo = tmp_path / "fuente.json"
+    archivo.write_text(
+        '{"id": "legal-duna", "proveedor": "imap", "direccion": "legal@duna.solutions"}',
+        encoding="utf-8",
+    )
+    resultado = _source_and_echo("_proveedor_desde_archivo", str(archivo))
+    assert resultado.returncode == 0, resultado.stderr
+    assert resultado.stdout.strip() == "imap"
+
+    archivo.write_text('{"id": "hotmail-carlos", "proveedor": "microsoft"}', encoding="utf-8")
+    resultado = _source_and_echo("_proveedor_desde_archivo", str(archivo))
+    assert resultado.returncode == 0, resultado.stderr
+    assert resultado.stdout.strip() == "microsoft"
+
+
+def test_proveedor_desde_archivo_falla_si_falta_el_archivo_o_el_campo(tmp_path: Path) -> None:
+    archivo = tmp_path / "no-existe.json"
+    resultado = _source_and_echo("_proveedor_desde_archivo", str(archivo))
+    assert resultado.returncode != 0
+    assert "no such source file" in resultado.stderr.lower()
+
+    archivo.write_text('{"id": "x"}', encoding="utf-8")
+    resultado = _source_and_echo("_proveedor_desde_archivo", str(archivo))
+    assert resultado.returncode != 0
+    assert "could not read the provider" in resultado.stderr.lower()
+
+
+def test_cmd_carpetas_rechaza_proveedor_google() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("cmd_carpetas() {") : contenido.index("cmd_fijar_carpetas() {")]
+    assert "microsoft) subcomando_py=\"carpetas-graph\"" in bloque
+    assert 'imap) subcomando_py="carpetas"' in bloque
+    assert "has no carpetas listing" in bloque

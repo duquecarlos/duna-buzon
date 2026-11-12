@@ -12,7 +12,9 @@ to a named allow-list for the shared-mailbox case by BUZON-IMAP-CARPETAS-INCLUID
 fresh token pulled every pass, never stored here -- by BUZON-FUENTES-PULL-1; the Graph LIST call gained
 explicit outbound timeouts and in-pass retries for a transport failure or 429/503 by BUZON-GRAPH-TIMEOUT-1,
 then 500/502/504 joined that retried class and a persistently failing page degrades its own `$top` (and the
-same `carpetas` narrowing IMAP already had, extended to this provider) by BUZON-GRAPH-502-1. See `CLAUDE.md` for the gate and
+same `carpetas` narrowing IMAP already had, extended to this provider) by BUZON-GRAPH-502-1; gained a CLI for
+reading and setting that field on a microsoft source (`carpetas-graph`, `fijar-carpetas`) by
+BUZON-CARPETAS-MICROSOFT-CLI-1. See `CLAUDE.md` for the gate and
 the invariants, `DECISIONS.md` for the ledger, and `deploy/host/README.md` for the operator steps.
 
 ## Shape
@@ -110,6 +112,13 @@ The commands:
 - `carpetas <id>` -- read-only, for ONE imap source: signs in with its already-stored app password and prints
   every folder the server's `LIST` returns, with its flags and whether this source would read it today. Never
   prints message content or the credential itself -- see "Narrowing an IMAP source to specific folders" below.
+- `carpetas-graph <id>` -- read-only, for ONE microsoft source (`BUZON-CARPETAS-MICROSOFT-CLI-1`): the
+  imap `carpetas <id>`'s own twin, listing every top-level Graph mail folder's display name, id, and
+  well-known name (`inbox`, `archive`, ...) where one applies. Never prints message content.
+- `fijar-carpetas <id> [--carpeta <nombre> ...] [--todas]` -- sets (or, with `--todas`, removes) an
+  EXISTING imap or microsoft source's `carpetas` setting (same slice), for when a source was created
+  without `--carpeta` or needs it changed later. Validates the id exists, writes `fuente.json`
+  atomically, prints the before and after lists, and never touches `credencial.bin` or the cursor.
 
 ### Narrowing an IMAP source to specific folders (BUZON-IMAP-CARPETAS-INCLUIDAS-1)
 
@@ -157,8 +166,10 @@ ids). Set, this source reads each named folder on its own, in the order given, v
 {carpeta}/messages` instead of one `/me/messages` call across the whole mailbox -- a much cheaper query
 for Graph to answer, at the cost of never seeing mail outside those folders. Absent (the default, and
 every Microsoft `fuente.json` before this slice) means today's behaviour exactly: `/me/messages`, every
-folder in one call. There is no CLI for this on a Microsoft source today (unlike `agregar-fuente imap`'s
-own `--carpeta`) -- see `deploy/host/README.md` for editing `fuente.json` by hand.
+folder in one call. `carpetas-graph <id>` lists the mailbox's own folders to choose from, and
+`fijar-carpetas <id> <nombre>...` sets this field on an existing source without hand-editing
+`fuente.json` (`BUZON-CARPETAS-MICROSOFT-CLI-1`) -- see `deploy/host/README.md` for the operator steps,
+including the root-owned wrapper's own two verbs.
 
 The FIRST time any command runs against a data directory still in the single-mailbox layout
 (`cache.bin`/`cursor.json`/`reglas.json`/`estado.json` directly under `$BUZON_DATOS`), it migrates itself
