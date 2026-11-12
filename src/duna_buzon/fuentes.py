@@ -97,12 +97,14 @@ class FuenteConfig:
 
     @property
     def etiqueta_registro(self) -> str:
-        """`"<proveedor>:<id>"` -- this source's own identity for LOGS and
-        status output only (`fuentes`, `estado`, a future per-source log
-        line). Never sent to Finanzas: buzon-v1's wire `fuente` field is the
-        CHANNEL, always `"correo"` for every mail source, never this value
-        (`BUZON-FUENTE-WIRE-CORREO-1`, correcting `BUZON-FUENTES-ESQUEMA-1`,
-        which sent this as the wire `fuente` and got it wrong)."""
+        """`"<proveedor>:<id>"` -- this source's own identity, for LOGS and
+        status output (`fuentes`, `estado`, a future per-source log line)
+        and, behind `Config.enviar_origen`, as the wire's own `origen`
+        field (`BUZON-ORIGEN-WIRE-1`). Never sent as the wire `fuente`
+        field: that field is the CHANNEL, always `"correo"` for every mail
+        source, never this value (`BUZON-FUENTE-WIRE-CORREO-1`, correcting
+        `BUZON-FUENTES-ESQUEMA-1`, which sent this as the wire `fuente` and
+        got it wrong)."""
         return f"{self.proveedor}:{self.id}"
 
 

@@ -154,6 +154,17 @@ product `buzon`), `BUZON_CUENTA_SUB` (the person's own Cuenta Duna `sub`). The m
 all four are required -- a half-configured group is refused by name at startup, never silently treated as "not
 configured".
 
+One more, `BUZON_ENVIAR_ORIGEN` (`BUZON-ORIGEN-WIRE-1`) -- **turn on only after Finanzas Release 37 is live.** Off
+unless set to exactly `1` or `true`. On, every entry's `meta` carries an `origen` field: the source's own identity
+(`fuentes.FuenteConfig.etiqueta_registro`, `"<proveedor>:<id>"`, e.g. `imap:legal-duna` or
+`google:cuenta-<uuid>`) -- never a credential, and distinct from the wire's `fuente` field, which stays `"correo"`
+regardless. Off (the default), the request is byte-identical to today's. Finanzas merged the `origen` field
+(`FIN-API-BUZON-ORIGEN-1`) but its `EntradaBuzonMeta` schema is `extra="forbid"`, so sending it before Release 37
+deploys gets every entry refused with a `422` -- hence off by default. A manual (`agregar-fuente`) source id over
+48 characters is refused at add time; any label that still exceeds the wire's own 64-character cap at send time
+(only possible for a Cuenta-pulled source, never one this connector adds itself) is logged and sent without
+`origen`, rather than losing the entry.
+
 ## Gate
 
 ```

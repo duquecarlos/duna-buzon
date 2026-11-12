@@ -153,3 +153,32 @@ def test_cuenta_url_https_es_aceptada(entorno_valido: dict[str, str]) -> None:
     entorno_valido["BUZON_CUENTA_SUB"] = "sub-carlos"
     config = Config.desde_entorno(entorno_valido)
     assert config.cuenta_url == "https://cuenta.duna.internal"
+
+
+# ---------------------------------------------------------------------------
+# BUZON_ENVIAR_ORIGEN (BUZON-ORIGEN-WIRE-1) -- off unless set to EXACTLY "1"
+# or "true"; everything else, including an unset variable, stays off.
+# ---------------------------------------------------------------------------
+
+
+def test_enviar_origen_ausente_queda_apagado(entorno_valido: dict[str, str]) -> None:
+    config = Config.desde_entorno(entorno_valido)
+    assert config.enviar_origen is False
+
+
+@pytest.mark.parametrize("valor", ["1", "true"])
+def test_enviar_origen_se_enciende_con_los_valores_exactos(
+    entorno_valido: dict[str, str], valor: str
+) -> None:
+    entorno_valido["BUZON_ENVIAR_ORIGEN"] = valor
+    config = Config.desde_entorno(entorno_valido)
+    assert config.enviar_origen is True
+
+
+@pytest.mark.parametrize("valor", ["0", "false", "True", "TRUE", "yes", "on", ""])
+def test_enviar_origen_con_cualquier_otro_valor_queda_apagado(
+    entorno_valido: dict[str, str], valor: str
+) -> None:
+    entorno_valido["BUZON_ENVIAR_ORIGEN"] = valor
+    config = Config.desde_entorno(entorno_valido)
+    assert config.enviar_origen is False

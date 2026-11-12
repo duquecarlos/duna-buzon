@@ -25,6 +25,19 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
+def _config_con_origen(tmp_path: Path) -> Config:
+    return Config.desde_entorno(
+        {
+            "BUZON_GRAPH_CLIENT_ID": "cliente",
+            "BUZON_CLAVE_CIFRADO": CLAVE_VALIDA_BASE64,
+            "FINANZAS_BUZON_TOKEN": "token",
+            "BUZON_DATOS": str(tmp_path),
+            "BUZON_FINANZAS_URL": "http://127.0.0.1:8010",
+            "BUZON_ENVIAR_ORIGEN": "1",
+        }
+    )
+
+
 def _escribir_fuente(
     tmp_path: Path,
     *,
@@ -291,6 +304,121 @@ def test_sincronizar_sin_detenerse_no_imprime_nada_en_stderr(
     assert "parada=" not in salida.out
 
 
+def test_sincronizar_sin_enviar_origen_no_pasa_etiqueta_ni_imprime_nada(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """BUZON-ORIGEN-WIRE-1, off by default: no label is computed and
+    nothing is printed about it."""
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    capturado: dict[str, object] = {}
+
+    def falso_ejecutar_pasada(**kwargs):  # type: ignore[no-untyped-def]
+        capturado.update(kwargs)
+        return ResultadoPasada(contadores=Contadores(vistos=1))
+
+    monkeypatch.setattr(cli, "ejecutar_pasada", falso_ejecutar_pasada)
+
+    assert cli.comando_sincronizar(config) == 0
+    assert capturado["etiqueta_origen"] is None
+    assert capsys.readouterr().err == ""
+
+
+def test_sincronizar_con_enviar_origen_pasa_la_etiqueta_de_la_fuente(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """BUZON-ORIGEN-WIRE-1: the label is this source's own
+    `"<proveedor>:<id>"` -- here a Microsoft source, `microsoft:hotmail-
+    carlos`."""
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_origen(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    capturado: dict[str, object] = {}
+
+    def falso_ejecutar_pasada(**kwargs):  # type: ignore[no-untyped-def]
+        capturado.update(kwargs)
+        return ResultadoPasada(contadores=Contadores(vistos=1))
+
+    monkeypatch.setattr(cli, "ejecutar_pasada", falso_ejecutar_pasada)
+
+    assert cli.comando_sincronizar(config) == 0
+    assert capturado["etiqueta_origen"] == "microsoft:hotmail-carlos"
+    assert capsys.readouterr().err == ""
+
+
+def test_sincronizar_con_enviar_origen_etiqueta_imap_tiene_forma_proveedor_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_origen(tmp_path)
+    _escribir_fuente(tmp_path, id="legal-duna", proveedor="imap", direccion="legal@duna.solutions")
+    _escribir_reglas_vacias(tmp_path / "fuentes" / "legal-duna")
+    monkeypatch.setattr(credencial_imap, "obtener_credencial", lambda cfg, directorio: "credencial-falsa")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    capturado: dict[str, object] = {}
+
+    def falso_ejecutar_pasada(**kwargs):  # type: ignore[no-untyped-def]
+        capturado.update(kwargs)
+        return ResultadoPasada(contadores=Contadores(vistos=0))
+
+    monkeypatch.setattr(cli, "ejecutar_pasada", falso_ejecutar_pasada)
+
+    assert cli.comando_sincronizar(config) == 0
+    assert capturado["etiqueta_origen"] == "imap:legal-duna"
+    # Never a password, token or address in the label -- only the
+    # provider and this connector's own source id.
+    assert "legal@duna.solutions" not in capturado["etiqueta_origen"]
+    assert "credencial-falsa" not in capturado["etiqueta_origen"]
+
+
+def test_sincronizar_con_etiqueta_sobre_el_tope_la_omite_y_avisa(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """BUZON-ORIGEN-WIRE-1's >64 fallback: only reachable here because this
+    source was written directly (bypassing `agregar-fuente`'s own
+    48-character guard), exactly like a Cuenta-pulled source would be."""
+    from duna_buzon.limites import LIMITE_ORIGEN
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    id_fuente = "a" * (LIMITE_ORIGEN - len("imap:") + 1)
+    assert len(f"imap:{id_fuente}") == LIMITE_ORIGEN + 1
+
+    config = _config_con_origen(tmp_path)
+    _escribir_fuente(tmp_path, id=id_fuente, proveedor="imap", direccion="legal@duna.solutions")
+    _escribir_reglas_vacias(tmp_path / "fuentes" / id_fuente)
+    monkeypatch.setattr(credencial_imap, "obtener_credencial", lambda cfg, directorio: "credencial-falsa")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    capturado: dict[str, object] = {}
+
+    def falso_ejecutar_pasada(**kwargs):  # type: ignore[no-untyped-def]
+        capturado.update(kwargs)
+        return ResultadoPasada(contadores=Contadores(vistos=0))
+
+    monkeypatch.setattr(cli, "ejecutar_pasada", falso_ejecutar_pasada)
+
+    assert cli.comando_sincronizar(config) == 0
+    assert capturado["etiqueta_origen"] is None
+    error = capsys.readouterr().err
+    assert f"fuente={id_fuente}" in error
+    assert str(LIMITE_ORIGEN) in error
+
+
 def test_una_fuente_fallando_no_detiene_a_las_demas(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -487,6 +615,50 @@ def test_agregar_fuente_con_id_repetido_es_error(
         == 1
     )
     assert "legal-duna" in capsys.readouterr().err
+
+
+def test_agregar_fuente_id_en_el_tope_se_acepta(tmp_path: Path) -> None:
+    from duna_buzon.fuentes import cargar_fuente
+
+    config = _config(tmp_path)
+    id_fuente = "a" * cli.LIMITE_ID_FUENTE_AGREGAR
+    assert (
+        cli.comando_agregar_fuente(
+            config,
+            proveedor="imap",
+            id_fuente=id_fuente,
+            direccion="legal@duna.solutions",
+            host="imap.zoho.com",
+            puerto=993,
+            token_finanzas="carlos",
+            etiqueta=None,
+        )
+        == 0
+    )
+    assert cargar_fuente(str(tmp_path), id_fuente).id == id_fuente
+
+
+def test_agregar_fuente_id_sobre_el_tope_se_rechaza(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    id_fuente = "a" * (cli.LIMITE_ID_FUENTE_AGREGAR + 1)
+    assert (
+        cli.comando_agregar_fuente(
+            config,
+            proveedor="imap",
+            id_fuente=id_fuente,
+            direccion="legal@duna.solutions",
+            host="imap.zoho.com",
+            puerto=993,
+            token_finanzas="carlos",
+            etiqueta=None,
+        )
+        == 1
+    )
+    error = capsys.readouterr().err
+    assert str(cli.LIMITE_ID_FUENTE_AGREGAR) in error
+    assert not (tmp_path / "fuentes" / id_fuente).exists()
 
 
 def test_agregar_fuente_proveedor_no_imap_es_error(

@@ -566,6 +566,69 @@ def test_asunto_sobre_el_tope_se_trunca_y_se_reenvia(tmp_path) -> None:
     assert meta_enviada["asunto"] == "a" * LIMITE_ASUNTO
 
 
+def test_sin_etiqueta_origen_la_peticion_es_igual_a_la_de_hoy(tmp_path) -> None:
+    """BUZON-ORIGEN-WIRE-1: with `etiqueta_origen` unset (the default --
+    `BUZON_ENVIAR_ORIGEN` off), the request body is byte-identical to the
+    one built before this slice."""
+    mensajes = [MensajeFalso(id="m1", remitente="notificaciones@banco-ejemplo.com")]
+    cliente_graph = GraphClient("token", transport=_transporte_graph(mensajes))
+
+    capturado: dict[str, bytes] = {}
+
+    def finanzas_capturar(request: httpx.Request) -> httpx.Response:
+        capturado["cuerpo"] = request.read()
+        return httpx.Response(201, json={"id": "e1", "duplicada": False, "adjuntos_omitidos": 0})
+
+    cliente_finanzas = _cliente_finanzas(tmp_path, finanzas_capturar)
+
+    resultado = ejecutar_pasada(
+        proveedor=cliente_graph,
+        cliente_finanzas=cliente_finanzas,
+        reglas=_reglas(),
+        cursor_inicial=_CURSOR_INICIAL,
+    )
+
+    assert resultado.contadores.reenviados == 1
+    meta_enviada = _meta_json_desde_multipart(capturado["cuerpo"])
+    assert "origen" not in meta_enviada
+    assert set(meta_enviada) == {
+        "fuente",
+        "id_externo",
+        "remitente",
+        "asunto",
+        "recibido_en",
+        "cuerpo_texto",
+    }
+
+
+def test_con_etiqueta_origen_se_envia_como_septimo_campo(tmp_path) -> None:
+    mensajes = [MensajeFalso(id="m1", remitente="notificaciones@banco-ejemplo.com")]
+    cliente_graph = GraphClient("token", transport=_transporte_graph(mensajes))
+
+    capturado: dict[str, bytes] = {}
+
+    def finanzas_capturar(request: httpx.Request) -> httpx.Response:
+        capturado["cuerpo"] = request.read()
+        return httpx.Response(201, json={"id": "e1", "duplicada": False, "adjuntos_omitidos": 0})
+
+    cliente_finanzas = _cliente_finanzas(tmp_path, finanzas_capturar)
+
+    resultado = ejecutar_pasada(
+        proveedor=cliente_graph,
+        cliente_finanzas=cliente_finanzas,
+        reglas=_reglas(),
+        cursor_inicial=_CURSOR_INICIAL,
+        etiqueta_origen="imap:legal-duna",
+    )
+
+    assert resultado.contadores.reenviados == 1
+    meta_enviada = _meta_json_desde_multipart(capturado["cuerpo"])
+    assert meta_enviada["origen"] == "imap:legal-duna"
+    # The wire `fuente` stays the channel, "correo" -- `origen` is the only
+    # field carrying the source's own identity.
+    assert meta_enviada["fuente"] == "correo"
+
+
 def test_asunto_multibyte_sobre_el_tope_se_trunca_sin_romper_caracteres(tmp_path) -> None:
     # "🙂" is one Python character but four UTF-8 bytes -- a byte-based
     # truncation at the cap would split it. Python string slicing never

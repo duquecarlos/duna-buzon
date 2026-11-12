@@ -44,6 +44,40 @@ def test_meta_json_solo_lleva_las_seis_claves_del_contrato() -> None:
     assert set(datos) == {"fuente", "id_externo", "remitente", "asunto", "recibido_en", "cuerpo_texto"}
 
 
+# ---------------------------------------------------------------------------
+# `origen` (BUZON-ORIGEN-WIRE-1) -- optional seventh key, omitted entirely
+# (never sent as JSON `null`) unless a caller passes a value.
+# ---------------------------------------------------------------------------
+
+
+def test_meta_sin_origen_omite_la_clave_por_completo() -> None:
+    datos = json.loads(_meta().como_json())
+    assert "origen" not in datos
+
+
+def test_meta_con_origen_agrega_la_septima_clave() -> None:
+    meta = MetaEntrada(
+        fuente="correo",
+        id_externo="ext-1",
+        remitente="banco@ejemplo.com",
+        asunto="Alerta",
+        recibido_en=datetime.datetime(2026, 3, 1, 10, 0, tzinfo=datetime.UTC),
+        cuerpo_texto="cuerpo",
+        origen="imap:legal-duna",
+    )
+    datos = json.loads(meta.como_json())
+    assert set(datos) == {
+        "fuente",
+        "id_externo",
+        "remitente",
+        "asunto",
+        "recibido_en",
+        "cuerpo_texto",
+        "origen",
+    }
+    assert datos["origen"] == "imap:legal-duna"
+
+
 def test_autorizacion_bearer_y_meta_se_envian(tmp_path) -> None:
     capturada: dict[str, object] = {}
 

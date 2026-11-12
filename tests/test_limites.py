@@ -8,6 +8,7 @@ from duna_buzon.limites import (
     LIMITE_ASUNTO,
     LIMITE_FUENTE,
     LIMITE_ID_EXTERNO,
+    LIMITE_ORIGEN,
     LIMITE_REMITENTE,
     FuenteWire,
     excede_limites_no_truncables,
@@ -101,3 +102,19 @@ def test_fuente_correo_es_la_unica_que_el_codigo_construye_y_pasa_el_contrato() 
     # halves of Finanzas' own contract.
     assert FUENTE_CORREO in typing.get_args(FuenteWire)
     assert len(FUENTE_CORREO) <= LIMITE_FUENTE
+
+
+# ---------------------------------------------------------------------------
+# Contract test (BUZON-ORIGEN-WIRE-1): `origen`'s own wire cap, restated
+# verbatim from Finanzas and never guessed.
+#
+#   duna-finanzas-api main 38a9e6d1, migration 530cb968d327
+#       EntradaBuzonMeta.origen (web/buzon/schemas.py:66): optional string,
+#       max 64 characters -- DB CHECK `origen_acotado`; 65+ is a 422.
+# ---------------------------------------------------------------------------
+
+_LIMITE_ORIGEN_SEGUN_FINANZAS = 64
+
+
+def test_limite_origen_restablece_el_tope_de_finanzas() -> None:
+    assert LIMITE_ORIGEN == _LIMITE_ORIGEN_SEGUN_FINANZAS
