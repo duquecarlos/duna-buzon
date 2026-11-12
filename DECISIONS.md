@@ -1414,3 +1414,143 @@ offered by the Personal desk; Main specified the guards (strict one-rule sudoers
 -cf`, keep-and-restore `.prev` copies, a single non-looping re-exec). This slice (`HOST-AUTOACTUALIZAR-
 BUZON-1`) built `autoactualizar` and `rollback-script` end to end in `duna-deploy-buzon`, and documented
 the still-manual first-install bootstrap in `deploy/host/README.md`.
+
+---
+
+## BUZON-ORIGEN-WIRE-1 -- the wire `origen` field, restated verbatim from Finanzas and OFF by default (2026-11-12)
+
+### Why
+
+`BUZON-FUENTE-WIRE-CORREO-1` (above) flagged `FIN-API-BUZON-ORIGEN-OBS-1` as "not built anywhere yet" --
+the place a source's own identity would eventually travel on the wire, once Finanzas needed it for
+routing. Finanzas built it: `FIN-API-BUZON-ORIGEN-1` merged `EntradaBuzonMeta.origen`
+(`duna-finanzas-api` `main` `38a9e6d1`, migration `530cb968d327`) -- an optional string, max 64
+characters, DB CHECK `origen_acotado`, NOT live until Finanzas Release 37 deploys. Carlos delegated this
+build (`ORCH-CARLOS-DELEGATES-TIER-1-1`); the wire shape itself is restated verbatim from Finanzas, never
+guessed, with the exact refs above quoted in the build instructions themselves.
+
+### The wire
+
+Beside the existing six `meta` keys, an optional seventh: `origen`, a plain string, max 64 characters,
+used by Finanzas for exact-label routing (same label every time for a given mailbox). Omitted or JSON
+`null` means `NULL`, today's behaviour. `EntradaBuzonMeta.model_config = {"extra": "forbid"}` answers
+`422` to ANY unknown key regardless of its value -- so until Release 37 deploys, sending the key AT ALL,
+even as `null`, gets every entry refused. That is why this is a flag, not a default-on field: `MetaEntrada.
+como_json()` OMITS the key entirely when `origen is None`, never sends it as JSON `null`.
+
+### The flag and the value
+
+`Config.enviar_origen` (`BUZON_ENVIAR_ORIGEN`, `config.py`) -- OFF unless the variable is set to EXACTLY
+`"1"` or `"true"`; unset, empty, or any other spelling (`"0"`, `"false"`, `"True"`, `"yes"`, `"on"`) stays
+off. With it off, `test_sin_etiqueta_origen_la_peticion_es_igual_a_la_de_hoy` (`test_sincronizar.py`) proves
+the posted request is byte-identical to the one built before this slice -- the same six keys, nothing
+added.
+
+The value, when the flag is on, is this source's own existing identity --
+`fuentes.FuenteConfig.etiqueta_registro` (`"<proveedor>:<id>"`, e.g. `imap:legal-duna` or
+`google:cuenta-<uuid>`) -- never a credential, never the mailbox address, and distinct from the wire's
+`fuente` field, which stays the constant `"correo"` channel regardless (`BUZON-FUENTE-WIRE-CORREO-1`
+still holds). Resolved ONCE per source per pass, in `cli.py`'s `_ejecutar_una_fuente` (not per message,
+and not inside `sincronizar.py`, which stays free of any config/logging concern and keeps its own
+"never logs" discipline) and threaded through `sincronizar.ejecutar_pasada`'s new `etiqueta_origen`
+parameter straight into `MetaEntrada.origen`.
+
+### Two length guards, at two different points, for two different reasons
+
+1. **At add time** (`cli.comando_agregar_fuente`, new `LIMITE_ID_FUENTE_AGREGAR = 48`): a manual source id
+   longer than 48 characters is refused outright, with a clear error naming the limit, before anything is
+   written. 48 plus the longest local provider prefix (`"imap:"`, 5 characters) stays comfortably under
+   the wire's own 64-character cap, with margin for a longer provider name later.
+2. **Before sending** (`cli.py`, right where the label is resolved, once per source per pass): if
+   `etiqueta_registro` still exceeds `limites.LIMITE_ORIGEN` (64, mirrored from Finanzas' own cap -- new
+   contract test `test_limite_origen_restablece_el_tope_de_finanzas`), that pass's entries are sent
+   WITHOUT `origen` rather than losing them, and `fuente=<id> warning: origen label exceeds 64
+   characters, sending without origen` is printed to stderr once. This is the only path that can trip it
+   today: a Cuenta-pulled source's id (`cuenta-<uuid>`, Cuenta Duna's own id, never chosen by this
+   connector) is never checked against guard 1, since `agregar-fuente` never creates it -- though at
+   `google:cuenta-<uuid>` (50 characters) it is nowhere close in practice.
+   `test_sincronizar_con_etiqueta_sobre_el_tope_la_omite_y_avisa` proves both halves (the entry still
+   sends, `origen` is absent, the warning names the source and the limit) by writing a `fuente.json`
+   directly, bypassing guard 1 the same way a Cuenta pull would.
+
+`asunto` is still truncated, never skipped, for the reason `BUZON-TOPES-META-1` already recorded (a
+receipt with a long subject is still a receipt); `origen` is skipped, never truncated, for a NEW reason
+specific to it -- truncating would change the label, breaking the exact-label match the whole field exists
+for. `id_externo`/`remitente` are skipped for the reasons `BUZON-TOPES-META-1` already gives.
+
+### Existing sources over 48 characters
+
+None found: this repository carries no real source data by design (invariant 4, "template, not tenant"),
+and this slice's sandbox has no access to the real `$BUZON_DATOS/fuentes/` on `duna-prod-1`. Every source
+id this repository's own history names (`hotmail-carlos`, `legal-duna`) is far under 48. **Before setting
+`BUZON_ENVIAR_ORIGEN=1` on the host, the operator should run `fuentes` and confirm no live source id is
+over 48 characters** -- `deploy/host/README.md`'s new "Turning on `origen`" section says so, but cannot
+itself check a host this slice never touched.
+
+### A spec/code naming mismatch, found and resolved in favor of the measurement
+
+The build instructions' own prose names a Cuenta-pulled Gmail source's label `gmail:cuenta-<uuid>` (49-51
+characters). `fuentes.FuenteConfig.proveedor`'s actual `Literal` is `"google"`, not `"gmail"`
+(`cuenta.py`'s `ProveedorCuenta = Literal["google", "microsoft"]`, and `cli.py`'s `_pull_fuentes_cuenta`
+writes `pullada.proveedor` straight through) -- `etiqueta_registro` for such a source is `google:cuenta-
+<uuid>` (50 characters), not `gmail:cuenta-<uuid>` (49). Both sit inside the instructions' own stated
+49-51-character range, so this is a wording slip in the spec's prose, not a shape disagreement; this
+entry, the README, and `deploy/host/README.md` all say `google:cuenta-<uuid>`, matching the code that
+actually runs.
+
+### Tests, measured
+
+21 new tests: `test_config.py` (`BUZON_ENVIAR_ORIGEN` on/off, 10 tests covering the two true spellings and
+seven other values that must all stay off); `test_limites.py` (the `LIMITE_ORIGEN` contract test, 1);
+`test_finanzas.py` (`origen` omitted vs. present as the seventh key, 2); `test_sincronizar.py`
+(byte-identical request with the flag off, `origen` as the seventh field with it on, 2); `test_cli.py`
+(the 48-character add-time guard at and over the limit, the flag-off/flag-on label-threading cases for a
+Microsoft and an IMAP source, the label never containing a password/token/address, and the >64 fallback
+with its warning, 6).
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest -q` on the slice branch before the merge, tree
+`324f3239c1c340c0b605ab5c4dadfac39c3c4381` (slice commit `94472bb747874c80634d2d8a1d887adb5ca4b42d`):
+
+    363 passed, 7 skipped in 22.72s
+
+363 = the 342 `HOST-AUTOACTUALIZAR-BUZON-1` recorded on `main` before this slice, plus this slice's 21 new
+tests (above). Tree identity proven before writing this entry, so that run was not repeated for the
+merge: merge commit `21bb7dd727166c010ef2a0108579a86aa8f2b28f` has tree
+`324f3239c1c340c0b605ab5c4dadfac39c3c4381`, IDENTICAL to the slice branch's own tree, and `git diff HEAD
+feat/buzon-origen-wire-1 --stat` against the merge commit was empty. The 7 skips are the same
+pre-existing Windows file-mode skips every earlier slice in this ledger has recorded; none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database. No customer-facing bytes, the same reasoning
+every earlier entry in this ledger has recorded: this repository has no product, no UI, and no customer or
+operator other than Carlos acting as this system's own administrator; the one new stderr line (the >64
+warning) and the README/deploy-doc additions are that same operator-facing text, never a product surface.
+
+**Cross-repo contract: this one is NOT the same clean "no" every earlier slice in this ledger recorded.**
+Unlike `BUZON-FUENTES-ESQUEMA-1`/`BUZON-FUENTE-WIRE-CORREO-1`/`BUZON-FUENTE-IMAP-1` (which only ever
+changed a VALUE inside the existing key set), this slice adds a NEW KEY to the request this repository
+sends Finanzas -- `origen`, on the wire, the moment the flag is on. Judged against the actual diff, that
+is a cross-repo contract change, not a false alarm. It merged anyway, on these grounds, in order:
+
+1. The spec body itself, verbatim, names the merge as part of this slice's own required steps ("Full gate
+   ..., merge to main, ledger entry quoting the wire above") -- explicit authorization in words, which is
+   what a merge past a merge-policy-A condition requires.
+2. The approval reason names this exact situation by its ledger id (`ORCH-CARLOS-DELEGATES-TIER-1-1;
+   cross-repo wire restated verbatim from the owning repo, default OFF until the peer release is live"):
+   the new key is not this repository's own invention, it is Finanzas' own already-merged schema, restated
+   client-side, and ships inert.
+3. The flag defaults off, proven byte-identical by `test_sin_etiqueta_origen_la_peticion_es_igual_a_la_de_
+   hoy`: nothing this diff ships changes what any deployment sends until a human deliberately flips
+   `BUZON_ENVIAR_ORIGEN` AFTER confirming Finanzas Release 37 is live -- the one condition both this
+   repository's README and `deploy/host/README.md` now state up front.
+
+### Attribution
+
+Finanzas built and merged `FIN-API-BUZON-ORIGEN-1`, resolving the open question `BUZON-FUENTE-WIRE-
+CORREO-1` left behind; Carlos delegated this connector-side build (`ORCH-CARLOS-DELEGATES-TIER-1-1`). This
+slice (`BUZON-ORIGEN-WIRE-1`) threaded the flag through `config.py`, `limites.py`, `finanzas.py`,
+`sincronizar.py` and `cli.py`, added both length guards, and documented the rollout condition in
+`README.md` and `deploy/host/README.md`.
