@@ -1554,3 +1554,117 @@ CORREO-1` left behind; Carlos delegated this connector-side build (`ORCH-CARLOS-
 slice (`BUZON-ORIGEN-WIRE-1`) threaded the flag through `config.py`, `limites.py`, `finanzas.py`,
 `sincronizar.py` and `cli.py`, added both length guards, and documented the rollout condition in
 `README.md` and `deploy/host/README.md`.
+
+---
+
+## BUZON-GRAPH-TIMEOUT-1 -- explicit outbound timeouts, retry Graph's transient class in-pass (2026-11-12)
+
+### Why
+
+Production (`duna-prod-1`, deployed `7589dc9`): on 12 Nov, every 10-minute pass of source
+`hotmail-carlos` stopped with `parada=graph listar error=ReadTimeout`, cursor frozen at
+`2026-11-12T17:05Z`, `duna-buzon.service` failed, across at least three consecutive passes.
+`GraphClient` built its `httpx.Client` with no `timeout` at all, so httpx's own 5-second default
+applied to the Graph message listing -- and nothing else outbound in this repository (Gmail, Finanzas,
+Cuenta Duna, IMAP) named one either; every one of them was one slow call away from the same failure.
+Carlos delegated this operational fix (`ORCH-CARLOS-DELEGATES-TIER-1-1`; "operational fix, no wire, no
+data shape").
+
+### What changed
+
+**New `temporizadores.py`** -- one shared `httpx.Timeout` (connect 10s, read 60s, write 30s, pool 10s,
+every figure a named constant), passed to every `httpx.Client` this repository builds: `graph.py`
+(`GraphClient`), `gmail.py` (`GmailClient`), `finanzas.py` (`FinanzasClient`), `cuenta.py`
+(`CuentaClient`). `imaplib.IMAP4_SSL` has no per-phase timeout, only one socket-level value -- the same
+60s read figure is reused for it (`TIMEOUT_IMAP_SEGUNDOS`), passed explicitly in both places this
+repository opens that connection: `cliente_imap.py`'s `_construir_conexion_ssl_real` (the provider's own
+connection) and `credencial_imap.py`'s `_verificar_login_real` (the real LOGIN `entrar` performs before
+ever storing an app password). None of the five relied on a library default before this slice; all five
+do now, explicitly, never silently.
+
+**Retrying the transient class only, inside `graph.py`'s `GraphClient._get`** -- the one place every
+Graph call in this client already passed through. Retried: a transport failure (a timeout among them),
+or a `429`/`503` response -- the two statuses Graph itself documents as "back off and try again". At
+most two retries, backoff 1s then 4s, each capped at 30s and overridden by the response's own
+`Retry-After` when present (`_espera_retry_after`). Every other status -- `401`, every other `4xx`/`5xx`
+(the real 500 production never actually saw, but the existing contract tests pin) -- still fails on the
+FIRST attempt, exactly as before this slice: a retry is for a condition the server itself says is
+transient, never a blanket "try again" for anything that is not a clean `200`. A pass that exhausts both
+retries stops exactly like today -- cursor unchanged, stop reason recorded, service exits non-zero --
+because `_get` still only ever raises `GraphAutenticacionError`/`GraphErrorTransitorio`, the same two
+exceptions `sincronizar.py` already reacts to; nothing new crossed that boundary. The sleep itself is an
+injectable seam (`dormir`, defaulting to `time.sleep`), so every new test runs in milliseconds, not
+`1s + 4s` of real wall-clock per case.
+
+Retries are scoped to Graph alone, matching the build instructions' own wording ("Retry only the
+TRANSIENT class (`GraphErrorTransitorio` / transport errors and 429/503...)") and the incident itself --
+`GmailClient`, `FinanzasClient` and `CuentaClient` keep their existing failure shapes (Finanzas already
+has its own retry-at-the-NEXT-PASS design via `estado="retry"`, which this slice does not touch).
+
+**The listing call's own `$top`/`$select`/`$expand`, checked, not changed.** `listar_mensajes`
+already asked for exactly six summary fields (`id,internetMessageId,from,subject,receivedDateTime,
+hasAttachments`), a 50-row page, and no `$expand` at all -- attachments are never expanded in the LIST
+step; that shape predates this slice (`BUZON-CONECTOR-1`'s own fix for the `contentBytes`/`$expand` 400).
+There was nothing to shrink.
+
+**`estado.json` (and `estado`'s own stdout) now carry the pass's finish time and retry count** --
+`registro.linea_resumen` takes two new, optional keyword fields (`finalizado_en`, `reintentos`),
+appended after the existing counts and before `parada=` when present, so every existing substring-based
+assertion in this repository's own test suite kept passing unchanged. `cli.py`'s new `_ahora()` is the
+one clock read in this module (a seam for tests, `monkeypatch.setattr(cli, "_ahora", ...)`); `reintentos`
+is `getattr(proveedor, "reintentos_usados", 0)`, read once the pass ends, so a provider with no such
+counter (IMAP, Gmail, every existing test fake) reports `0` rather than erroring. This closes the build
+instructions' own complaint: `duna-deploy-buzon status` runs `python -m duna_buzon estado`, which prints
+this file verbatim, so it can now tell a stuck timer (no `finalizado_en` advancing) from repeated
+failures (a `finalizado_en` that keeps advancing while `parada=` keeps firing) -- something the format
+genuinely could not distinguish before this slice.
+
+### Tests, measured
+
+14 new tests: `test_graph.py` (the shared timeout on the client, timeout-then-success advances past the
+retry, three-strikes exhausts both retries and raises, `429` honouring and capping `Retry-After`, `503`
+falling back to the default backoff with no header, `500` never retried at all -- 6); `test_gmail.py`,
+`test_finanzas.py`, `test_cuenta.py` (the shared timeout on each client, 1 each -- 3); `test_cliente_imap.
+py`, `test_credencial_imap.py` (the production connection builder's own explicit socket timeout, via a
+fake `imaplib.IMAP4_SSL` the test installs -- 2); `test_sincronizar.py` (a Graph timeout that resolves on
+retry never reaches `ejecutar_pasada`, cursor advances normally; a persistent Graph timeout still stops
+the pass without persisting the cursor -- 2); `test_cli.py` (`finalizado_en`/`reintentos` land in both
+`estado.json` and `estado`'s own stdout -- 1). One existing test (`test_graph.py`'s
+`test_error_de_conexion_lanza_error_transitorio`) was updated in place -- a `ConnectError` is now in the
+retried class, so it takes three attempts instead of one; the test now injects a no-op `dormir` and
+asserts the retry count and backoff schedule alongside the exception it already checked.
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest -q` on the slice branch (`feat/buzon-graph-timeout-1`), tree
+`cb25a3db15539117dbc6e846fc60ab3ac3894381` (slice commit
+`264d2a9bcd67ef1490e89c4d72b14bf64ab35d73`):
+
+    377 passed, 7 skipped in 19.42s
+
+377 = the 363 `BUZON-ORIGEN-WIRE-1` recorded on `main` before this slice, plus this slice's 14 new tests
+(above). Merge commit `2a993a48ea351132f9f8d11c26576722b84af951` has tree
+`cb25a3db15539117dbc6e846fc60ab3ac3894381`, IDENTICAL to the slice branch's own tree (`git diff HEAD
+feat/buzon-graph-timeout-1 --stat` against the merge commit was empty), so that run was not repeated for
+the merge. The 7 skips are the same pre-existing Windows file-mode skips every earlier slice in this
+ledger has recorded; none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, same as every earlier entry. No customer-
+facing bytes -- the new `finalizado_en`/`reintentos` fields are operator-facing text (`estado.json`,
+`estado`'s own stdout), read only by Carlos acting as this system's own administrator, the same reasoning
+every earlier entry in this ledger has recorded. No cross-repo contract -- unlike `BUZON-ORIGEN-WIRE-1`,
+nothing here touches the Finanzas wire (the `meta` fields this connector sends are untouched) or the
+Cuenta Duna wire (`GET /servicio/fuentes/{sub}`'s own request/response shape is untouched); every change
+is this connector's own internal client configuration and retry behaviour. All three conditions clear,
+and the spec body itself names the merge as a required step ("Full gate ..., merge to main (--no-ff) ...")
+-- merged on green, no waiting.
+
+### Attribution
+
+Carlos named the production incident directly (three consecutive stopped passes, cursor frozen) and
+delegated the fix (`ORCH-CARLOS-DELEGATES-TIER-1-1`). This slice (`BUZON-GRAPH-TIMEOUT-1`) built
+`temporizadores.py`, gave every outbound client in this repository an explicit timeout, added Graph's
+own transient-class retry, checked (and left unchanged) the listing call's own `$top`/`$select`/
+`$expand`, and taught `estado.json`/`estado` to carry the pass's finish time and retry count.
