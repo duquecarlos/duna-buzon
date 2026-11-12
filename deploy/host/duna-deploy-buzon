@@ -12,6 +12,24 @@
 #   sudo -n /usr/local/sbin/duna-deploy-buzon carpetas <id>
 #   sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> <carpeta>...
 #   sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> --todas
+#   sudo -n /usr/local/sbin/duna-deploy-buzon registros <unidad> [n]
+#
+# BUZON-ENTRADA-UNIDADES-REGISTROS-1 -- `deploy` now diffs EVERY unit file
+# under deploy/systemd/ (duna-buzon.service, duna-buzon.timer) against what
+# is actually installed under /etc/systemd/system/, copying only the ones
+# that differ, running exactly one `systemctl daemon-reload`, and printing
+# each unit as "sin cambios" or "actualizada" -- so a unit that was never
+# diffed before (only ever blindly overwritten) cannot drift silently.
+# `status` gained a read-only drift line per unit ("coincide"/"distinta"/
+# "falta"), the installed `User=` of the job unit, and the data directory's
+# owner and mode -- and prints the main service's last 30 redacted journal
+# lines automatically when it is "failed". `registros <unidad> [n]` is a
+# read-only operator verb: <unidad> from a fixed allowlist of this repo's
+# own units, n a positive integer capped at 200 (default 40), running
+# exactly `journalctl -u <unidad> -n <n> --no-pager -o cat` piped through a
+# redaction filter (postgres(ql):// credentials and
+# (SECRET|TOKEN|PASSWORD|KEY)= values become ***) -- never interpolated into
+# a shell string.
 #
 # `carpetas`/`fijar-carpetas` are BUZON-CARPETAS-MICROSOFT-CLI-1: operator
 # tooling over `fuentes/<id>/fuente.json`'s own `carpetas` setting, which
@@ -60,6 +78,15 @@ SERVICIO="duna-buzon.service"
 TIMER="duna-buzon.timer"
 UNIDADES_DIR="/etc/systemd/system"
 
+# BUZON-ENTRADA-UNIDADES-REGISTROS-1 -- every unit this repo ships, the
+# subset of those that are timers (enabled --now on every deploy), and the
+# subset that are job units (oneshot services -- the ones a drift report
+# shows a `User=` for and whose last lines get auto-printed on failure).
+# Also doubles as `registros`' own fixed allowlist: never taken from argv.
+UNIDADES=("$SERVICIO" "$TIMER")
+UNIDADES_TIMERS=("$TIMER")
+UNIDADES_JOB=("$SERVICIO")
+
 # BUZON-CARPETAS-MICROSOFT-CLI-1 -- the only two argument shapes `carpetas`
 # and `fijar-carpetas` ever accept; every id and folder name is checked
 # against these before anything runs, and is always passed on to python as
@@ -78,7 +105,8 @@ SUDOERS_PREV="/etc/sudoers.d/.duna-deploy-buzon.prev"
 
 usage() {
     echo "usage: duna-deploy-buzon {status|deploy [--dry-run]|entrar|rollback-script|" \
-        "carpetas <id>|fijar-carpetas <id> <carpeta>...|fijar-carpetas <id> --todas}" >&2
+        "carpetas <id>|fijar-carpetas <id> <carpeta>...|fijar-carpetas <id> --todas|" \
+        "registros <unidad> [n]}" >&2
     exit 2
 }
 
@@ -99,6 +127,8 @@ parse_args() {
     FIJAR_ID=""
     FIJAR_TODAS=0
     FIJAR_CARPETAS=()
+    REGISTROS_UNIDAD=""
+    REGISTROS_N=""
     case "$SUBCOMMAND" in
         status | entrar | rollback-script)
             [[ $# -eq 0 ]] || usage
@@ -117,6 +147,16 @@ parse_args() {
             [[ $# -eq 1 ]] || usage
             CARPETA_ID="$1"
             [[ "$CARPETA_ID" =~ $ID_FUENTE_RE ]] || usage
+            ;;
+        registros)
+            [[ $# -eq 1 || $# -eq 2 ]] || usage
+            REGISTROS_UNIDAD="$1"
+            _unidad_permitida "$REGISTROS_UNIDAD" || usage
+            if [[ $# -eq 2 ]]; then
+                REGISTROS_N="$(_normaliza_n "$2")" || usage
+            else
+                REGISTROS_N="$(_normaliza_n "")"
+            fi
             ;;
         fijar-carpetas)
             [[ $# -ge 2 ]] || usage
@@ -172,6 +212,81 @@ _archivo_cambio() {
     local instalado="$1" candidato="$2"
     [[ -f "$instalado" ]] || return 0
     ! cmp -s "$instalado" "$candidato"
+}
+
+# "coincide" when the installed copy is byte-identical to the repo's own,
+# "distinta" when it differs, "falta" when nothing is installed at all. Pure
+# and read-only -- the drift line `status` prints for every unit.
+_estado_unidad() {
+    local instalado="$1" candidato="$2"
+    if [[ ! -f "$instalado" ]]; then
+        echo "falta"
+        return 0
+    fi
+    if cmp -s "$instalado" "$candidato"; then
+        echo "coincide"
+    else
+        echo "distinta"
+    fi
+}
+
+# The installed unit's own `User=` line, or empty if the file is missing or
+# carries none (a .timer has none). Pure, read-only, no root required.
+_user_de_unidad() {
+    local archivo="$1"
+    [[ -f "$archivo" ]] || return 0
+    grep -m1 -E '^User=' "$archivo" 2>/dev/null | cut -d= -f2- || true
+}
+
+# True (exit 0) only when $1 is exactly one of this repo's own unit names
+# (UNIDADES, a fixed array above -- never a regex, never taken from argv
+# beyond this membership check). `registros`' own allowlist.
+_unidad_permitida() {
+    local unidad="$1" candidata
+    for candidata in "${UNIDADES[@]}"; do
+        [[ "$unidad" == "$candidata" ]] && return 0
+    done
+    return 1
+}
+
+# Validates and caps `registros`' own `n`: empty -> 40 (the default); not a
+# positive integer -> refuses (exit 1, nothing echoed); over 200 -> capped
+# to 200. Pure -- echoes the resolved value on success, exit 1 on a bad
+# shape, so a caller can write `N="$(_normaliza_n "$2")" || usage`.
+_normaliza_n() {
+    local valor="${1:-}"
+    if [[ -z "$valor" ]]; then
+        echo 40
+        return 0
+    fi
+    if ! [[ "$valor" =~ ^[0-9]+$ ]] || [[ "$valor" -eq 0 ]]; then
+        return 1
+    fi
+    if [[ "$valor" -gt 200 ]]; then
+        echo 200
+    else
+        echo "$valor"
+    fi
+}
+
+# Redacts a stream of journal lines: the credentials half of a
+# postgres://.../postgresql://... URL, and the value of any
+# ...SECRET=/...TOKEN=/...PASSWORD=/...KEY= assignment, each become "***".
+# Pure text filter, stdin to stdout -- shared by `registros` and `status`'s
+# own auto-print-on-failure.
+_redactar() {
+    sed -E \
+        -e 's#(postgres(ql)?://)[^@[:space:]/]*@#\1***@#g' \
+        -e 's/([A-Za-z0-9_]*(SECRET|TOKEN|PASSWORD|KEY)=)[^[:space:]]*/\1***/g'
+}
+
+# `n` redacted lines of `unidad`'s own journal, via journalctl's own `-u`
+# selector -- never a shell string built from the unit name, and nothing
+# else is ever read. Shared by `cmd_registros` and `status`'s own
+# auto-print when the main service is "failed".
+_mostrar_registros() {
+    local unidad="$1" n="$2"
+    journalctl -u "$unidad" -n "$n" --no-pager -o cat | _redactar
 }
 
 # True (exit 0) only when $1 holds EXACTLY one non-comment, non-blank line,
@@ -271,6 +386,11 @@ cmd_status() {
         echo "+ $(_desc_head_as_owner "$REPO")"
         echo "+ systemctl is-active $SERVICIO"
         echo "+ systemctl is-active $TIMER"
+        echo "+ journalctl -u $SERVICIO -n 30 --no-pager -o cat | redact (only if $SERVICIO is failed)"
+        echo "+ compare $UNIDADES_DIR/$SERVICIO against $REPO/deploy/systemd/$SERVICIO (coincide/distinta/falta)"
+        echo "+ compare $UNIDADES_DIR/$TIMER against $REPO/deploy/systemd/$TIMER (coincide/distinta/falta)"
+        echo "+ grep '^User=' $UNIDADES_DIR/$SERVICIO"
+        echo "+ stat $DATOS_DIR (owner and mode)"
         echo "+ $(_desc_estado_health)"
         return 0
     fi
@@ -279,11 +399,35 @@ cmd_status() {
     owner="$(_owner_of "$REPO")"
     echo "repo HEAD: $(runuser -u "$owner" -- git -C "$REPO" rev-parse HEAD)"
 
-    local valor_servicio valor_timer
-    valor_servicio="$(systemctl is-active "$SERVICIO" 2>&1 || true)"
+    local valor_timer
     valor_timer="$(systemctl is-active "$TIMER" 2>&1 || true)"
-    echo "$SERVICIO: $valor_servicio"
     echo "$TIMER: $valor_timer"
+
+    local unidad valor
+    for unidad in "${UNIDADES_JOB[@]}"; do
+        valor="$(systemctl is-active "$unidad" 2>&1 || true)"
+        echo "$unidad: $valor"
+        if [[ "$valor" == "failed" ]]; then
+            echo "$unidad: last 30 lines (redacted):"
+            _mostrar_registros "$unidad" 30
+        fi
+    done
+
+    for unidad in "${UNIDADES[@]}"; do
+        echo "$unidad: $(_estado_unidad "$UNIDADES_DIR/$unidad" "$REPO/deploy/systemd/$unidad")"
+    done
+
+    local usuario
+    for unidad in "${UNIDADES_JOB[@]}"; do
+        usuario="$(_user_de_unidad "$UNIDADES_DIR/$unidad")"
+        echo "$unidad User=: ${usuario:-<sin instalar>}"
+    done
+
+    if [[ -d "$DATOS_DIR" ]]; then
+        echo "$DATOS_DIR: owner=$(stat -c '%U:%G' "$DATOS_DIR") mode=$(stat -c '%a' "$DATOS_DIR")"
+    else
+        echo "$DATOS_DIR: <no existe>"
+    fi
 
     local estado_salida=0
     systemd-run --pipe --quiet --wait --uid=duna --gid=duna \
@@ -318,8 +462,8 @@ cmd_deploy() {
         echo "+ exec $ENTRY_INSTALADO deploy --internal-reexec (only if anything changed, so the rest of the deploy runs under the new code)"
         echo "+ runuser -u \"\$(stat -c %U $REPO)\" -- uv sync --frozen (cwd $REPO)"
         echo "+ install -d -o duna -g duna -m 0700 $DATOS_DIR"
-        echo "+ install -o root -g root -m 644 $REPO/deploy/systemd/duna-buzon.service $UNIDADES_DIR/$SERVICIO"
-        echo "+ install -o root -g root -m 644 $REPO/deploy/systemd/duna-buzon.timer $UNIDADES_DIR/$TIMER"
+        echo "+ compare $REPO/deploy/systemd/$SERVICIO against $UNIDADES_DIR/$SERVICIO (install -o root -g root -m 644 only if different; print sin cambios/actualizada)"
+        echo "+ compare $REPO/deploy/systemd/$TIMER against $UNIDADES_DIR/$TIMER (install -o root -g root -m 644 only if different; print sin cambios/actualizada)"
         echo "+ systemctl daemon-reload"
         echo "+ systemctl enable --now $TIMER"
         echo "+ $(_desc_estado_health)"
@@ -344,10 +488,21 @@ cmd_deploy() {
         install -d -o duna -g duna -m 0700 "$DATOS_DIR"
     fi
 
-    install -o root -g root -m 644 "$REPO/deploy/systemd/duna-buzon.service" "$UNIDADES_DIR/$SERVICIO"
-    install -o root -g root -m 644 "$REPO/deploy/systemd/duna-buzon.timer" "$UNIDADES_DIR/$TIMER"
+    local unidad
+    for unidad in "${UNIDADES[@]}"; do
+        local pulled="$REPO/deploy/systemd/$unidad"
+        local instalada="$UNIDADES_DIR/$unidad"
+        if _archivo_cambio "$instalada" "$pulled"; then
+            install -o root -g root -m 644 "$pulled" "$instalada"
+            echo "$unidad: actualizada"
+        else
+            echo "$unidad: sin cambios"
+        fi
+    done
     systemctl daemon-reload
-    systemctl enable --now "$TIMER"
+    for unidad in "${UNIDADES_TIMERS[@]}"; do
+        systemctl enable --now "$unidad"
+    done
 
     local estado_salida=0
     systemd-run --pipe --quiet --wait --uid=duna --gid=duna \
@@ -436,6 +591,14 @@ cmd_fijar_carpetas() {
         --property="WorkingDirectory=$REPO" -- "${comando[@]}"
 }
 
+# Read-only: `registros <unidad> [n]` -- `unidad` was already checked
+# against the UNIDADES allowlist and `n` already normalized in parse_args,
+# so this just runs the fixed journalctl call and redacts it.
+cmd_registros() {
+    local unidad="$1" n="$2"
+    _mostrar_registros "$unidad" "$n"
+}
+
 # For Carlos, at his own terminal: never systemd-run, never --pty -- a real
 # tty is already attached, and this just hands it straight to `duna`. `duna`
 # cannot traverse /srv/duna/env/ on this host, so it can never source either
@@ -493,6 +656,7 @@ dispatch() {
         rollback-script) cmd_rollback_script ;;
         carpetas) cmd_carpetas "$CARPETA_ID" ;;
         fijar-carpetas) cmd_fijar_carpetas "$FIJAR_ID" "$FIJAR_TODAS" "${FIJAR_CARPETAS[@]+"${FIJAR_CARPETAS[@]}"}" ;;
+        registros) cmd_registros "$REGISTROS_UNIDAD" "$REGISTROS_N" ;;
     esac
 }
 
