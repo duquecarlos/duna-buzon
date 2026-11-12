@@ -1297,3 +1297,120 @@ signing in as `carlos@` would otherwise read his own personal inbox into the com
 INCLUIDAS-1`) built the narrowing end to end: `fuentes.py`'s `carpetas` field and validation,
 `cliente_imap.py`'s delimiter-aware matching and cursor pruning, the new `carpetas <id>` operator command,
 and `agregar-fuente`'s new repeatable `--carpeta` flag.
+
+---
+
+## HOST-AUTOACTUALIZAR-BUZON-1 -- `deploy` installs its own newer entry script (2026-11-11)
+
+### Why
+
+Carlos, 12 Nov (Personal desk, verbatim): "remember that we have to set up everything for the agents to
+run all the stuff by themselves, so I don't want to have to access to the server every time." Offered
+A/B/C by the Personal desk, he chose A ("Yes, I recommendation", answering "I recommend A"): each
+product's deploy installs its own newer entry script and sudoers rule from the pulled checkout, with
+guards. The same night, Lugares alone needed three SSH trips because the installed entry script was
+older than the code it deployed -- exactly the failure mode this slice closes for `duna-buzon`.
+Approved via `ORCH-DESK-RELAY-IS-CARLOS-1` relaying Carlos's choice, guards specified by Main
+(`ORCH-HOST-AUTOACTUALIZAR-1`).
+
+### What changed
+
+`deploy/host/duna-deploy-buzon` gains a new step, `autoactualizar`, called from `cmd_deploy`'s real
+(non-dry-run) branch right after `git pull --ff-only` and before `uv sync --frozen` or anything else that
+depends on the new code:
+
+1. Compares the just-pulled `deploy/host/duna-deploy-buzon` and `.sudoers` fragment against what is
+   installed (`/usr/local/sbin/duna-deploy-buzon`, `/etc/sudoers.d/duna-deploy-buzon`) with `cmp -s`
+   (`_archivo_cambio`). Both identical: prints `entry script: up to date` and `deploy` continues
+   unchanged -- no backup, no install, no re-exec.
+2. If the sudoers fragment changed, refuses BEFORE installing anything unless it holds EXACTLY one line
+   matching `<user> ALL=(root) NOPASSWD: /usr/local/sbin/duna-deploy-buzon` (`_forma_sudoers_es_estricta`
+   -- no wildcard, no second command, no `ALL`, no second rule) AND `visudo -cf` accepts it.
+3. Prints the full unified diff (`diff -u`) of every file about to change.
+4. Backs up whichever installed copies are about to change to `/usr/local/sbin/duna-deploy-buzon.prev`
+   and `/etc/sudoers.d/.duna-deploy-buzon.prev` (leading dot: outside `#includedir`'s own pattern, so the
+   backup is never itself read as a live rule), via `install -o root -g root` (0755 / 0440).
+5. Installs the new copies the same way, then `exec`s `"$ENTRY_INSTALADO" deploy --internal-reexec` --
+   the new `--internal-reexec` flag (parsed by `parse_args`, never advertised in `usage()`) tells the
+   re-executed invocation to skip `autoactualizar` a second time, so it can never loop. The rest of that
+   same `deploy` (uv sync, the systemd units, the health check) then runs under the newly installed code.
+
+A new `rollback-script` subcommand (`cmd_rollback_script`) restores either or both files from their
+`.prev` copies, undoing autoactualizar's most recent install; it refuses by name when neither `.prev`
+copy exists. `deploy --dry-run` prints this entire plan (the comparison, the diff, the planned backup,
+install and re-exec, all literal `echo` lines, matching the existing dry-run style for every other step)
+without touching anything.
+
+`deploy/host/README.md`'s "Update" section documents the new self-update behaviour and states plainly
+that the FIRST install of a new version of this script -- including this `HOST-AUTOACTUALIZAR-BUZON-1`
+version itself, landing on a host that only has an older copy -- still needs the same manual
+`sudo install`/`visudo -c` bootstrap as before; autoactualizar only takes over from the second `deploy`
+onward. The "Use" section now also lists `rollback-script`.
+
+### Tests, measured
+
+`tests/test_host_deploy_entry_script.py` (+24, 25 -> 49): text/structural assertions in the repo's
+existing style (ordering and presence checks on the script's own source, since every root-gated path in
+this suite is exercised that way, never by actually running as root) for: autoactualizar running right
+after the pull and before `uv sync`; being skipped when `--internal-reexec` is set; the re-exec flag never
+appearing in the public `usage()` string; the re-exec line appearing exactly once; sudoers validation
+(`_forma_sudoers_es_estricta` then `visudo -cf`) running before any diff or install; the `.prev` backups
+being written before the final install; the "up to date" message printing before any install; the
+dry-run plan mentioning autoactualizar, `visudo -cf`, both `.prev` paths and `--internal-reexec`, while
+every line in that block still starts with `echo`; `rollback-script` being a recognized subcommand that
+rejects extra arguments and is covered by the EUID-refusal check (`rollback-script` added to that
+test's existing parametrize list); `rollback-script`'s own body restoring both files with the right
+modes and refusing when neither `.prev` exists; the README documenting `autoactualizar`, `rollback-script`
+and the manual bootstrap step. Two helper functions are exercised FOR REAL, with no root required, by
+sourcing the script in a bash subprocess and calling them directly (`BASH_SOURCE[0] != $0` under `-c`, so
+`__main` never runs): `_archivo_cambio` against identical, differing and missing files, and
+`_forma_sudoers_es_estricta` against nine fixtures (the exact rule; the same rule behind a comment; a
+wildcard; `NOPASSWD: ALL`; a second comma-separated command; two rules; an empty file; the right shape on
+the wrong path; `PASSWD` instead of `NOPASSWD`) -- this is what covers "sudoers change accepted" and
+"sudoers with a wider rule refused" with a REAL pass/fail, not just text inspection. `visudo` itself is
+not installed on this Windows dev machine (confirmed: `shutil.which("visudo")` returns `None`), so the
+live-`visudo` half of validation is covered by the ordering/presence checks above, same as every other
+root-requiring behaviour in this suite -- a real Linux host (this script's only real target) has `visudo`
+wherever it has `sudo`.
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest -q`, run once on the slice branch (`feat/host-autoactualizar-buzon-1`,
+commit `d621cae60dce9dafc4dcaac2dbd345716663ce95`):
+
+    342 passed, 7 skipped in 37.94s
+
+342 = the 318 `BUZON-IMAP-CARPETAS-INCLUIDAS-1` recorded on `main` before this slice (confirmed by
+re-running the baseline on `main` at `68934e2535720a01cb9f5501f792a87bfafdf6cf` before starting: 318
+passed, 7 skipped), plus this slice's 24 new tests, all in `test_host_deploy_entry_script.py`. The 7
+skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger has recorded;
+none are new.
+
+Tree identity, measured before writing this entry: merge commit `e8396f7fcdd6e4d330ffb8892a58f3b0f01df0b3`
+has tree `b1bd1e3ecdac8d488f7544c0ce8b17cc00a277b2`, IDENTICAL to the slice branch's own tree (same sha),
+and `git diff HEAD feat/host-autoactualizar-buzon-1 --stat` against the merge commit was empty -- so the
+gate above was not re-run a second time for the merge.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, and this slice adds no new file-based state
+either (the `.prev` backups are an operational artifact under `/usr/local/sbin` and `/etc/sudoers.d`, not
+application data). No cross-repo contract or DTO change: this slice touches no wire this repository sends
+or receives -- the Finanzas buzon-v1 contract is completely untouched, and this slice defines no contract
+any other repository reads; it only changes HOW this one repository's OWN deploy script updates itself on
+its OWN host. No customer-facing bytes, the same reasoning every earlier entry in this ledger has
+recorded: this repository has no product, no UI, and no customer or operator other than Carlos acting as
+this system's own administrator -- every new line of output (`entry script: up to date`, the diffs, the
+refusal messages, `rollback-script`'s own confirmations) is that same operator-facing diagnostic text on a
+root-only CLI, never a product surface a customer, operator or owner reads inside a Duna product. All
+three conditions clear, so this slice merged on green without stopping for approval, per its own approval
+reason ("Carlos chose option A ..., guards specified by Main").
+
+### Attribution
+
+Carlos named the operational pain directly (the Lugares deploy needing three separate SSH trips the same
+night because its installed entry script trailed the code it was deploying) and chose option A from three
+offered by the Personal desk; Main specified the guards (strict one-rule sudoers validation via `visudo
+-cf`, keep-and-restore `.prev` copies, a single non-looping re-exec). This slice (`HOST-AUTOACTUALIZAR-
+BUZON-1`) built `autoactualizar` and `rollback-script` end to end in `duna-deploy-buzon`, and documented
+the still-manual first-install bootstrap in `deploy/host/README.md`.
