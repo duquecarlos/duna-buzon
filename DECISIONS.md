@@ -1668,3 +1668,106 @@ delegated the fix (`ORCH-CARLOS-DELEGATES-TIER-1-1`). This slice (`BUZON-GRAPH-T
 `temporizadores.py`, gave every outbound client in this repository an explicit timeout, added Graph's
 own transient-class retry, checked (and left unchanged) the listing call's own `$top`/`$select`/
 `$expand`, and taught `estado.json`/`estado` to carry the pass's finish time and retry count.
+
+---
+
+## BUZON-GRAPH-502-1 -- retry Graph's 5xx class wider, degrade `$top` on persistent failure, `carpetas` for Microsoft sources (2026-11-12)
+
+### Why
+
+Production (`duna-prod-1`, deployed `9f44d38`, 12 Nov 19:30Z, right after `BUZON-GRAPH-TIMEOUT-1`
+shipped): source `hotmail-carlos` now stops with `parada=graph listar http=502 reintentos=0`, cursor
+still frozen at `2026-11-12T17:05Z`. The 5s httpx default `BUZON-GRAPH-TIMEOUT-1` replaced had been
+HIDING this -- a timeout and a 502 are different failures from the same underlying cause: `/me/messages`
+against a large consumer Outlook.com mailbox, every folder, `$top=50`, is an expensive query, and Graph
+answers it with its whole transient 5xx class, not only 503. Carlos delegated this as an operational fix,
+no wire, no data shape (`ORCH-CARLOS-DELEGATES-TIER-1-1`).
+
+### What changed
+
+**`_CODIGOS_REINTENTABLES` widened to `{429, 500, 502, 503, 504}`** (`graph.py`) -- 500/502/504 now
+retried exactly like 503 always was: same budget (two retries), same backoff (1s, then 4s), same
+`Retry-After` honouring. 401 and every other 4xx are still never retried -- those are a real auth
+failure or a defect, never papered over.
+
+**`$top` degrade when the widened retry still isn't enough (`_listar_pagina`).** After a LIST page's
+normal retry budget is spent and it is STILL answering with one of those codes, the page is retried
+once more at `$top=10`, then once more at `$top=1` -- each a SINGLE attempt, no backoff sleep, since
+this is a size escalation, not the same transient retry; each tried only if the page's current size is
+still bigger than it. `top_lista_usado` always ends up naming whichever `$top` was last in use -- the
+one that finally got a page through, or, if every size still failed, the smallest one tried. The cursor
+and dedup semantics never change: a degraded page asks the exact same `$filter`/`$orderby`, just fewer
+rows per response, so the same messages come back in the same order, only spread over more pages.
+`_top_de`/`_con_top` read or rewrite a request's `$top` whether it is a fresh request (`parametros`
+dict) or a `@odata.nextLink` continuation (`httpx.URL.copy_set_param`, since the link already bakes its
+query in) -- degrade works identically on page 1 and on every later page.
+
+**`carpetas`, previously `imap`-only, extended to `proveedor == "microsoft"` (`fuentes.py`,
+`graph.py`, `proveedor.py`).** The build instructions asked for narrowing WHERE the list reads, but only
+if a source's rules allow it; Graph's `/me/messages` has no such allow-list concept, so this reuses the
+field IMAP already has rather than inventing a second one. When set, `GraphClient` reads each named
+folder on its own, in the order configured, via `/me/mailFolders/{carpeta}/messages` instead of one
+`/me/messages` call across the whole mailbox -- each entry is whatever Graph itself accepts there (a
+well-known name like `inbox`, or a folder id), and each folder's own listing keeps every bit of today's
+shape (filter, order, select, pagination, retry/degrade). Absent (the default, and every Microsoft
+`fuente.json` before this slice) means today's behaviour exactly -- proven byte for byte by
+`test_carpetas_no_configuradas_mantiene_la_peticion_de_hoy_byte_a_byte`. No CLI writes this for a
+Microsoft source today (`agregar-fuente` only supports `imap`) -- an operator edits `fuente.json` by
+hand, documented in `deploy/host/README.md`.
+
+**`estado.json`/`estado`'s own stdout now also carry `top=<n>`** (`registro.py`'s `linea_resumen`,
+`cli.py`) -- `getattr(proveedor, "top_lista_usado", None)`, the same optional-field pattern
+`BUZON-GRAPH-TIMEOUT-1` used for `reintentos`, so a provider with no such concept (IMAP, Gmail, every
+existing test fake) omits it rather than guessing.
+
+### Tests, measured
+
+15 new tests: `test_graph.py` (502 retried and succeeds; persistent 502 degrades to `$top=10` and
+succeeds; persistent 502 at every size gives up and records `top_lista_usado == 1`; `carpetas` reads
+only the named folders, in order, no duplicate; `carpetas` absent keeps today's request byte for byte --
+5); `test_fuentes.py` (`carpetas` default/round-trip/absent-key/empty-list for `proveedor ==
+"microsoft"`, mirroring the existing `imap` tests -- 4); `test_cli.py` (`top=` lands in both
+`estado.json` and `estado`'s own stdout; a provider with no `top_lista_usado` never gets a guessed one --
+2); `test_sincronizar.py` (502 retried and the cursor advances; persistent 502 degraded to `$top=10` and
+the cursor advances; persistent 502 at every size stops the pass and leaves the cursor unchanged;
+`carpetas` reads both configured folders and every message still reaches Finanzas exactly once, cursor
+advancing to the later folder's own message -- 4). One existing test (`test_graph.py`'s
+`test_500_nunca_se_reintenta`, which asserted 500 was NEVER retried) was replaced in place by
+`test_500_se_reintenta_igual_que_503`, since that is exactly the behaviour this slice reverses --
+mirroring `BUZON-GRAPH-TIMEOUT-1`'s own precedent for updating `test_error_de_conexion_lanza_
+error_transitorio` in place when a slice changes what it asserts about.
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest -q` on the slice branch (`feat/buzon-graph-502-1`), tree
+`37dc082d218b29c63dd147bfebc176df28005717` (slice commit `d73ca172739b00b39adc1a5ba76a280b6b75ab81`):
+
+    392 passed, 7 skipped in 43.97s
+
+392 = the 377 `BUZON-GRAPH-TIMEOUT-1` recorded on `main` before this slice, plus this slice's 15 new
+tests (above). Merge commit `325262bb268f186c6736a68d1d3f3a360b03bc17` has tree
+`37dc082d218b29c63dd147bfebc176df28005717`, IDENTICAL to the slice branch's own tree (`git diff HEAD
+feat/buzon-graph-502-1 --stat` against the merge commit was empty), so that run was not repeated for the
+merge. The 7 skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger
+has recorded; none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, same as every earlier entry. No
+customer-facing bytes -- the new `top=<n>` field and the `carpetas` lever are operator-facing
+(`estado.json`, `estado`'s own stdout, a hand-edited `fuente.json`), read and written only by Carlos
+acting as this system's own administrator, the same reasoning `BUZON-GRAPH-TIMEOUT-1` recorded for
+`finalizado_en`/`reintentos`. No cross-repo contract -- nothing here touches the Finanzas wire (the
+`meta` fields this connector sends are untouched) or the Cuenta Duna wire; every change is this
+connector's own internal Graph client behaviour. All three conditions clear, and the spec body itself
+names the merge as a required step ("Full gate ..., merge to main (--no-ff) ...") -- merged on green, no
+waiting.
+
+### Attribution
+
+Carlos named the production incident directly (`parada=graph listar http=502`, cursor frozen) and
+delegated the fix as an operational one, no wire, no data shape (`ORCH-CARLOS-DELEGATES-TIER-1-1`). This
+slice (`BUZON-GRAPH-502-1`) widened Graph's retried status-code class to the whole transient 5xx family,
+added the `$top`-degrade escalation for a page that still fails past that, extended `carpetas` from
+`imap`-only to also cover `microsoft` sources, and taught `estado.json`/`estado` to carry the `$top`
+last in use.
