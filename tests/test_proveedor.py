@@ -4,6 +4,7 @@ import pytest
 
 from duna_buzon.cliente_imap import ClienteImap
 from duna_buzon.fuentes import FuenteConfig
+from duna_buzon.gmail import GmailClient
 from duna_buzon.graph import GraphClient
 from duna_buzon.proveedor import Proveedor, ProveedorDesconocidoError, construir_proveedor
 
@@ -18,6 +19,7 @@ def _fuente(**over) -> FuenteConfig:
         activa=True,
         host=None,
         port=None,
+        origen="local",
     )
     base.update(over)
     return FuenteConfig(**base)
@@ -68,3 +70,21 @@ def test_imap_lleva_el_cursor_del_proveedor_al_cliente() -> None:
 def test_proveedor_desconocido_se_rechaza() -> None:
     with pytest.raises(ProveedorDesconocidoError):
         construir_proveedor(_fuente(proveedor="otro-no-implementado"), "un-token")
+
+
+def test_google_construye_un_gmail_client() -> None:
+    fuente = _fuente(
+        id="cuenta-abc123", proveedor="google", direccion="carlos@gmail.com", origen="cuenta"
+    )
+    proveedor = construir_proveedor(fuente, "token-cuenta")
+    assert isinstance(proveedor, GmailClient)
+    proveedor.cerrar()
+
+
+def test_gmail_client_satisface_el_protocolo_estructuralmente() -> None:
+    fuente = _fuente(
+        id="cuenta-abc123", proveedor="google", direccion="carlos@gmail.com", origen="cuenta"
+    )
+    proveedor = construir_proveedor(fuente, "token-cuenta")
+    assert isinstance(proveedor, Proveedor)
+    proveedor.cerrar()

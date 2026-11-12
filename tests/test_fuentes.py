@@ -14,6 +14,7 @@ from duna_buzon.fuentes import (
     directorio_fuente,
     fuentes_activas,
     guardar_fuente,
+    id_fuente_cuenta,
     listar_fuentes,
     migrar_fuente_unica_si_necesario,
 )
@@ -42,6 +43,105 @@ def test_guardar_y_cargar_ida_y_vuelta(tmp_path: Path) -> None:
     guardar_fuente(str(tmp_path), _fuente())
     cargada = cargar_fuente(str(tmp_path), "hotmail-carlos")
     assert cargada == _fuente()
+
+
+def test_origen_por_defecto_es_local() -> None:
+    assert _fuente().origen == "local"
+
+
+def test_fuente_json_sin_campo_origen_se_lee_como_local(tmp_path: Path) -> None:
+    # A `fuente.json` written before BUZON-FUENTES-PULL-1 never had an
+    # `origen` key at all -- it must keep meaning exactly what it always
+    # meant.
+    ruta = tmp_path / "fuentes" / "hotmail-carlos"
+    ruta.mkdir(parents=True)
+    (ruta / "fuente.json").write_text(
+        json.dumps(
+            {
+                "proveedor": "microsoft",
+                "direccion": "carlos@hotmail.com",
+                "etiqueta": "Hotmail",
+                "token_finanzas_ref": "carlos",
+                "activa": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert cargar_fuente(str(tmp_path), "hotmail-carlos").origen == "local"
+
+
+def test_guardar_y_cargar_una_fuente_de_cuenta_ida_y_vuelta(tmp_path: Path) -> None:
+    fuente_cuenta = _fuente(
+        id="cuenta-abc123", proveedor="google", direccion="carlos@gmail.com", origen="cuenta"
+    )
+    guardar_fuente(str(tmp_path), fuente_cuenta)
+    assert cargar_fuente(str(tmp_path), "cuenta-abc123") == fuente_cuenta
+
+
+def test_id_fuente_cuenta_antepone_el_prefijo() -> None:
+    assert id_fuente_cuenta("abc123") == "cuenta-abc123"
+
+
+def test_cargar_fuente_origen_desconocido_se_rechaza(tmp_path: Path) -> None:
+    ruta = tmp_path / "fuentes" / "rara"
+    ruta.mkdir(parents=True)
+    (ruta / "fuente.json").write_text(
+        json.dumps(
+            {
+                "proveedor": "microsoft",
+                "direccion": "a@b.com",
+                "etiqueta": "x",
+                "token_finanzas_ref": "carlos",
+                "activa": True,
+                "origen": "remoto",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(FuenteInvalidaError):
+        cargar_fuente(str(tmp_path), "rara")
+
+
+def test_cargar_fuente_google_sin_origen_cuenta_se_rechaza(tmp_path: Path) -> None:
+    ruta = tmp_path / "fuentes" / "rara"
+    ruta.mkdir(parents=True)
+    (ruta / "fuente.json").write_text(
+        json.dumps(
+            {
+                "proveedor": "google",
+                "direccion": "a@b.com",
+                "etiqueta": "x",
+                "token_finanzas_ref": "carlos",
+                "activa": True,
+                "origen": "local",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(FuenteInvalidaError):
+        cargar_fuente(str(tmp_path), "rara")
+
+
+def test_cargar_fuente_imap_con_origen_cuenta_se_rechaza(tmp_path: Path) -> None:
+    ruta = tmp_path / "fuentes" / "rara"
+    ruta.mkdir(parents=True)
+    (ruta / "fuente.json").write_text(
+        json.dumps(
+            {
+                "proveedor": "imap",
+                "direccion": "a@b.com",
+                "etiqueta": "x",
+                "token_finanzas_ref": "carlos",
+                "activa": True,
+                "origen": "cuenta",
+                "host": "imap.zoho.com",
+                "port": 993,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(FuenteInvalidaError):
+        cargar_fuente(str(tmp_path), "rara")
 
 
 def test_archivo_de_fuente_es_modo_0600(tmp_path: Path, no_es_windows: None) -> None:

@@ -10,6 +10,20 @@ a future where more than one person's sources share this connector; today
 there is one person and one `FINANZAS_BUZON_TOKEN`, so every source's
 `fuente.json` carries the same ref and `FinanzasClient` keeps reading the
 token straight from `Config` (`BUZON-FUENTES-ESQUEMA-1`).
+
+`origen` (`BUZON-FUENTES-PULL-1`) tells `cli.py` where this source's own
+credential comes from: `"local"` (default, every source before this slice)
+means the usual `entrar`/`credencial.bin` dance this module's own sibling
+modules (`auth.py`, `credencial_imap.py`) already do; `"cuenta"` means this
+source's identity and a fresh access token are PULLED from Cuenta Duna
+every `sincronizar` pass (`cli.py`'s own `_pull_fuentes_cuenta`, against
+`cuenta.py`) -- such a source has NO `credencial.bin` at all, since its
+token is never written to disk, and its `fuente.json` is rewritten on every
+successful pull rather than written once by `agregar-fuente`. Only
+`"microsoft"` and `"google"` can ever be `origen="cuenta"` (the two
+providers Cuenta Duna's own wire names); only `"microsoft"` and `"imap"`
+can be `origen="local"` -- Carlos never signs this connector into a Google
+account directly, only through Cuenta Duna's OAuth.
 """
 
 from __future__ import annotations
@@ -25,12 +39,18 @@ NOMBRE_SUBDIRECTORIO = "fuentes"
 NOMBRE_ARCHIVO_FUENTE = "fuente.json"
 NOMBRE_ARCHIVO_CREDENCIAL = "credencial.bin"
 
-# "imap" is any generic IMAP mailbox (legal@duna.solutions on Zoho today,
-# Gmail later) -- the field accepts only these two spellings so a typo in
-# a hand-edited fuente.json is caught here, not three steps later as
-# "unknown provider".
-ProveedorId = Literal["microsoft", "imap"]
-_PROVEEDORES_VALIDOS = frozenset({"microsoft", "imap"})
+# "imap" is any generic IMAP mailbox (legal@duna.solutions on Zoho today);
+# "google" is Gmail, reached ONLY through a Cuenta Duna-pulled token
+# (origen="cuenta", never a local sign-in) -- the field accepts only these
+# three spellings so a typo in a hand-edited fuente.json is caught here,
+# not three steps later as "unknown provider".
+ProveedorId = Literal["microsoft", "imap", "google"]
+_PROVEEDORES_VALIDOS = frozenset({"microsoft", "imap", "google"})
+_PROVEEDORES_CUENTA = frozenset({"microsoft", "google"})
+_PROVEEDORES_LOCAL = frozenset({"microsoft", "imap"})
+
+OrigenFuente = Literal["local", "cuenta"]
+_ORIGENES_VALIDOS = frozenset({"local", "cuenta"})
 
 ID_FUENTE_MIGRADA = "hotmail-carlos"
 
@@ -52,6 +72,10 @@ class FuenteConfig:
     # Microsoft source, and required (validated below) for every IMAP one.
     host: str | None = None
     port: int | None = None
+    # See this module's own docstring. Defaults to "local" so every
+    # `fuente.json` written before this slice (no `origen` key at all)
+    # keeps meaning exactly what it always meant.
+    origen: OrigenFuente = "local"
 
     @property
     def etiqueta_registro(self) -> str:
@@ -97,6 +121,22 @@ def _fuente_desde_json(id_fuente: str, datos: dict) -> FuenteConfig:
             f"fuente.json for {id_fuente!r} carries a different 'id' inside it: {datos['id']!r}"
         )
 
+    origen = datos.get("origen", "local")
+    if origen not in _ORIGENES_VALIDOS:
+        raise FuenteInvalidaError(
+            f"fuente.json for {id_fuente!r} names an unknown origen: {origen!r}"
+        )
+    if origen == "cuenta" and proveedor not in _PROVEEDORES_CUENTA:
+        raise FuenteInvalidaError(
+            f"fuente.json for {id_fuente!r} has origen='cuenta' but proveedor {proveedor!r}, "
+            "which Cuenta Duna never returns"
+        )
+    if origen == "local" and proveedor not in _PROVEEDORES_LOCAL:
+        raise FuenteInvalidaError(
+            f"fuente.json for {id_fuente!r} names proveedor {proveedor!r}, which only ever "
+            "comes from Cuenta Duna (origen='cuenta')"
+        )
+
     host: str | None = None
     port: int | None = None
     if proveedor == "imap":
@@ -120,6 +160,7 @@ def _fuente_desde_json(id_fuente: str, datos: dict) -> FuenteConfig:
         activa=bool(activa),
         host=host,
         port=port,
+        origen=origen,
     )
 
 
@@ -149,6 +190,7 @@ def guardar_fuente(directorio_datos: str, fuente: FuenteConfig) -> None:
             "activa": fuente.activa,
             "host": fuente.host,
             "port": fuente.port,
+            "origen": fuente.origen,
         }
     ).encode("utf-8")
     cripto.escribir_archivo_sensible(ruta, contenido)
@@ -172,6 +214,15 @@ def listar_fuentes(directorio_datos: str) -> list[FuenteConfig]:
 
 def fuentes_activas(directorio_datos: str) -> list[FuenteConfig]:
     return [f for f in listar_fuentes(directorio_datos) if f.activa]
+
+
+def id_fuente_cuenta(id_cuenta: str) -> str:
+    """The local source id a Cuenta Duna source `id_cuenta` is kept under
+    (`fuentes/cuenta-<id_cuenta>/`) -- keyed by Cuenta Duna's own id, per
+    this slice's build instructions, so a revoked-then-reconnected source
+    resumes the SAME cursor and rules rather than starting over under a
+    different id."""
+    return f"cuenta-{id_cuenta}"
 
 
 def _direccion_desde_cache_msal(contenido: bytes) -> str:

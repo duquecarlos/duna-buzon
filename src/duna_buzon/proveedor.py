@@ -1,8 +1,9 @@
 """The provider interface every mailbox source implements -- list messages
 since a cursor, fetch one message's body and attachments, list an
 attachment's metadata before downloading it, close the underlying client.
-`GraphClient` (`graph.py`) and `ClienteImap` (`cliente_imap.py`) are both
-implementations, structurally, with no change to this shape for either.
+`GraphClient` (`graph.py`), `ClienteImap` (`cliente_imap.py`) and
+`GmailClient` (`gmail.py`) are all implementations, structurally, with no
+change to this shape for any of them.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import httpx
 
 from duna_buzon.cliente_imap import ClienteImap
 from duna_buzon.fuentes import FuenteConfig
+from duna_buzon.gmail import GmailClient
 from duna_buzon.graph import AdjuntoMetadata, GraphClient, MensajeCompleto, MensajeResumen
 
 
@@ -49,6 +51,8 @@ def construir_proveedor(
 ) -> Proveedor:
     if fuente.proveedor == "microsoft":
         return GraphClient(token, transport=transport)
+    if fuente.proveedor == "google":
+        return GmailClient(token, transport=transport)
     if fuente.proveedor == "imap":
         assert fuente.host is not None and fuente.port is not None
         return ClienteImap(
