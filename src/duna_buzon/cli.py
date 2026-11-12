@@ -23,6 +23,7 @@ from duna_buzon import auth, credencial_imap, cripto
 from duna_buzon import cursor as modulo_cursor
 from duna_buzon import fuentes as modulo_fuentes
 from duna_buzon import registro
+from duna_buzon.cliente_imap import ClienteImap, ClienteImapError
 from duna_buzon.config import Config
 from duna_buzon.cuenta import CuentaClient, CuentaPullError
 from duna_buzon.finanzas import FinanzasClient
@@ -316,6 +317,7 @@ def comando_agregar_fuente(
     puerto: int,
     token_finanzas: str,
     etiqueta: str | None,
+    carpetas: list[str] | None = None,
 ) -> int:
     """Writes a new `fuente.json` -- never signs in. `entrar --fuente
     <id>` is the next, separate step (build instructions for
@@ -341,7 +343,56 @@ def comando_agregar_fuente(
             activa=True,
             host=host,
             port=puerto,
+            carpetas=tuple(carpetas) if carpetas else None,
         ),
     )
     print(f"fuente {id_fuente!r} agregada: ejecute 'entrar --fuente {id_fuente}' para firmar.")
+    return 0
+
+
+def comando_carpetas(config: Config, id_fuente: str) -> int:
+    """Read-only: logs in to ONE imap source with its already-stored app
+    password and prints every folder the server's own `LIST` returns --
+    name, flags, and whether this source would read it today -- so the
+    operator can see, before the first sync, whether a shared mailbox like
+    Zoho's is exposed at all, and under what name. Never prints message
+    content, and never the credential (`BUZON-IMAP-CARPETAS-INCLUIDAS-1`)."""
+    _migrar_si_necesario(config)
+    todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
+    try:
+        fuente = next(f for f in todas if f.id == id_fuente)
+    except StopIteration:
+        print(f"error: no such source: {id_fuente}", file=sys.stderr)
+        return 1
+
+    if fuente.proveedor != "imap":
+        print(f"error: {id_fuente!r} is not an imap source", file=sys.stderr)
+        return 1
+
+    directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
+    try:
+        password = credencial_imap.obtener_credencial(config, directorio)
+    except (credencial_imap.SinCredencialError, cripto.ClaveInvalidaError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    assert fuente.host is not None and fuente.port is not None
+    cliente = ClienteImap(
+        host=fuente.host,
+        puerto=fuente.port,
+        usuario=fuente.direccion,
+        password=password,
+        carpetas=fuente.carpetas,
+    )
+    try:
+        listado = cliente.listar_carpetas_con_estado()
+    except ClienteImapError as exc:
+        print(f"error: imap {exc}", file=sys.stderr)
+        return 1
+    finally:
+        cliente.cerrar()
+
+    for nombre, banderas, incluida in listado:
+        banderas_txt = ",".join(banderas) if banderas else "-"
+        print(f"carpeta={nombre!r} banderas={banderas_txt} leida={'si' if incluida else 'no'}")
     return 0

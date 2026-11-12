@@ -6,7 +6,8 @@ Runs on duna-prod-1 as `duna`. Nothing is exposed to the internet.
 
 Created by Main (dev-protocol) on 2026-11-06, ORCH-BUZON-REPO-1. Built end to end by BUZON-CONECTOR-1; made
 multi-source by BUZON-FUENTES-ESQUEMA-1; gained a generic IMAP provider by BUZON-FUENTE-IMAP-1, widened from
-that provider's own `INBOX`-only start to every folder by BUZON-FUENTE-IMAP-CARPETAS-1; gained sources Carlos
+that provider's own `INBOX`-only start to every folder by BUZON-FUENTE-IMAP-CARPETAS-1, then narrowed back down
+to a named allow-list for the shared-mailbox case by BUZON-IMAP-CARPETAS-INCLUIDAS-1; gained sources Carlos
 (or, eventually, any user) connects through Cuenta Duna's own OAuth -- Gmail and Microsoft alike, with a
 fresh token pulled every pass, never stored here -- by BUZON-FUENTES-PULL-1. See `CLAUDE.md` for the gate and
 the invariants, `DECISIONS.md` for the ledger, and `deploy/host/README.md` for the operator steps.
@@ -20,7 +21,8 @@ Cuenta Duna-connected source, no stored credential at all), its own sync cursor,
 under `$BUZON_DATOS/fuentes/<id>/`:
 
 ```
-fuentes/<id>/fuente.json           -- {id, proveedor, direccion, etiqueta, token_finanzas_ref, activa, host, port, origen}
+fuentes/<id>/fuente.json           -- {id, proveedor, direccion, etiqueta, token_finanzas_ref, activa, host, port, origen,
+                                       carpetas}
 fuentes/<id>/credencial.bin        -- the signed-in account's own credential, AES-256-GCM encrypted (an MSAL token
                                        cache for "microsoft"; the app password itself for "imap") -- ABSENT for
                                        origen="cuenta" (see below): that source's token is never written to disk.
@@ -42,7 +44,8 @@ Cuenta Duna's own OAuth -- `microsoft` or `google` only; see "Cuenta Duna source
 every selectable folder, not only `INBOX` -- it skips a folder the server marks `\Trash`/`\Junk`/`\Sent`/`\Drafts`/
 `\All`, or, when the server says nothing about it, a folder named like one of those (`cliente_imap.py`), the same
 parity with the Microsoft source (which already reaches every folder via `/me/messages`) that
-`BUZON-FUENTE-IMAP-CARPETAS-1` closed. Every entry every source
+`BUZON-FUENTE-IMAP-CARPETAS-1` closed. An IMAP source can also be narrowed to only ONE of those folders, or a
+named few -- `carpetas` below. Every entry every source
 posts to Finanzas carries the wire's `fuente` field as the one constant value `"correo"` -- it is the CHANNEL, not
 a source's own identity, and Finanzas rejects anything else (`Literal["correo", "sms", "notificacion"]`,
 `src/duna_finanzas/web/buzon/schemas.py:37`). A source's own identity (`"<proveedor>:<id>"`,
@@ -75,8 +78,9 @@ source uses, just with a Cuenta Duna-pulled token instead of this connector's ow
 The commands:
 
 - `agregar-fuente imap --id <id> --direccion <direccion> --host <host> --token-finanzas <ref> [--port <puerto>]
-  [--etiqueta <etiqueta>]` -- writes a new IMAP source's `fuente.json` (`--port` defaults to 993). Never signs in --
-  `entrar --fuente <id>` is the separate next step.
+  [--etiqueta <etiqueta>] [--carpeta <nombre> ...]` -- writes a new IMAP source's `fuente.json` (`--port` defaults to
+  993). `--carpeta` is repeatable and sets `carpetas` (see below); omitted, the source reads every selectable folder,
+  today's behaviour exactly. Never signs in -- `entrar --fuente <id>` is the separate next step.
 - `entrar [--fuente <id>]` -- signs in to ONE LOCAL source. For a Microsoft source, by device code, in Carlos's own
   browser -- no password ever passes through this program. For an IMAP source, by reading its app password from
   STDIN with no echo (`getpass`, never a command-line argument) and verifying it with a real `LOGIN` before ever
@@ -90,6 +94,45 @@ The commands:
   source failed. Meant to run every 10 minutes under `duna-buzon.timer` on the host.
 - `estado` -- prints every source's own cursor and last-pass counts. Nothing personal.
 - `fuentes` -- lists every configured source (id, provider, address, label, active/inactive). No secrets.
+- `carpetas <id>` -- read-only, for ONE imap source: signs in with its already-stored app password and prints
+  every folder the server's `LIST` returns, with its flags and whether this source would read it today. Never
+  prints message content or the credential itself -- see "Narrowing an IMAP source to specific folders" below.
+
+### Narrowing an IMAP source to specific folders (BUZON-IMAP-CARPETAS-INCLUIDAS-1)
+
+A `fuente.json` for `proveedor == "imap"` can carry an optional `carpetas` list: when present, this source reads
+ONLY folders whose LIST name equals one of its entries or sits under one of them in the server's own hierarchy
+(`entrada` + the server's own delimiter + anything) -- still minus Trash/Junk/Sent/Drafts/All-Mail, which are
+never read regardless. Absent (the default, and every `fuente.json` written before this slice) means today's
+behaviour exactly: every selectable folder. A non-list or an empty list is rejected as an invalid source when it
+is loaded, not discovered later mid-sync.
+
+This exists for the shared-mailbox case: `legal@duna.solutions`, `hola@duna.solutions` and
+`soporte@duna.solutions` are not separate logins on Zoho -- they are SHARED MAILBOXES inside Carlos's own
+`carlos@duna.solutions` login. Reading them means signing in as `carlos@` over IMAP, and `carlos@`'s own personal
+folders (`INBOX`, `Sent`, whatever Carlos files privately) must never be read into the COMPANY's Finanzas just
+because the same login happens to see them too. Setting `carpetas` to the shared mailbox's own top folder keeps
+this source to exactly that:
+
+```
+agregar-fuente imap --id legal-duna --direccion carlos@duna.solutions --host imap.zoho.com \
+  --token-finanzas carlos --carpeta "Legal"
+```
+
+Before the first sync (or after changing `carpetas`), `carpetas legal-duna` shows exactly what Zoho exposes and
+under what name, without touching the cursor or sending anything to Finanzas:
+
+```
+$ uv run python -m duna_buzon carpetas legal-duna
+carpeta='INBOX' banderas=- leida=no
+carpeta='Legal' banderas=- leida=si
+carpeta='Legal/Facturas' banderas=- leida=si
+carpeta='Sent' banderas=\Sent leida=no
+```
+
+Changing `carpetas` on an existing source takes effect the next `sincronizar` pass: a folder's own stored cursor
+(`cursor_proveedor.json`) is kept exactly where it was while that folder stays included, and dropped the moment it
+is not -- never carried forward silently for a folder this source no longer reads.
 
 The FIRST time any command runs against a data directory still in the single-mailbox layout
 (`cache.bin`/`cursor.json`/`reglas.json`/`estado.json` directly under `$BUZON_DATOS`), it migrates itself

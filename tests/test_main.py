@@ -141,6 +141,7 @@ def test_agregar_fuente_imap_se_despacha_con_los_campos_requeridos(
         "puerto": 993,
         "token_finanzas": "carlos",
         "etiqueta": None,
+        "carpetas": None,
     }
 
 
@@ -179,6 +180,100 @@ def test_agregar_fuente_imap_acepta_puerto_y_etiqueta(
     )
     assert recibido[0]["puerto"] == 143
     assert recibido[0]["etiqueta"] == "Legal"
+
+
+def test_agregar_fuente_imap_acepta_carpeta_repetida(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[dict] = []
+    monkeypatch.setattr(
+        cli, "comando_agregar_fuente", lambda config, **kwargs: (recibido.append(kwargs), 0)[1]
+    )
+    assert (
+        main(
+            [
+                "agregar-fuente",
+                "imap",
+                "--id",
+                "legal-duna",
+                "--direccion",
+                "legal@duna.solutions",
+                "--host",
+                "imap.zoho.com",
+                "--token-finanzas",
+                "carlos",
+                "--carpeta",
+                "Legal",
+                "--carpeta",
+                "Compartidos/Facturas",
+            ]
+        )
+        == 0
+    )
+    assert recibido[0]["carpetas"] == ["Legal", "Compartidos/Facturas"]
+
+
+def test_agregar_fuente_sin_carpeta_pasa_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[dict] = []
+    monkeypatch.setattr(
+        cli, "comando_agregar_fuente", lambda config, **kwargs: (recibido.append(kwargs), 0)[1]
+    )
+    assert (
+        main(
+            [
+                "agregar-fuente",
+                "imap",
+                "--id",
+                "legal-duna",
+                "--direccion",
+                "legal@duna.solutions",
+                "--host",
+                "imap.zoho.com",
+                "--token-finanzas",
+                "carlos",
+            ]
+        )
+        == 0
+    )
+    assert recibido[0]["carpetas"] is None
+
+
+def test_carpetas_sin_id_es_uso_incorrecto(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["carpetas"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_carpetas_con_argumento_extra_es_uso_incorrecto(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["carpetas", "legal-duna", "algo-mas"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_carpetas_se_despacha_con_el_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[tuple[Config, str]] = []
+    monkeypatch.setattr(
+        cli, "comando_carpetas", lambda config, id_fuente: (recibido.append((config, id_fuente)), 0)[1]
+    )
+    assert main(["carpetas", "legal-duna"]) == 0
+    assert recibido[0][1] == "legal-duna"
 
 
 def test_agregar_fuente_sin_campo_requerido_es_uso_incorrecto(

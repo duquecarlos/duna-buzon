@@ -36,6 +36,7 @@ def _escribir_fuente(
     activa: bool = True,
     host: str | None = None,
     port: int | None = None,
+    carpetas: tuple[str, ...] | None = None,
 ) -> Path:
     if proveedor == "imap":
         host = host or "imap.zoho.com"
@@ -51,6 +52,7 @@ def _escribir_fuente(
             activa=activa,
             host=host,
             port=port,
+            carpetas=carpetas,
         ),
     )
     return tmp_path / "fuentes" / id
@@ -442,6 +444,29 @@ def test_agregar_fuente_imap_escribe_fuente_json_sin_firmar(tmp_path: Path) -> N
     assert not (tmp_path / "fuentes" / "legal-duna" / "credencial.bin").exists()
 
 
+def test_agregar_fuente_imap_con_carpetas_las_guarda(tmp_path: Path) -> None:
+    from duna_buzon.fuentes import cargar_fuente
+
+    config = _config(tmp_path)
+    assert (
+        cli.comando_agregar_fuente(
+            config,
+            proveedor="imap",
+            id_fuente="legal-duna",
+            direccion="legal@duna.solutions",
+            host="imap.zoho.com",
+            puerto=993,
+            token_finanzas="carlos",
+            etiqueta=None,
+            carpetas=["Legal", "Compartidos/Facturas"],
+        )
+        == 0
+    )
+
+    fuente = cargar_fuente(str(tmp_path), "legal-duna")
+    assert fuente.carpetas == ("Legal", "Compartidos/Facturas")
+
+
 def test_agregar_fuente_con_id_repetido_es_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -482,6 +507,103 @@ def test_agregar_fuente_proveedor_no_imap_es_error(
         == 1
     )
     assert "microsoft" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# `carpetas <id>` (BUZON-IMAP-CARPETAS-INCLUIDAS-1)
+# ---------------------------------------------------------------------------
+
+
+def test_comando_carpetas_sin_filtro_marca_todo_lo_no_excluido(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.cliente_imap import ClienteImap
+
+    from .test_cliente_imap import _CarpetaFalsa, _ServidorImapFalso, _conectar_a
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(
+        tmp_path, id="legal-duna", proveedor="imap", direccion="legal@duna.solutions"
+    )
+    cripto.escribir_archivo_sensible(
+        directorio / "credencial.bin", cripto.cifrar(b"app-password", config.clave_cifrado)
+    )
+
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={})
+    legal = _CarpetaFalsa(nombre="Legal", mensajes={})
+    trash = _CarpetaFalsa(nombre="Trash", banderas=("\\Trash",), mensajes={})
+    with _ServidorImapFalso(carpetas=[inbox, legal, trash]) as servidor:
+        monkeypatch.setattr(
+            cli,
+            "ClienteImap",
+            lambda **kwargs: ClienteImap(**{**kwargs, "construir_conexion": _conectar_a(servidor)}),
+        )
+        assert cli.comando_carpetas(config, "legal-duna") == 0
+
+    salida = capsys.readouterr().out
+    assert "carpeta='INBOX' banderas=- leida=si" in salida
+    assert "carpeta='Legal' banderas=- leida=si" in salida
+    assert "carpeta='Trash' banderas=\\Trash leida=no" in salida
+
+
+def test_comando_carpetas_con_filtro_marca_solo_las_incluidas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.cliente_imap import ClienteImap
+
+    from .test_cliente_imap import _CarpetaFalsa, _ServidorImapFalso, _conectar_a
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(
+        tmp_path,
+        id="legal-duna",
+        proveedor="imap",
+        direccion="legal@duna.solutions",
+        carpetas=("Legal",),
+    )
+    cripto.escribir_archivo_sensible(
+        directorio / "credencial.bin", cripto.cifrar(b"app-password", config.clave_cifrado)
+    )
+
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={})
+    legal = _CarpetaFalsa(nombre="Legal", mensajes={})
+    with _ServidorImapFalso(carpetas=[inbox, legal]) as servidor:
+        monkeypatch.setattr(
+            cli,
+            "ClienteImap",
+            lambda **kwargs: ClienteImap(**{**kwargs, "construir_conexion": _conectar_a(servidor)}),
+        )
+        assert cli.comando_carpetas(config, "legal-duna") == 0
+
+    salida = capsys.readouterr().out
+    assert "carpeta='INBOX' banderas=- leida=no" in salida
+    assert "carpeta='Legal' banderas=- leida=si" in salida
+
+
+def test_comando_carpetas_id_desconocido_es_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    assert cli.comando_carpetas(config, "no-existe") == 1
+    assert "no-existe" in capsys.readouterr().err
+
+
+def test_comando_carpetas_fuente_no_imap_es_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+    assert cli.comando_carpetas(config, "hotmail-carlos") == 1
+    assert "not an imap source" in capsys.readouterr().err
+
+
+def test_comando_carpetas_sin_credencial_es_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="legal-duna", proveedor="imap", direccion="legal@duna.solutions")
+    assert cli.comando_carpetas(config, "legal-duna") == 1
+    assert "entrar" in capsys.readouterr().err
 
 
 def test_migracion_automatica_desde_sincronizar(

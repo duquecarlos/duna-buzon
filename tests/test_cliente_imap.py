@@ -168,7 +168,9 @@ class _ServidorImapFalso:
         uidnext: int | None = None,
         fallar_login: bool = False,
         carpetas: list[_CarpetaFalsa] | None = None,
+        delimitador: str = "/",
     ) -> None:
+        self._delimitador = delimitador
         if carpetas is None:
             carpetas = [
                 _CarpetaFalsa(
@@ -241,7 +243,7 @@ class _ServidorImapFalso:
                 elif comando == "LIST":
                     for carpeta in self.carpetas.values():
                         banderas_str = " ".join(carpeta.banderas)
-                        enviar_texto(f'* LIST ({banderas_str}) "/" "{carpeta.nombre}"')
+                        enviar_texto(f'* LIST ({banderas_str}) "{self._delimitador}" "{carpeta.nombre}"')
                     enviar_texto(f"{tag} OK LIST completed")
                 elif comando in ("EXAMINE", "SELECT"):
                     nombre_carpeta = _desentrecomillar(resto2)
@@ -377,13 +379,19 @@ def _conectar_a(servidor: _ServidorImapFalso):
     return construir
 
 
-def _cliente(servidor: _ServidorImapFalso, *, cursor_proveedor_inicial: str | None = None) -> ClienteImap:
+def _cliente(
+    servidor: _ServidorImapFalso,
+    *,
+    cursor_proveedor_inicial: str | None = None,
+    carpetas: list[str] | None = None,
+) -> ClienteImap:
     return ClienteImap(
         host=servidor.host,
         puerto=servidor.puerto,
         usuario="legal@duna.solutions",
         password="app-password",
         cursor_proveedor_inicial=cursor_proveedor_inicial,
+        carpetas=carpetas,
         construir_conexion=_conectar_a(servidor),
     )
 
@@ -728,6 +736,162 @@ def test_dos_carpetas_mismo_uid_no_colisionan_en_internet_message_id() -> None:
         cliente.cerrar()
 
     assert len({m.internet_message_id for m in resultado}) == 2
+
+
+# ---------------------------------------------------------------------------
+# `carpetas` narrowing (BUZON-IMAP-CARPETAS-INCLUIDAS-1): a shared-mailbox
+# IMAP source reads ONLY the folders its own `fuente.json` names, never the
+# signed-in account's own personal folders alongside them.
+# ---------------------------------------------------------------------------
+
+
+def test_sin_carpetas_configuradas_lee_todo_lo_no_excluido() -> None:
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={1: _mensaje_simple(1, asunto="personal")})
+    legal = _CarpetaFalsa(nombre="Legal", mensajes={1: _mensaje_simple(1, asunto="compartida")})
+    with _ServidorImapFalso(carpetas=[inbox, legal]) as servidor:
+        cliente = _cliente(servidor, carpetas=None)
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"personal", "compartida"}
+
+
+def test_carpetas_con_coincidencia_exacta() -> None:
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={1: _mensaje_simple(1, asunto="personal, nunca debe aparecer")})
+    legal = _CarpetaFalsa(nombre="Legal", mensajes={1: _mensaje_simple(1, asunto="debe aparecer")})
+    with _ServidorImapFalso(carpetas=[inbox, legal]) as servidor:
+        cliente = _cliente(servidor, carpetas=["Legal"])
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"debe aparecer"}
+    comandos_examine = [c for c in servidor.comandos if "EXAMINE" in c]
+    assert any('"Legal"' in c for c in comandos_examine)
+    assert not any('"INBOX"' in c for c in comandos_examine)
+
+
+def test_carpetas_anidada_con_delimitador_barra() -> None:
+    legal = _CarpetaFalsa(nombre="Legal", mensajes={})
+    legal_facturas = _CarpetaFalsa(
+        nombre="Legal/Facturas", mensajes={1: _mensaje_simple(1, asunto="debe aparecer")}
+    )
+    otra = _CarpetaFalsa(nombre="Otra", mensajes={1: _mensaje_simple(1, asunto="nunca debe aparecer")})
+    with _ServidorImapFalso(carpetas=[legal, legal_facturas, otra], delimitador="/") as servidor:
+        cliente = _cliente(servidor, carpetas=["Legal"])
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"debe aparecer"}
+    comandos_examine = [c for c in servidor.comandos if "EXAMINE" in c]
+    assert any('"Legal/Facturas"' in c for c in comandos_examine)
+    assert any('"Legal"' in c for c in comandos_examine)
+    assert not any('"Otra"' in c for c in comandos_examine)
+
+
+def test_carpetas_anidada_con_delimitador_punto() -> None:
+    legal_facturas = _CarpetaFalsa(
+        nombre="Legal.Facturas", mensajes={1: _mensaje_simple(1, asunto="debe aparecer")}
+    )
+    otra = _CarpetaFalsa(nombre="Otra", mensajes={1: _mensaje_simple(1, asunto="nunca debe aparecer")})
+    with _ServidorImapFalso(carpetas=[legal_facturas, otra], delimitador=".") as servidor:
+        cliente = _cliente(servidor, carpetas=["Legal"])
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"debe aparecer"}
+    comandos_examine = [c for c in servidor.comandos if "EXAMINE" in c]
+    assert any('"Legal.Facturas"' in c for c in comandos_examine)
+
+
+def test_carpetas_un_nombre_que_solo_empieza_igual_nunca_coincide() -> None:
+    # "Legales" must never be mistaken for a child of "Legal" -- without
+    # the delimiter boundary, a bare prefix match would wrongly include it.
+    legal = _CarpetaFalsa(nombre="Legal", mensajes={1: _mensaje_simple(1, asunto="debe aparecer")})
+    legales = _CarpetaFalsa(nombre="Legales", mensajes={1: _mensaje_simple(1, asunto="nunca debe aparecer")})
+    with _ServidorImapFalso(carpetas=[legal, legales]) as servidor:
+        cliente = _cliente(servidor, carpetas=["Legal"])
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"debe aparecer"}
+    comandos_examine = [c for c in servidor.comandos if "EXAMINE" in c]
+    assert not any('"Legales"' in c for c in comandos_examine)
+
+
+def test_carpetas_excluida_por_special_use_nunca_se_incluye_aunque_coincida_el_nombre() -> None:
+    # The exclusion rules apply FIRST -- `carpetas` can only narrow further,
+    # never pull a Trash/Junk/Sent/Drafts/All-Mail folder back in.
+    trash = _CarpetaFalsa(
+        nombre="Legal", banderas=("\\Trash",), mensajes={1: _mensaje_simple(1, asunto="nunca debe aparecer")}
+    )
+    with _ServidorImapFalso(carpetas=[trash]) as servidor:
+        cliente = _cliente(servidor, carpetas=["Legal"])
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert resultado == []
+    assert not any('"Legal"' in c for c in servidor.comandos if "EXAMINE" in c)
+
+
+def test_listar_carpetas_con_estado_marca_cada_carpeta() -> None:
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={1: _mensaje_simple(1)})
+    legal = _CarpetaFalsa(nombre="Legal", mensajes={})
+    trash = _CarpetaFalsa(nombre="Trash", banderas=("\\Trash",), mensajes={})
+    with _ServidorImapFalso(carpetas=[inbox, legal, trash]) as servidor:
+        cliente = _cliente(servidor, carpetas=["Legal"])
+        listado = cliente.listar_carpetas_con_estado()
+        cliente.cerrar()
+
+    assert listado == [
+        ("INBOX", (), False),
+        ("Legal", (), True),
+        ("Trash", ("\\Trash",), False),
+    ]
+
+
+def test_listar_carpetas_con_estado_sin_carpetas_configuradas_incluye_todo_lo_no_excluido() -> None:
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={})
+    trash = _CarpetaFalsa(nombre="Trash", banderas=("\\Trash",), mensajes={})
+    with _ServidorImapFalso(carpetas=[inbox, trash]) as servidor:
+        cliente = _cliente(servidor, carpetas=None)
+        listado = cliente.listar_carpetas_con_estado()
+        cliente.cerrar()
+
+    assert listado == [("INBOX", (), True), ("Trash", ("\\Trash",), False)]
+
+
+def test_listar_carpetas_con_estado_nunca_examina_ni_escribe() -> None:
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={1: _mensaje_simple(1)})
+    with _ServidorImapFalso(carpetas=[inbox]) as servidor:
+        cliente = _cliente(servidor)
+        cliente.listar_carpetas_con_estado()
+        cliente.cerrar()
+
+    verbos = [c.partition(" ")[2].split(" ")[0].upper() for c in servidor.comandos]
+    assert "LIST" in verbos
+    for prohibido in ("EXAMINE", "SELECT", "STORE", "COPY", "MOVE", "EXPUNGE", "FETCH"):
+        assert prohibido not in verbos
+
+
+def test_cursor_se_recorta_a_las_carpetas_que_siguen_incluidas() -> None:
+    # A source that used to read INBOX and Legal now only reads Legal --
+    # INBOX's stored cursor must be dropped, not carried forward forever.
+    legal = _CarpetaFalsa(
+        nombre="Legal",
+        mensajes={5: _mensaje_simple(5, internaldate="02-Mar-2026 10:00:00 +0000")},
+        uidvalidity=2000,
+        uidnext=6,
+    )
+    cursor_inicial = json.dumps({"INBOX": "1000:1", "Legal": "2000:4"})
+    with _ServidorImapFalso(carpetas=[legal]) as servidor:
+        cliente = _cliente(servidor, cursor_proveedor_inicial=cursor_inicial, carpetas=["Legal"])
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.id for m in resultado} == {"5"}
+    cursor_final = json.loads(resultado[-1].cursor_proveedor)
+    assert cursor_final == {"Legal": "2000:5"}
+    assert "INBOX" not in cursor_final
 
 
 # ---------------------------------------------------------------------------
