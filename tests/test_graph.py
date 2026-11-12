@@ -6,6 +6,7 @@ import datetime
 import httpx
 import pytest
 
+from duna_buzon import temporizadores
 from duna_buzon.graph import (
     AdjuntoMetadata,
     GraphAutenticacionError,
@@ -139,14 +140,25 @@ def test_graph_500_lanza_error_transitorio() -> None:
 
 
 def test_error_de_conexion_lanza_error_transitorio() -> None:
+    llamadas = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal llamadas
+        llamadas += 1
         raise httpx.ConnectError("no se pudo conectar")
 
-    cliente = _cliente_con(handler)
+    transporte = httpx.MockTransport(handler)
+    dormidas: list[float] = []
+    cliente = GraphClient("token-falso", transport=transporte, dormir=dormidas.append)
     with pytest.raises(GraphErrorTransitorio) as excinfo:
         list(cliente.listar_mensajes(_DESDE))
     cliente.cerrar()
     assert excinfo.value.motivo == "graph listar error=ConnectError"
+    # BUZON-GRAPH-TIMEOUT-1 -- a transport failure is retried twice (three
+    # attempts total) before this raises.
+    assert llamadas == 3
+    assert dormidas == [1.0, 4.0]
+    assert cliente.reintentos_usados == 2
 
 
 def test_graph_error_en_adjuntos_nombra_el_paso() -> None:
@@ -435,3 +447,129 @@ def test_obtener_mensaje_completo_funciona_contra_el_fake_realista() -> None:
     completo = cliente.obtener_mensaje_completo("m1", [])
     cliente.cerrar()
     assert completo.cuerpo_html == "<p>cuerpo</p>"
+
+
+# ---------------------------------------------------------------------------
+# BUZON-GRAPH-TIMEOUT-1 -- explicit timeouts, and retrying the transient
+# class only (a transport failure, or 429/503) inside the same pass.
+# ---------------------------------------------------------------------------
+
+
+def test_el_cliente_usa_el_timeout_explicito_compartido() -> None:
+    cliente = _cliente_con(lambda request: httpx.Response(200, json={"value": []}))
+    try:
+        assert cliente._cliente.timeout == temporizadores.TIMEOUT_HTTPX
+    finally:
+        cliente.cerrar()
+
+
+def test_timeout_se_reintenta_y_despues_tiene_exito() -> None:
+    llamadas = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 1:
+            raise httpx.ReadTimeout("timeout")
+        return httpx.Response(200, json={"value": [_mensaje_json("m1")]})
+
+    dormidas: list[float] = []
+    cliente = GraphClient(
+        "token-falso", transport=httpx.MockTransport(handler), dormir=dormidas.append
+    )
+    mensajes = list(cliente.listar_mensajes(_DESDE))
+    cliente.cerrar()
+
+    assert [m.id for m in mensajes] == ["m1"]
+    assert llamadas == 2
+    assert dormidas == [1.0]
+    assert cliente.reintentos_usados == 1
+
+
+def test_timeout_persistente_x3_agota_los_reintentos_y_lanza() -> None:
+    llamadas = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal llamadas
+        llamadas += 1
+        raise httpx.ReadTimeout("timeout")
+
+    dormidas: list[float] = []
+    cliente = GraphClient(
+        "token-falso", transport=httpx.MockTransport(handler), dormir=dormidas.append
+    )
+    with pytest.raises(GraphErrorTransitorio) as excinfo:
+        list(cliente.listar_mensajes(_DESDE))
+    cliente.cerrar()
+
+    # The original attempt plus the two allowed retries -- never a fourth.
+    assert llamadas == 3
+    assert dormidas == [1.0, 4.0]
+    assert cliente.reintentos_usados == 2
+    assert excinfo.value.motivo == "graph listar error=ReadTimeout"
+
+
+def test_429_respeta_retry_after_acotado_a_30s() -> None:
+    llamadas = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 1:
+            return httpx.Response(429, headers={"Retry-After": "90"})
+        return httpx.Response(200, json={"value": []})
+
+    dormidas: list[float] = []
+    cliente = GraphClient(
+        "token-falso", transport=httpx.MockTransport(handler), dormir=dormidas.append
+    )
+    list(cliente.listar_mensajes(_DESDE))
+    cliente.cerrar()
+
+    assert llamadas == 2
+    # The server asked for 90s; this client never waits more than 30.
+    assert dormidas == [30.0]
+    assert cliente.reintentos_usados == 1
+
+
+def test_503_sin_retry_after_usa_el_backoff_por_defecto() -> None:
+    llamadas = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 1:
+            return httpx.Response(503, text="no disponible")
+        return httpx.Response(200, json={"value": []})
+
+    dormidas: list[float] = []
+    cliente = GraphClient(
+        "token-falso", transport=httpx.MockTransport(handler), dormir=dormidas.append
+    )
+    list(cliente.listar_mensajes(_DESDE))
+    cliente.cerrar()
+
+    assert llamadas == 2
+    assert dormidas == [1.0]
+
+
+def test_500_nunca_se_reintenta() -> None:
+    """500 is NOT in the retried class -- only a transport failure or
+    429/503 are. A single call, exactly like before this slice."""
+    llamadas = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal llamadas
+        llamadas += 1
+        return httpx.Response(500, text="boom")
+
+    dormidas: list[float] = []
+    cliente = GraphClient(
+        "token-falso", transport=httpx.MockTransport(handler), dormir=dormidas.append
+    )
+    with pytest.raises(GraphErrorTransitorio):
+        list(cliente.listar_mensajes(_DESDE))
+    cliente.cerrar()
+
+    assert llamadas == 1
+    assert dormidas == []

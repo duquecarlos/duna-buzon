@@ -958,3 +958,33 @@ def test_mensaje_sin_adjuntos_satisface_metadata_vacia() -> None:
     assert metadatos == []
     assert completo.cuerpo_html == "hola mundo"
     assert completo.adjuntos == ()
+
+
+# ---------------------------------------------------------------------------
+# BUZON-GRAPH-TIMEOUT-1 -- the production connection builder names an
+# explicit socket timeout, never imaplib's own default (none at all).
+# ---------------------------------------------------------------------------
+
+
+def test_conexion_ssl_real_usa_el_timeout_explicito(monkeypatch: pytest.MonkeyPatch) -> None:
+    import imaplib
+
+    from duna_buzon import temporizadores
+    from duna_buzon.cliente_imap import _construir_conexion_ssl_real
+
+    capturado: dict[str, object] = {}
+
+    class _FalsoIMAP4SSL:
+        def __init__(self, host: str, puerto: int, timeout: float | None = None) -> None:
+            capturado["host"] = host
+            capturado["puerto"] = puerto
+            capturado["timeout"] = timeout
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", _FalsoIMAP4SSL)
+    _construir_conexion_ssl_real("imap.zoho.com", 993)
+
+    assert capturado == {
+        "host": "imap.zoho.com",
+        "puerto": 993,
+        "timeout": temporizadores.TIMEOUT_IMAP_SEGUNDOS,
+    }

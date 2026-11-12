@@ -45,6 +45,7 @@ from typing import Any
 
 import httpx
 
+from duna_buzon import temporizadores
 from duna_buzon.graph import AdjuntoDescargado, AdjuntoMetadata, MensajeCompleto, MensajeResumen
 from duna_buzon.proveedor_errores import ProveedorAutenticacionError, ProveedorErrorTransitorio
 
@@ -191,7 +192,10 @@ def _mensaje_resumen_desde_json(mensaje_json: dict, hojas: Sequence[_ParteGmail]
 class GmailClient:
     def __init__(self, token: str, *, transport: httpx.BaseTransport | None = None) -> None:
         self._cliente = httpx.Client(
-            base_url=URL_BASE, transport=transport, headers={"Authorization": f"Bearer {token}"}
+            base_url=URL_BASE,
+            transport=transport,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=temporizadores.TIMEOUT_HTTPX,
         )
         self._cache: dict[str, tuple[dict, list[_ParteGmail]]] = {}
 

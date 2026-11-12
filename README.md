@@ -31,7 +31,8 @@ fuentes/<id>/cursor_proveedor.json -- this source's own provider-defined resume 
                                        JSON object mapping folder name to that folder's own
                                        "<uidvalidity>:<uid>" pair; absent for Microsoft and Google)
 fuentes/<id>/reglas.json           -- this source's own matching rules (never committed; see `reglas.py`)
-fuentes/<id>/estado.json           -- this source's own last-pass summary line
+fuentes/<id>/estado.json           -- this source's own last-pass summary line: counts, when that pass
+                                       finished, and how many Graph retries it used
 ```
 
 `host`/`port` are only set for `proveedor == "imap"` (`None` otherwise).
@@ -91,8 +92,13 @@ The commands:
   source, independently: pulls new mail, decides which messages match that source's own rules, builds and POSTs
   the matches to Finanzas, advances that source's own cursor past whatever finished. One source failing (expired
   auth, a network error) logs its id and stop reason and does not stop the others; the pass exits non-zero if any
-  source failed. Meant to run every 10 minutes under `duna-buzon.timer` on the host.
-- `estado` -- prints every source's own cursor and last-pass counts. Nothing personal.
+  source failed. Meant to run every 10 minutes under `duna-buzon.timer` on the host. Every outbound call (Graph,
+  Gmail, Finanzas, Cuenta Duna, IMAP) carries an explicit timeout (`temporizadores.py`) instead of relying on a
+  library default; a Graph call that times out, or Graph answering 429/503, is retried up to twice inside the same
+  pass (1s then 4s backoff, honouring `Retry-After` up to 30s) before the pass stops the way it always has
+  (BUZON-GRAPH-TIMEOUT-1).
+- `estado` -- prints every source's own cursor and last-pass counts, when that pass finished, and how many Graph
+  retries it used. Nothing personal.
 - `fuentes` -- lists every configured source (id, provider, address, label, active/inactive). No secrets.
 - `carpetas <id>` -- read-only, for ONE imap source: signs in with its already-stored app password and prints
   every folder the server's `LIST` returns, with its flags and whether this source would read it today. Never

@@ -6,6 +6,7 @@ import json
 import httpx
 import pytest
 
+from duna_buzon import temporizadores
 from duna_buzon.config import Config
 from duna_buzon.finanzas import FinanzasClient, MetaEntrada
 
@@ -183,3 +184,11 @@ def test_error_de_conexion_es_retry(tmp_path) -> None:
     cliente.cerrar()
     assert resultado.estado == "retry"
     assert resultado.clase_excepcion == "ConnectError"
+
+
+def test_el_cliente_usa_el_timeout_explicito_compartido(tmp_path) -> None:
+    cliente = _cliente_con(lambda request: httpx.Response(201, json={}), tmp_path)
+    try:
+        assert cliente._cliente.timeout == temporizadores.TIMEOUT_HTTPX
+    finally:
+        cliente.cerrar()

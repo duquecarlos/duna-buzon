@@ -25,6 +25,8 @@ from typing import Literal
 
 import httpx
 
+from duna_buzon import temporizadores
+
 RUTA_SERVICIO_FUENTES = "/servicio/fuentes/{sub}"
 
 ProveedorCuenta = Literal["google", "microsoft"]
@@ -83,7 +85,10 @@ class CuentaClient:
     ) -> None:
         self._sub = sub
         self._cliente = httpx.Client(
-            base_url=url_base, transport=transport, auth=(client_id, client_secret)
+            base_url=url_base,
+            transport=transport,
+            auth=(client_id, client_secret),
+            timeout=temporizadores.TIMEOUT_HTTPX,
         )
 
     def cerrar(self) -> None:

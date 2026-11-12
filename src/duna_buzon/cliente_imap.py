@@ -81,6 +81,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from duna_buzon import temporizadores
 from duna_buzon.graph import AdjuntoDescargado, AdjuntoMetadata, MensajeCompleto, MensajeResumen
 from duna_buzon.proveedor_errores import ProveedorAutenticacionError, ProveedorErrorTransitorio
 
@@ -183,7 +184,9 @@ class ConexionImapProtocolo(Protocol):
 def _construir_conexion_ssl_real(host: str, puerto: int) -> ConexionImapProtocolo:
     import imaplib
 
-    return imaplib.IMAP4_SSL(host, puerto)
+    # BUZON-GRAPH-TIMEOUT-1 -- explicit, never imaplib's own default (no
+    # timeout at all, i.e. a socket that can block forever).
+    return imaplib.IMAP4_SSL(host, puerto, timeout=temporizadores.TIMEOUT_IMAP_SEGUNDOS)
 
 
 # ---------------------------------------------------------------------------
