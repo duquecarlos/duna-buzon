@@ -68,6 +68,9 @@ sudo -n /usr/local/sbin/duna-deploy-buzon status
 sudo -n /usr/local/sbin/duna-deploy-buzon deploy [--dry-run]
 sudo -n /usr/local/sbin/duna-deploy-buzon entrar
 sudo -n /usr/local/sbin/duna-deploy-buzon rollback-script
+sudo -n /usr/local/sbin/duna-deploy-buzon carpetas <id>
+sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> <carpeta>...
+sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> --todas
 ```
 
 `status` is read-only: the owner's own `git` HEAD, both units' `systemctl is-active`, and a health run
@@ -78,7 +81,9 @@ service`/`duna-buzon.timer`, enables the timer, and finishes with the same healt
 the one subcommand for CARLOS HIMSELF, run directly in his own SSH terminal (never through an automated,
 no-tty session): it signs in interactively and prints Microsoft's own device-code URL to that terminal.
 `rollback-script` restores this entry script and its sudoers fragment from the `.prev` copies
-autoactualizar kept, undoing its most recent install.
+autoactualizar kept, undoing its most recent install. `carpetas <id>` and `fijar-carpetas <id> ...` are
+`BUZON-CARPETAS-MICROSOFT-CLI-1`'s operator tooling over an existing source's `carpetas` setting -- see
+"Choosing and setting `carpetas`" below.
 
 ## Operator steps (first deploy, by Carlos)
 
@@ -187,25 +192,44 @@ tried, next to `parada=graph listar http=<code>`). This handles a mailbox that i
 momentarily unavailable on its own.
 
 If a mailbox keeps failing even at `$top=1` -- Graph genuinely cannot answer `/me/messages` as a whole
-for it, as happened against `hotmail-carlos`'s own full mailbox -- add an optional `carpetas` array to
-that source's `fuentes/<id>/fuente.json`, the same field `agregar-fuente imap` already supports, now also
-read for `proveedor: "microsoft"`:
+for it, as happened against `hotmail-carlos`'s own full mailbox -- narrow that source to specific
+folders with the `carpetas` setting on `fuentes/<id>/fuente.json`, the same field `agregar-fuente imap`
+already supports, now also read for `proveedor: "microsoft"`. Each entry is whatever Graph itself
+accepts as a mail folder: a well-known name (`inbox`, `archive`, `sentitems`, ...) or a folder id. The
+connector then reads each named folder on its own, in the order given, via `/me/mailFolders/{carpeta}/
+messages` instead of one `/me/messages` call across the whole mailbox -- a much cheaper query for Graph
+to answer. Leaving `carpetas` out (the default, and every Microsoft `fuente.json` before this slice)
+keeps today's behaviour exactly: one `/me/messages` call reaching every folder.
 
-```json
-{
-  "...": "...",
-  "carpetas": ["inbox"]
-}
+## Choosing and setting `carpetas` (BUZON-CARPETAS-MICROSOFT-CLI-1)
+
+As of this slice there is a CLI for `carpetas`, for an EXISTING imap or microsoft source, so nobody
+needs to edit `fuente.json` by hand as `duna` any more:
+
+```
+sudo -n /usr/local/sbin/duna-deploy-buzon carpetas <id>
 ```
 
-Each entry is whatever Graph itself accepts as a mail folder: a well-known name (`inbox`, `archive`,
-`sentitems`, ...) or a folder id. The connector then reads each named folder on its own, in the order
-given, via `/me/mailFolders/{carpeta}/messages` instead of one `/me/messages` call across the whole
-mailbox -- a much cheaper query for Graph to answer. There is no CLI for this on a Microsoft source
-today (unlike `agregar-fuente imap`'s own `--carpeta`): edit `fuente.json` by hand, as `duna`, and restart
-the next scheduled pass (or run one by hand with `systemd-run`, as in `status`'s own health check).
-Leaving `carpetas` out (the default, and every Microsoft `fuente.json` before this slice) keeps today's
-behaviour exactly: one `/me/messages` call reaching every folder.
+Read-only, and never prints the credential: for an `imap` source this runs `python -m duna_buzon
+carpetas <id>` (the server's own `LIST`, with flags and whether this source would read each folder
+today); for a `microsoft` source it runs `python -m duna_buzon carpetas-graph <id>` (every top-level
+Graph mail folder's display name, id, and well-known name where one applies). Use its output to pick
+the folder names (or ids) to narrow the source to, then:
+
+```
+sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> <carpeta>...
+sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> --todas
+```
+
+The first form SETS `carpetas` to exactly the folders listed (each one its own argument -- never typed
+as a single comma-joined string); the second REMOVES `carpetas` entirely, back to today's behaviour
+(every folder in one call/LIST). Both run as `duna`, write `fuente.json` atomically, print the before
+and after lists, validate the source id exists first, and never touch `credencial.bin` or the cursor.
+Takes effect on the next scheduled pass, or run one by hand with `systemd-run` as in `status`'s own
+health check. A source id is `[a-z0-9-]+` and a folder name is `[A-Za-z0-9_ .-]+` or a Graph id -- a
+folder name outside that shape (for instance an IMAP folder path with a `/` in it) needs `python -m
+duna_buzon fijar-carpetas` run directly as `duna`, bypassing this root-owned wrapper's narrower
+allowlist.
 
 ## Trust boundary
 

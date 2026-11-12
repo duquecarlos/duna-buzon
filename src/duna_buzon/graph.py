@@ -54,6 +54,12 @@ handling) -- this only changes WHERE the request points. `None` (the
 default, and every source before this slice) means today's behaviour
 exactly: `/me/messages`, reaching every folder in one call, byte for byte
 the same request this client has always sent.
+
+BUZON-CARPETAS-MICROSOFT-CLI-1: `listar_carpetas` is a separate, read-only
+operator helper (`cli.py`'s `carpetas-graph <id>`) -- every top-level mail
+folder's display name, id, and well-known name where one applies -- so an
+operator can pick the right `carpetas` entry above without guessing. Never
+called from `listar_mensajes`'s own sync path.
 """
 
 from __future__ import annotations
@@ -75,6 +81,22 @@ _TIPO_ODATA_ADJUNTO_ARCHIVO = "#microsoft.graph.fileAttachment"
 _CAMPOS_RESUMEN = "id,internetMessageId,from,subject,receivedDateTime,hasAttachments"
 _TAMANO_PAGINA = "50"
 _TOP_INICIAL = 50
+
+# BUZON-CARPETAS-MICROSOFT-CLI-1 -- the well-known folder names `carpetas-
+# graph` probes for, one GET per name, since Graph's own `mailFolder`
+# resource carries no field naming a folder's well-known name; this is the
+# same small set `deploy/host/README.md` already documents as valid
+# `carpetas` entries for a `proveedor: "microsoft"` source. A mailbox that
+# lacks one (a 404) simply never appears in the probed map -- not an error.
+_CARPETAS_BIEN_CONOCIDAS: tuple[str, ...] = (
+    "inbox",
+    "archive",
+    "sentitems",
+    "drafts",
+    "deleteditems",
+    "junkemail",
+    "outbox",
+)
 
 # BUZON-GRAPH-502-1 -- the page-size ladder a persistently failing LIST page
 # degrades through, smallest last, before giving up: `$top=10`, then
@@ -173,6 +195,13 @@ class AdjuntoMetadata:
 class AdjuntoDescargado:
     nombre: str
     contenido: bytes
+
+
+@dataclass(frozen=True)
+class CarpetaGraph:
+    nombre: str
+    id: str
+    bien_conocida: str | None
 
 
 @dataclass(frozen=True)
@@ -369,6 +398,43 @@ class GraphClient:
         carpetas = self._carpetas if self._carpetas is not None else (None,)
         for carpeta in carpetas:
             yield from self._listar_mensajes_de(desde, carpeta)
+
+    def listar_carpetas(self) -> list[CarpetaGraph]:
+        """Read-only, for the `carpetas-graph` operator command
+        (`BUZON-CARPETAS-MICROSOFT-CLI-1`): every TOP-LEVEL mail folder
+        this mailbox has -- display name, id, and the well-known name
+        (`inbox`, `archive`, ...) when this folder's id matches one of
+        `_CARPETAS_BIEN_CONOCIDAS`'s own lookup, `None` otherwise -- so
+        the operator can choose the right `carpetas` entry for
+        `fijar-carpetas` without guessing. One `/me/mailFolders` LIST
+        call, plus one `/me/mailFolders/{nombre}` GET per well-known
+        name this client probes -- every one of them a GET, like every
+        other call this client makes."""
+        respuesta = self._get(
+            "/me/mailFolders", params={"$top": "250", "$select": "displayName,id"}, paso="carpetas"
+        )
+        self._exigir_ok(respuesta, paso="carpetas")
+        filas = respuesta.json().get("value", [])
+
+        id_a_bien_conocida: dict[str, str] = {}
+        for nombre_bk in _CARPETAS_BIEN_CONOCIDAS:
+            respuesta_bk = self._get(
+                f"/me/mailFolders/{nombre_bk}", params={"$select": "id"}, paso="carpetas"
+            )
+            if respuesta_bk.status_code == 200:
+                id_a_bien_conocida[respuesta_bk.json()["id"]] = nombre_bk
+
+        return sorted(
+            (
+                CarpetaGraph(
+                    nombre=fila.get("displayName") or "",
+                    id=fila["id"],
+                    bien_conocida=id_a_bien_conocida.get(fila["id"]),
+                )
+                for fila in filas
+            ),
+            key=lambda carpeta: carpeta.nombre,
+        )
 
     def listar_adjuntos_metadata(self, id_mensaje: str) -> list[AdjuntoMetadata]:
         """Metadata only -- names, sizes and which kind of attachment each

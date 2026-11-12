@@ -9,6 +9,21 @@
 #   sudo -n /usr/local/sbin/duna-deploy-buzon deploy [--dry-run]
 #   sudo -n /usr/local/sbin/duna-deploy-buzon entrar
 #   sudo -n /usr/local/sbin/duna-deploy-buzon rollback-script
+#   sudo -n /usr/local/sbin/duna-deploy-buzon carpetas <id>
+#   sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> <carpeta>...
+#   sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> --todas
+#
+# `carpetas`/`fijar-carpetas` are BUZON-CARPETAS-MICROSOFT-CLI-1: operator
+# tooling over `fuentes/<id>/fuente.json`'s own `carpetas` setting, which
+# before this slice needed a hand edit as `duna` for a microsoft source.
+# `carpetas <id>` reads the source's own `proveedor` from its `fuente.json`
+# (never a secret, root can read it directly) and runs `python -m
+# duna_buzon carpetas <id>` for an imap source or `carpetas-graph <id>` for
+# a microsoft one -- both read-only, as `duna`. `fijar-carpetas <id>
+# <carpeta>...` or `fijar-carpetas <id> --todas` forwards to `python -m
+# duna_buzon fijar-carpetas`, translating each positional folder name into
+# its own `--carpeta` argument -- every folder name reaches python as its
+# own argv element, never built into a shell string.
 #
 # `entrar` is the one subcommand meant for Carlos himself, run directly in
 # his own SSH terminal (not over a batch/no-tty session) -- it signs in
@@ -45,6 +60,13 @@ SERVICIO="duna-buzon.service"
 TIMER="duna-buzon.timer"
 UNIDADES_DIR="/etc/systemd/system"
 
+# BUZON-CARPETAS-MICROSOFT-CLI-1 -- the only two argument shapes `carpetas`
+# and `fijar-carpetas` ever accept; every id and folder name is checked
+# against these before anything runs, and is always passed on to python as
+# its own argv element, never interpolated into a shell string.
+ID_FUENTE_RE='^[a-z0-9-]+$'
+CARPETA_RE='^[A-Za-z0-9_ .-]+$'
+
 # autoactualizar's own fixed paths (HOST-AUTOACTUALIZAR-BUZON-1) -- constants,
 # like every other path above, never taken from argv or the environment.
 ENTRY_INSTALADO="/usr/local/sbin/duna-deploy-buzon"
@@ -55,7 +77,8 @@ ENTRY_PREV="/usr/local/sbin/duna-deploy-buzon.prev"
 SUDOERS_PREV="/etc/sudoers.d/.duna-deploy-buzon.prev"
 
 usage() {
-    echo "usage: duna-deploy-buzon {status|deploy [--dry-run]|entrar|rollback-script}" >&2
+    echo "usage: duna-deploy-buzon {status|deploy [--dry-run]|entrar|rollback-script|" \
+        "carpetas <id>|fijar-carpetas <id> <carpeta>...|fijar-carpetas <id> --todas}" >&2
     exit 2
 }
 
@@ -72,6 +95,10 @@ parse_args() {
     # same script, never meant to be typed by a caller -- it just tells THIS
     # invocation to skip autoactualizar, so a re-exec never loops.
     REEXEC=0
+    CARPETA_ID=""
+    FIJAR_ID=""
+    FIJAR_TODAS=0
+    FIJAR_CARPETAS=()
     case "$SUBCOMMAND" in
         status | entrar | rollback-script)
             [[ $# -eq 0 ]] || usage
@@ -85,6 +112,32 @@ parse_args() {
                     *) usage ;;
                 esac
             done
+            ;;
+        carpetas)
+            [[ $# -eq 1 ]] || usage
+            CARPETA_ID="$1"
+            [[ "$CARPETA_ID" =~ $ID_FUENTE_RE ]] || usage
+            ;;
+        fijar-carpetas)
+            [[ $# -ge 2 ]] || usage
+            FIJAR_ID="$1"
+            [[ "$FIJAR_ID" =~ $ID_FUENTE_RE ]] || usage
+            shift
+            if [[ $# -eq 1 && "$1" == "--todas" ]]; then
+                FIJAR_TODAS=1
+            else
+                local carpeta
+                for carpeta in "$@"; do
+                    # "--todas" alongside other arguments is the ambiguous
+                    # shape (remove everything AND keep some folder?) --
+                    # refused by name, never read as a literal folder
+                    # named "--todas" just because it fits $CARPETA_RE.
+                    [[ "$carpeta" != "--todas" ]] || usage
+                    [[ "$carpeta" =~ $CARPETA_RE ]] || usage
+                    FIJAR_CARPETAS+=("$carpeta")
+                done
+                [[ ${#FIJAR_CARPETAS[@]} -gt 0 ]] || usage
+            fi
             ;;
         *)
             usage
@@ -307,6 +360,82 @@ cmd_deploy() {
     fi
 }
 
+# BUZON-CARPETAS-MICROSOFT-CLI-1 -- `fuente.json` carries no secret (see
+# `fuentes.py`'s own docstring), so root reading it directly here, to pick
+# which python subcommand answers `carpetas <id>`, is no different from
+# root reading any other file on the host; the credential stays in its own
+# `credencial.bin`, never touched by this function.
+#
+# `_proveedor_desde_archivo` is the pure, PATH-parameterized half (no root
+# required to exercise it directly, same technique `_archivo_cambio`/
+# `_forma_sudoers_es_estricta` already use above); `_proveedor_de_fuente`
+# is the thin wrapper that resolves `$id` under `$DATOS_DIR` and turns a
+# read failure into this script's own `exit 1` + message.
+_proveedor_desde_archivo() {
+    local archivo="$1"
+    if [[ ! -f "$archivo" ]]; then
+        echo "duna-deploy-buzon: refusing: no such source file: $archivo" >&2
+        return 1
+    fi
+    local linea
+    linea="$(grep -o '"proveedor"[[:space:]]*:[[:space:]]*"[a-z]*"' "$archivo" | head -n1 || true)"
+    if [[ -z "$linea" ]]; then
+        echo "duna-deploy-buzon: refusing: could not read the provider from: $archivo" >&2
+        return 1
+    fi
+    echo "$linea" | sed -E 's/.*"([a-z]+)"$/\1/'
+}
+
+_proveedor_de_fuente() {
+    local id="$1"
+    local archivo="$DATOS_DIR/fuentes/$id/fuente.json"
+    if [[ ! -f "$archivo" ]]; then
+        echo "duna-deploy-buzon: refusing: no such source: $id" >&2
+        exit 1
+    fi
+    _proveedor_desde_archivo "$archivo" || exit 1
+}
+
+# Read-only: `carpetas <id>` (imap or graph, by provider) -- never writes.
+cmd_carpetas() {
+    local id="$1"
+    local proveedor subcomando_py
+    proveedor="$(_proveedor_de_fuente "$id")"
+    case "$proveedor" in
+        imap) subcomando_py="carpetas" ;;
+        microsoft) subcomando_py="carpetas-graph" ;;
+        *)
+            echo "duna-deploy-buzon: refusing: provider $proveedor has no carpetas listing" >&2
+            exit 1
+            ;;
+    esac
+    systemd-run --pipe --quiet --wait --uid=duna --gid=duna \
+        --property="EnvironmentFile=$ENV_CLIENTE" --property="EnvironmentFile=$ENV_TOKEN" \
+        --property="WorkingDirectory=$REPO" -- \
+        "$REPO/.venv/bin/python" -m duna_buzon "$subcomando_py" "$id"
+}
+
+# `fijar-carpetas <id> <carpeta>...|--todas` -- each positional folder name
+# becomes its own `--carpeta` argument to python, never a shell string;
+# `python -m duna_buzon fijar-carpetas` itself validates the id and the
+# provider and writes `fuente.json` atomically.
+cmd_fijar_carpetas() {
+    local id="$1" todas="$2"
+    shift 2
+    local -a comando=("$REPO/.venv/bin/python" "-m" "duna_buzon" "fijar-carpetas" "$id")
+    if [[ "$todas" == "1" ]]; then
+        comando+=("--todas")
+    else
+        local carpeta
+        for carpeta in "$@"; do
+            comando+=("--carpeta" "$carpeta")
+        done
+    fi
+    systemd-run --pipe --quiet --wait --uid=duna --gid=duna \
+        --property="EnvironmentFile=$ENV_CLIENTE" --property="EnvironmentFile=$ENV_TOKEN" \
+        --property="WorkingDirectory=$REPO" -- "${comando[@]}"
+}
+
 # For Carlos, at his own terminal: never systemd-run, never --pty -- a real
 # tty is already attached, and this just hands it straight to `duna`. `duna`
 # cannot traverse /srv/duna/env/ on this host, so it can never source either
@@ -362,6 +491,8 @@ dispatch() {
         deploy) cmd_deploy "$dry_run" "$reexec" ;;
         entrar) cmd_entrar ;;
         rollback-script) cmd_rollback_script ;;
+        carpetas) cmd_carpetas "$CARPETA_ID" ;;
+        fijar-carpetas) cmd_fijar_carpetas "$FIJAR_ID" "$FIJAR_TODAS" "${FIJAR_CARPETAS[@]+"${FIJAR_CARPETAS[@]}"}" ;;
     esac
 }
 

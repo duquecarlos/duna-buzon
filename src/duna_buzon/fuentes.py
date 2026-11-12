@@ -49,7 +49,10 @@ same as before this slice.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -225,12 +228,8 @@ def cargar_fuente(directorio_datos: str, id_fuente: str) -> FuenteConfig:
     return _fuente_desde_json(id_fuente, datos)
 
 
-def guardar_fuente(directorio_datos: str, fuente: FuenteConfig) -> None:
-    """Writes `fuente.json` under the same 0700/0600 discipline as every
-    other file in the data directory, even though this one file carries no
-    secret -- one uniform permission story is simpler than two."""
-    ruta = _ruta_fuente_json(directorio_datos, fuente.id)
-    contenido = json.dumps(
+def _contenido_fuente_json(fuente: FuenteConfig) -> bytes:
+    return json.dumps(
         {
             "id": fuente.id,
             "proveedor": fuente.proveedor,
@@ -244,7 +243,40 @@ def guardar_fuente(directorio_datos: str, fuente: FuenteConfig) -> None:
             "carpetas": list(fuente.carpetas) if fuente.carpetas is not None else None,
         }
     ).encode("utf-8")
-    cripto.escribir_archivo_sensible(ruta, contenido)
+
+
+def guardar_fuente(directorio_datos: str, fuente: FuenteConfig) -> None:
+    """Writes `fuente.json` under the same 0700/0600 discipline as every
+    other file in the data directory, even though this one file carries no
+    secret -- one uniform permission story is simpler than two."""
+    ruta = _ruta_fuente_json(directorio_datos, fuente.id)
+    cripto.escribir_archivo_sensible(ruta, _contenido_fuente_json(fuente))
+
+
+def guardar_fuente_atomico(directorio_datos: str, fuente: FuenteConfig) -> None:
+    """Like `guardar_fuente`, but via a temp file in the SAME directory
+    (so the rename stays on one filesystem) followed by `os.replace` --
+    never a window where a reader (or a concurrent `sincronizar` pass)
+    could see a truncated or half-written `fuente.json`. `fijar-carpetas`
+    (`cli.py`, `BUZON-CARPETAS-MICROSOFT-CLI-1`) uses this; every other
+    caller keeps `guardar_fuente`'s own truncate-in-place write, unchanged.
+    The temp file is created mode 0600 up front (where the OS supports
+    it) and replaces the target in one step, so the file's own owner and
+    mode come through exactly as `guardar_fuente` always leaves them."""
+    ruta = _ruta_fuente_json(directorio_datos, fuente.id)
+    contenido = _contenido_fuente_json(fuente)
+    cripto.asegurar_directorio_datos(ruta.parent)
+    descriptor, temporal = tempfile.mkstemp(dir=str(ruta.parent), prefix=".fuente-", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "wb") as archivo:
+            archivo.write(contenido)
+        if os.name == "posix":
+            os.chmod(temporal, 0o600)
+        os.replace(temporal, ruta)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(temporal)
+        raise
 
 
 def listar_fuentes(directorio_datos: str) -> list[FuenteConfig]:

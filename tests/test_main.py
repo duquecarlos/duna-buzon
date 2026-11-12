@@ -288,6 +288,103 @@ def test_agregar_fuente_sin_proveedor_es_uso_incorrecto(capsys: pytest.CaptureFi
     assert "usage" in capsys.readouterr().err.lower()
 
 
+# ---------------------------------------------------------------------------
+# `carpetas-graph <id>` / `fijar-carpetas <id> ...` (BUZON-CARPETAS-MICROSOFT-CLI-1)
+# ---------------------------------------------------------------------------
+
+
+def test_carpetas_graph_sin_id_es_uso_incorrecto(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["carpetas-graph"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_carpetas_graph_con_argumento_extra_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["carpetas-graph", "hotmail-carlos", "algo-mas"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_carpetas_graph_se_despacha_con_el_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[tuple[Config, str]] = []
+    monkeypatch.setattr(
+        cli,
+        "comando_carpetas_graph",
+        lambda config, id_fuente: (recibido.append((config, id_fuente)), 0)[1],
+    )
+    assert main(["carpetas-graph", "hotmail-carlos"]) == 0
+    assert recibido[0][1] == "hotmail-carlos"
+
+
+def test_fijar_carpetas_sin_argumentos_es_uso_incorrecto(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["fijar-carpetas"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+    assert main(["fijar-carpetas", "hotmail-carlos"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_fijar_carpetas_carpeta_y_todas_juntos_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["fijar-carpetas", "hotmail-carlos", "--carpeta", "inbox", "--todas"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_fijar_carpetas_carpeta_sin_valor_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["fijar-carpetas", "hotmail-carlos", "--carpeta"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_fijar_carpetas_se_despacha_con_las_carpetas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[tuple[str, list[str] | None, bool]] = []
+    monkeypatch.setattr(
+        cli,
+        "comando_fijar_carpetas",
+        lambda config, id_fuente, *, carpetas, todas: (
+            recibido.append((id_fuente, carpetas, todas)),
+            0,
+        )[1],
+    )
+    assert main(["fijar-carpetas", "hotmail-carlos", "--carpeta", "inbox", "--carpeta", "archive"]) == 0
+    assert recibido[0] == ("hotmail-carlos", ["inbox", "archive"], False)
+
+
+def test_fijar_carpetas_todas_se_despacha(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[tuple[str, list[str] | None, bool]] = []
+    monkeypatch.setattr(
+        cli,
+        "comando_fijar_carpetas",
+        lambda config, id_fuente, *, carpetas, todas: (
+            recibido.append((id_fuente, carpetas, todas)),
+            0,
+        )[1],
+    )
+    assert main(["fijar-carpetas", "hotmail-carlos", "--todas"]) == 0
+    assert recibido[0] == ("hotmail-carlos", None, True)
+
+
 def test_agregar_fuente_puerto_no_numerico_es_uso_incorrecto(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
