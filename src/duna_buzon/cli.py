@@ -15,6 +15,7 @@ runs exactly as before this slice.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import json
 import sys
 from pathlib import Path
@@ -41,6 +42,12 @@ NOMBRE_ARCHIVO_ESTADO = "estado.json"
 # combined with its provider prefix ("imap:"), so `etiqueta_registro` never
 # needs the >64 fallback below for a source this connector itself created.
 LIMITE_ID_FUENTE_AGREGAR = 48
+
+
+def _ahora() -> datetime.datetime:
+    """BUZON-GRAPH-TIMEOUT-1 -- the one clock read this module does, so a
+    test can pin it with `monkeypatch.setattr(cli, "_ahora", ...)`."""
+    return datetime.datetime.now(datetime.UTC)
 
 
 def _migrar_si_necesario(config: Config) -> None:
@@ -113,7 +120,10 @@ def _ejecutar_una_fuente(
     directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
 
     def _detenida(motivo: str) -> tuple[str, str | None]:
-        linea = registro.linea_resumen(Contadores(), motivo)
+        # No provider exists yet at this point (auth/rules both run before
+        # `construir_proveedor`), so there were never any Graph retries to
+        # report -- `reintentos=0` is exact, not a placeholder.
+        linea = registro.linea_resumen(Contadores(), motivo, finalizado_en=_ahora(), reintentos=0)
         cripto.asegurar_directorio_datos(Path(directorio))
         cripto.escribir_archivo_sensible(Path(directorio) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8"))
         return linea, motivo
@@ -169,7 +179,13 @@ def _ejecutar_una_fuente(
     if resultado.debe_persistir_cursor and resultado.cursor_proveedor_final is not None:
         modulo_cursor.guardar_cursor_proveedor(directorio, resultado.cursor_proveedor_final)
 
-    linea = registro.linea_resumen(resultado.contadores, resultado.motivo)
+    # `reintentos_usados` is `GraphClient`'s own counter (BUZON-GRAPH-
+    # TIMEOUT-1); every other provider (IMAP, Gmail) and every test fake
+    # simply lacks it, so this reports 0 for them -- never a guess.
+    reintentos = getattr(proveedor, "reintentos_usados", 0)
+    linea = registro.linea_resumen(
+        resultado.contadores, resultado.motivo, finalizado_en=_ahora(), reintentos=reintentos
+    )
     cripto.asegurar_directorio_datos(Path(directorio))
     cripto.escribir_archivo_sensible(Path(directorio) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8"))
     return linea, resultado.motivo

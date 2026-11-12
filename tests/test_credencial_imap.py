@@ -125,3 +125,39 @@ def test_obtener_credencial_redondea_el_mismo_password(tmp_path: Path) -> None:
     )
 
     assert credencial_imap.obtener_credencial(config, directorio) == "la-contrasena-de-la-app"
+
+
+# ---------------------------------------------------------------------------
+# BUZON-GRAPH-TIMEOUT-1 -- the real LOGIN verification names an explicit
+# socket timeout too, never imaplib's own default.
+# ---------------------------------------------------------------------------
+
+
+def test_verificacion_real_usa_el_timeout_explicito(monkeypatch: pytest.MonkeyPatch) -> None:
+    import imaplib
+
+    from duna_buzon import temporizadores
+    from duna_buzon.credencial_imap import _verificar_login_real
+
+    capturado: dict[str, object] = {}
+
+    class _FalsoIMAP4SSL:
+        def __init__(self, host: str, puerto: int, timeout: float | None = None) -> None:
+            capturado["host"] = host
+            capturado["puerto"] = puerto
+            capturado["timeout"] = timeout
+
+        def login(self, usuario: str, password: str) -> None:
+            pass
+
+        def logout(self) -> None:
+            pass
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", _FalsoIMAP4SSL)
+    _verificar_login_real("imap.zoho.com", 993, "legal@duna.solutions", "una-contrasena")
+
+    assert capturado == {
+        "host": "imap.zoho.com",
+        "puerto": 993,
+        "timeout": temporizadores.TIMEOUT_IMAP_SEGUNDOS,
+    }

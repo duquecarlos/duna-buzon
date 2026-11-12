@@ -23,6 +23,7 @@ from typing import Literal
 
 import httpx
 
+from duna_buzon import temporizadores
 from duna_buzon.adjuntos import ArchivoMultipart, construir_partes_multipart
 from duna_buzon.config import Config
 from duna_buzon.limites import FuenteWire
@@ -96,7 +97,9 @@ class MetaEntrada:
 class FinanzasClient:
     def __init__(self, config: Config, *, transport: httpx.BaseTransport | None = None) -> None:
         self._token = config.finanzas_token
-        self._cliente = httpx.Client(base_url=config.url_finanzas, transport=transport)
+        self._cliente = httpx.Client(
+            base_url=config.url_finanzas, transport=transport, timeout=temporizadores.TIMEOUT_HTTPX
+        )
 
     def cerrar(self) -> None:
         self._cliente.close()

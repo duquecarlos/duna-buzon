@@ -629,6 +629,60 @@ def test_con_etiqueta_origen_se_envia_como_septimo_campo(tmp_path) -> None:
     assert meta_enviada["fuente"] == "correo"
 
 
+def test_timeout_de_graph_se_reintenta_y_el_cursor_avanza(tmp_path) -> None:
+    """BUZON-GRAPH-TIMEOUT-1: a Graph timeout that resolves on retry never
+    reaches `ejecutar_pasada` at all -- the pass finishes normally."""
+    mensajes = [MensajeFalso(id="m1", remitente="notificaciones@banco-ejemplo.com")]
+    transporte_base = _transporte_graph(mensajes)
+    llamadas = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal llamadas
+        llamadas += 1
+        if llamadas == 1:
+            raise httpx.ReadTimeout("timeout")
+        return transporte_base.handler(request)
+
+    cliente_graph = GraphClient(
+        "token", transport=httpx.MockTransport(handler), dormir=lambda segundos: None
+    )
+    cliente_finanzas = _cliente_finanzas(tmp_path, _finanzas_siempre_201)
+
+    resultado = ejecutar_pasada(
+        proveedor=cliente_graph,
+        cliente_finanzas=cliente_finanzas,
+        reglas=_reglas(),
+        cursor_inicial=_CURSOR_INICIAL,
+    )
+
+    assert resultado.contadores.reenviados == 1
+    assert resultado.debe_persistir_cursor
+    assert resultado.cursor_final == datetime.datetime(2026, 3, 1, 10, 0, tzinfo=datetime.UTC)
+    assert cliente_graph.reintentos_usados == 1
+
+
+def test_timeout_de_graph_persistente_detiene_la_pasada_sin_persistir_cursor(tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timeout")
+
+    cliente_graph = GraphClient(
+        "token", transport=httpx.MockTransport(handler), dormir=lambda segundos: None
+    )
+    cliente_finanzas = _cliente_finanzas(tmp_path, _finanzas_siempre_201)
+
+    resultado = ejecutar_pasada(
+        proveedor=cliente_graph,
+        cliente_finanzas=cliente_finanzas,
+        reglas=_reglas(),
+        cursor_inicial=_CURSOR_INICIAL,
+    )
+
+    assert resultado.detenida_por_error_transitorio
+    assert not resultado.debe_persistir_cursor
+    assert resultado.motivo == "graph listar error=ReadTimeout"
+    assert cliente_graph.reintentos_usados == 2
+
+
 def test_asunto_multibyte_sobre_el_tope_se_trunca_sin_romper_caracteres(tmp_path) -> None:
     # "🙂" is one Python character but four UTF-8 bytes -- a byte-based
     # truncation at the cap would split it. Python string slicing never

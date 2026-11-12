@@ -8,17 +8,31 @@ request.
 `/me/messages` (never `/me/mailFolders/inbox/messages`) reaches every
 folder in the mailbox, since Carlos's own inbox rules move messages out of
 the Inbox before this connector ever sees them.
+
+BUZON-GRAPH-TIMEOUT-1: every call carries `temporizadores.TIMEOUT_HTTPX`
+(never httpx's own 5-second default), and `_get` retries the TRANSIENT
+class only -- a transport failure (timeout, connection reset, ...) or a
+429/503 response -- at most twice, with backoff `_ESPERAS_BASE_SEGUNDOS`
+(1s, then 4s), capped at `_ESPERA_MAXIMA_SEGUNDOS` and overridden by the
+response's own `Retry-After` when one is present. Every other status
+(401, every other 4xx/5xx) still fails on the first attempt, exactly as
+before this slice. A pass that exhausts both retries stops exactly like
+today: cursor unchanged, stop reason recorded, service exits non-zero --
+`_get` still only ever raises `GraphAutenticacionError`/
+`GraphErrorTransitorio`, never anything new.
 """
 
 from __future__ import annotations
 
 import base64
 import datetime
-from collections.abc import Iterator, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 
 import httpx
 
+from duna_buzon import temporizadores
 from duna_buzon.proveedor_errores import ProveedorAutenticacionError, ProveedorErrorTransitorio
 
 URL_BASE = "https://graph.microsoft.com/v1.0"
@@ -26,6 +40,32 @@ _TIPO_ODATA_ADJUNTO_ARCHIVO = "#microsoft.graph.fileAttachment"
 
 _CAMPOS_RESUMEN = "id,internetMessageId,from,subject,receivedDateTime,hasAttachments"
 _TAMANO_PAGINA = "50"
+
+# BUZON-GRAPH-TIMEOUT-1 -- retried, in-pass: a transport failure, or one of
+# these two status codes, both of which Graph itself documents as
+# "back off and try again" (429 throttling, 503 momentarily unavailable).
+# Every other status (401, every other 4xx/5xx) is never retried -- those
+# are either a real auth failure or a defect this connector should stop on
+# immediately, not paper over with a retry.
+_CODIGOS_REINTENTABLES = frozenset({429, 503})
+_REINTENTOS_MAXIMOS = 2
+_ESPERAS_BASE_SEGUNDOS: tuple[float, ...] = (1.0, 4.0)
+_ESPERA_MAXIMA_SEGUNDOS = 30.0
+
+
+def _espera_retry_after(respuesta: httpx.Response) -> float | None:
+    """The response's own `Retry-After`, in seconds, capped at
+    `_ESPERA_MAXIMA_SEGUNDOS` -- `None` when the header is absent or not a
+    plain integer (Graph never sends the HTTP-date form on a 429/503, so
+    this never needs to parse one)."""
+    valor = respuesta.headers.get("Retry-After")
+    if valor is None:
+        return None
+    try:
+        segundos = float(valor)
+    except ValueError:
+        return None
+    return min(segundos, _ESPERA_MAXIMA_SEGUNDOS)
 
 
 class GraphError(Exception):
@@ -124,12 +164,25 @@ def _mensaje_resumen_desde_json(fila: dict) -> MensajeResumen:
 
 
 class GraphClient:
-    def __init__(self, token: str, *, transport: httpx.BaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        transport: httpx.BaseTransport | None = None,
+        dormir: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._cliente = httpx.Client(
             base_url=URL_BASE,
             transport=transport,
             headers={"Authorization": f"Bearer {token}"},
+            timeout=temporizadores.TIMEOUT_HTTPX,
         )
+        self._dormir = dormir
+        # BUZON-GRAPH-TIMEOUT-1 -- total retries this client has performed
+        # across every call so far this pass, for `estado.json` (`cli.py`
+        # reads this once the pass ends, via `getattr(..., 0)` so a
+        # provider with no such counter, e.g. IMAP or Gmail, reports 0).
+        self.reintentos_usados = 0
 
     def cerrar(self) -> None:
         self._cliente.close()
@@ -137,10 +190,28 @@ class GraphClient:
     def _get(
         self, url: str, *, paso: str, params: dict[str, str] | None = None
     ) -> httpx.Response:
-        try:
-            return self._cliente.get(url, params=params)
-        except httpx.TransportError as exc:
-            raise GraphErrorTransitorio(paso, clase_excepcion=type(exc).__name__) from exc
+        intento = 0
+        while True:
+            try:
+                respuesta = self._cliente.get(url, params=params)
+            except httpx.TransportError as exc:
+                if intento >= _REINTENTOS_MAXIMOS:
+                    raise GraphErrorTransitorio(paso, clase_excepcion=type(exc).__name__) from exc
+                self._dormir(_ESPERAS_BASE_SEGUNDOS[intento])
+                self.reintentos_usados += 1
+                intento += 1
+                continue
+
+            if respuesta.status_code in _CODIGOS_REINTENTABLES and intento < _REINTENTOS_MAXIMOS:
+                espera = _espera_retry_after(respuesta)
+                if espera is None:
+                    espera = _ESPERAS_BASE_SEGUNDOS[intento]
+                self._dormir(espera)
+                self.reintentos_usados += 1
+                intento += 1
+                continue
+
+            return respuesta
 
     @staticmethod
     def _exigir_ok(respuesta: httpx.Response, *, paso: str) -> None:

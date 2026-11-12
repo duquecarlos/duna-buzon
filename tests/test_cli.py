@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import json
 from pathlib import Path
 
@@ -302,6 +303,48 @@ def test_sincronizar_sin_detenerse_no_imprime_nada_en_stderr(
     salida = capsys.readouterr()
     assert salida.err == ""
     assert "parada=" not in salida.out
+
+
+def test_sincronizar_registra_finalizado_en_y_reintentos_en_estado(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """BUZON-GRAPH-TIMEOUT-1: `estado.json` (and `estado`'s own stdout)
+    now carry when the pass finished and how many Graph retries it used,
+    so `duna-deploy-buzon status` can tell a stuck timer from repeated
+    failures."""
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+
+    class _ProveedorConReintentos:
+        reintentos_usados = 2
+
+        def cerrar(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        cli,
+        "construir_proveedor",
+        lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorConReintentos(),
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1, reenviados=1))
+    )
+    monkeypatch.setattr(
+        cli, "_ahora", lambda: datetime.datetime(2026, 11, 12, 17, 5, tzinfo=datetime.UTC)
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    salida = capsys.readouterr()
+    assert "reintentos=2" in salida.out
+    assert "finalizado_en=2026-11-12T17:05:00Z" in salida.out
+
+    assert cli.comando_estado(config) == 0
+    salida_estado = capsys.readouterr()
+    assert "reintentos=2" in salida_estado.out
+    assert "finalizado_en=2026-11-12T17:05:00Z" in salida_estado.out
 
 
 def test_sincronizar_sin_enviar_origen_no_pasa_etiqueta_ni_imprime_nada(

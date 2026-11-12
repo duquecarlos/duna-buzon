@@ -16,7 +16,7 @@ import getpass
 from collections.abc import Callable
 from pathlib import Path
 
-from duna_buzon import cripto
+from duna_buzon import cripto, temporizadores
 from duna_buzon.config import Config
 from duna_buzon.fuentes import NOMBRE_ARCHIVO_CREDENCIAL
 
@@ -40,7 +40,8 @@ def _verificar_login_real(host: str, puerto: int, usuario: str, password: str) -
     import imaplib
 
     try:
-        conexion = imaplib.IMAP4_SSL(host, puerto)
+        # BUZON-GRAPH-TIMEOUT-1 -- explicit, never imaplib's own default.
+        conexion = imaplib.IMAP4_SSL(host, puerto, timeout=temporizadores.TIMEOUT_IMAP_SEGUNDOS)
     except OSError as exc:
         raise VerificacionLoginError(type(exc).__name__) from exc
     try:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from duna_buzon import temporizadores
 from duna_buzon.cuenta import CuentaClient, CuentaPullError, FuenteCuenta
 
 
@@ -123,3 +124,11 @@ def test_500_lanza_cuenta_pull_error() -> None:
         cliente.listar_fuentes()
     cliente.cerrar()
     assert excinfo.value.motivo == "cuenta fuentes http=500"
+
+
+def test_el_cliente_usa_el_timeout_explicito_compartido() -> None:
+    cliente = _cliente_con(lambda request: httpx.Response(200, json={"fuentes": []}))
+    try:
+        assert cliente._cliente.timeout == temporizadores.TIMEOUT_HTTPX
+    finally:
+        cliente.cerrar()

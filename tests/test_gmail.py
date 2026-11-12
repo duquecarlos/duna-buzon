@@ -6,6 +6,7 @@ import datetime
 import httpx
 import pytest
 
+from duna_buzon import temporizadores
 from duna_buzon.gmail import AdjuntoMetadata, GmailAutenticacionError, GmailClient, GmailErrorTransitorio
 
 _DESDE = datetime.datetime(2026, 3, 1, tzinfo=datetime.UTC)
@@ -211,6 +212,14 @@ def test_error_de_conexion_lanza_error_transitorio() -> None:
         list(cliente.listar_mensajes(_DESDE))
     cliente.cerrar()
     assert excinfo.value.motivo == "gmail listar error=ConnectError"
+
+
+def test_el_cliente_usa_el_timeout_explicito_compartido() -> None:
+    cliente = _cliente_con(lambda request: httpx.Response(200, json={"messages": []}))
+    try:
+        assert cliente._cliente.timeout == temporizadores.TIMEOUT_HTTPX
+    finally:
+        cliente.cerrar()
 
 
 # ---------------------------------------------------------------------------
