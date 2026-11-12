@@ -1184,3 +1184,116 @@ own decision that OAuth ends at Cuenta Duna and this connector only pulls tokens
 (`BUZON-FUENTES-PULL-1`) built the pull side end to end: `cuenta.py`'s `CuentaClient`, `gmail.py`'s Gmail
 provider, `fuentes.py`'s `origen` field and validation, and `cli.py`'s `_pull_fuentes_cuenta` and its
 wiring into `sincronizar`/`entrar`.
+
+## BUZON-IMAP-CARPETAS-INCLUIDAS-1 -- narrow an IMAP source to named folders (2026-11-11)
+
+### Why
+
+Carlos measured, 12 Nov, in his own browser: `legal@`, `hola@` and `soporte@duna.solutions` are not
+separate logins on Zoho -- they are SHARED MAILBOXES inside his own `carlos@duna.solutions` login. So the
+company source has to sign in as `carlos@` over IMAP, and today's IMAP reader (`cliente_imap.py`'s
+`_carpetas_a_examinar`, built by `BUZON-FUENTE-IMAP-CARPETAS-1`) EXAMINEs every folder the server's `LIST`
+returns, minus Trash/Junk/Sent/Drafts/All-Mail -- which would send Carlos's OWN personal inbox into the
+COMPANY's Finanzas the moment that source signs in as `carlos@`. `ORCH-CARLOS-DELEGATES-TIER-1-1`
+authorized this Tier 2 build (source scoping only, no wire change to Finanzas).
+
+### What changed
+
+`fuentes.py`'s `FuenteConfig` gains `carpetas: tuple[str, ...] | None`, meaningful only for
+`proveedor == "imap"`. Absent (default, and every `fuente.json` from before this slice) means exactly
+today's behaviour. Present means this source reads ONLY folders whose LIST name equals one of its entries
+or sits under one of them in the server's own hierarchy (`entrada + delimitador + lo que sea`) -- still
+minus the same excluded kinds, which apply FIRST and can never be pulled back in by naming them. A
+non-list or an empty list is a `FuenteInvalidaError`, raised at load (`cargar_fuente`), never discovered
+mid-sync.
+
+`cliente_imap.py`: `_parsear_linea_list` now also returns each LIST line's own delimiter (`NIL` parsed to
+`None`), previously discarded. New `_carpeta_en_lista` matches an entry's exact name or `entrada +
+delimitador` as a prefix -- NEVER a bare string prefix, so an entry "Legal" can never match a sibling
+folder "Legales" (no delimiter boundary between them). `ClienteImap` takes `carpetas` and applies it
+through one shared `_incluida` predicate, used by both `_carpetas_a_examinar` (the sync path, unchanged in
+every other respect) and the new `listar_carpetas_con_estado` (a `LIST`-only probe: every folder, flags,
+and whether this source would read it -- no `EXAMINE`, no content, no credential). `listar_mensajes` now
+prunes `mapa_cursor` to the currently-included folders BEFORE the pass starts, so a folder's stored
+`(UIDVALIDITY, UID)` cursor is dropped the moment that folder stops being included (by `carpetas`
+narrowing, or by the folder itself becoming excluded) -- it is never carried forward into
+`cursor_proveedor.json` for a folder this source no longer reads.
+
+`cli.py` gains `comando_carpetas(config, id_fuente)`: resolves the source, refuses a non-`imap` one or an
+unknown id by name, decrypts its already-stored app password (refusing with "run entrar" if there is
+none), and prints `carpeta=<name> banderas=<flags> leida=si|no` for every folder the server returns.
+`comando_agregar_fuente` gains an optional `carpetas` parameter, written straight into the new
+`FuenteConfig` field.
+
+`__main__.py`: `agregar-fuente` gains a repeatable `--carpeta <nombre>` option (accumulated into a list,
+passed through only when at least one was given -- omitted means `carpetas=None`, same as today). A new
+command, `carpetas <id>`, takes exactly one positional argument and dispatches to `cli.comando_carpetas`.
+
+### Tests, measured
+
+`tests/test_fuentes.py` (+5): `carpetas` defaults to `None`; round-trips through `guardar_fuente`/
+`cargar_fuente`; a `fuente.json` with no `carpetas` key at all (every source before this slice) still reads
+as `None`; a non-list and an empty list are each rejected at load.
+
+`tests/test_cliente_imap.py` (+10, plus the fake server gaining a configurable LIST delimiter): no
+`carpetas` configured reads everything not excluded (unchanged behaviour, made explicit); an exact-name
+match; a nested match under a `/`-delimited parent; a nested match under a `.`-delimited parent; a folder
+("Legales") that merely starts with an included entry's letters ("Legal") is NEVER matched; an excluded
+folder (`\Trash`) is never pulled back in even when it is named exactly like an included entry;
+`listar_carpetas_con_estado` marks every folder's inclusion correctly, with and without `carpetas`
+configured; `listar_carpetas_con_estado` issues `LIST` and nothing else -- no `EXAMINE`/`SELECT`/`STORE`/
+`COPY`/`MOVE`/`EXPUNGE`/`FETCH`; and cursor pruning -- a folder dropped from `carpetas` has its stored
+cursor absent from the next `cursor_proveedor` the moment a message is yielded from a folder still
+included.
+
+`tests/test_main.py` (+5): `--carpeta` repeated twice builds a list of two entries; omitted dispatches
+`carpetas=None`; `carpetas` with no id, and with an extra argument, are each usage errors; `carpetas <id>`
+dispatches to `cli.comando_carpetas` with that id.
+
+`tests/test_cli.py` (+6): `comando_agregar_fuente` writes the given `carpetas` into `fuente.json`;
+`comando_carpetas` end to end against a fake IMAP server (via a monkeypatched `cli.ClienteImap` wired to
+the same fake-server seam `test_cliente_imap.py` already uses) -- once with no filter (everything not
+excluded prints `leida=si`) and once with `carpetas=("Legal",)` (only `Legal` prints `leida=si`); an
+unknown id, a non-`imap` source, and a source with no credential stored are each a one-line error, never a
+crash.
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest -q`, run twice: once on the slice branch (`feat/buzon-imap-carpetas-
+incluidas-1`, commit `3f98e4c0531d2c0afb9d322153de4d6f82f7f438`) and once on the final tree after the
+merge, both identical:
+
+    318 passed, 7 skipped in ~20s
+
+318 = the 292 `BUZON-FUENTES-PULL-1` recorded on `main` before this slice, plus this slice's 26 new
+collected tests: 5 (`test_fuentes.py`) + 10 (`test_cliente_imap.py`) + 5 (`test_main.py`) + 6
+(`test_cli.py`) = 26. The 7 skips are the same pre-existing Windows file-mode skips every earlier slice in
+this ledger already recorded; none are new.
+
+Tree identity, measured before writing this entry: merge commit `be26eba5ec16701ebe9f438edb6700ba19cdcafc`
+has tree `439b81f4cf01a7af28a60729b577750720e06e47`, IDENTICAL to the slice branch's own tree (same sha),
+and `git diff HEAD feat/buzon-imap-carpetas-incluidas-1 --stat` against the merge commit was empty -- so
+the gate above was not re-run a third time for the merge.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database; `carpetas` is, like every earlier addition to
+`fuente.json`, a field on a file, not a table or a model. No cross-repo contract or DTO change: this slice
+touches no wire this repository sends -- the Finanzas buzon-v1 contract is completely untouched (no entry's
+shape, caps, or `fuente="correo"` value changed), and this slice defines no contract any other repository
+reads. No customer-facing bytes, the same reasoning every earlier entry in this ledger has recorded: this
+repository has no product, no UI, and no customer or operator other than Carlos acting as this system's own
+administrator -- the new `carpetas` stderr/stdout lines (`comando_carpetas`'s own output, the new
+`agregar-fuente` usage line) are that same operator-facing diagnostic output, not a product surface a
+customer, operator or owner reads inside a Duna product. All three conditions clear, so this slice merged
+on green without stopping for approval, per its own approval reason ("source scoping, no wire change to
+Finanzas").
+
+### Attribution
+
+Carlos measured the Zoho shared-mailbox shape in his own browser and named the risk (a company source
+signing in as `carlos@` would otherwise read his own personal inbox into the company's Finanzas);
+`ORCH-CARLOS-DELEGATES-TIER-1-1` authorized this Tier 2 build. This slice (`BUZON-IMAP-CARPETAS-
+INCLUIDAS-1`) built the narrowing end to end: `fuentes.py`'s `carpetas` field and validation,
+`cliente_imap.py`'s delimiter-aware matching and cursor pruning, the new `carpetas <id>` operator command,
+and `agregar-fuente`'s new repeatable `--carpeta` flag.
