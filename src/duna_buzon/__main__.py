@@ -6,7 +6,9 @@ optional when exactly one source is configured (today's common case right
 after the automatic migration), required the moment a second source
 exists. `agregar-fuente` is the other one that takes arguments, to write a
 new IMAP source's `fuente.json` -- it never signs in; `entrar --fuente
-<id>` is the separate next step. Every other command touches every
+<id>` is the separate next step. `carpetas <id>` takes the source's id and
+prints every folder that source's own server exposes
+(`BUZON-IMAP-CARPETAS-INCLUIDAS-1`). Every other command touches every
 configured source on its own, `fuentes.py`'s own job to enumerate."""
 
 from __future__ import annotations
@@ -17,23 +19,34 @@ import sys
 from duna_buzon import cli
 from duna_buzon.config import Config, ConfigError
 
-_COMANDOS = ("entrar", "sincronizar", "estado", "fuentes", "agregar-fuente")
+_COMANDOS = ("entrar", "sincronizar", "estado", "fuentes", "agregar-fuente", "carpetas")
 
-_OPCIONES_AGREGAR_FUENTE = ("--id", "--direccion", "--host", "--token-finanzas", "--port", "--etiqueta")
+_OPCIONES_AGREGAR_FUENTE = (
+    "--id",
+    "--direccion",
+    "--host",
+    "--token-finanzas",
+    "--port",
+    "--etiqueta",
+    "--carpeta",
+)
 _OPCIONES_AGREGAR_FUENTE_REQUERIDAS = ("--id", "--direccion", "--host", "--token-finanzas")
 _PUERTO_IMAP_PREDETERMINADO = "993"
 
 _USO = (
     f"usage: python -m duna_buzon {{{'|'.join(_COMANDOS)}}} [--fuente <id>]\n"
     "       python -m duna_buzon agregar-fuente imap --id <id> --direccion <direccion> "
-    "--host <host> --token-finanzas <ref> [--port <puerto>] [--etiqueta <etiqueta>]"
+    "--host <host> --token-finanzas <ref> [--port <puerto>] [--etiqueta <etiqueta>] "
+    "[--carpeta <nombre> ...]\n"
+    "       python -m duna_buzon carpetas <id>"
 )
 
 
-def _parsear_agregar_fuente(resto: list[str]) -> dict[str, str] | None:
+def _parsear_agregar_fuente(resto: list[str]) -> dict[str, object] | None:
     if not resto or resto[0] != "imap":
         return None
-    opciones = {"port": _PUERTO_IMAP_PREDETERMINADO}
+    opciones: dict[str, object] = {"port": _PUERTO_IMAP_PREDETERMINADO}
+    carpetas: list[str] = []
     pendientes = resto[1:]
     vistas: set[str] = set()
     i = 0
@@ -41,13 +54,18 @@ def _parsear_agregar_fuente(resto: list[str]) -> dict[str, str] | None:
         clave = pendientes[i]
         if clave not in _OPCIONES_AGREGAR_FUENTE or i + 1 >= len(pendientes):
             return None
-        opciones[clave.lstrip("-")] = pendientes[i + 1]
-        vistas.add(clave)
+        if clave == "--carpeta":
+            carpetas.append(pendientes[i + 1])
+        else:
+            opciones[clave.lstrip("-")] = pendientes[i + 1]
+            vistas.add(clave)
         i += 2
     if not set(_OPCIONES_AGREGAR_FUENTE_REQUERIDAS).issubset(vistas):
         return None
-    if not opciones["port"].isdigit():
+    if not str(opciones["port"]).isdigit():
         return None
+    if carpetas:
+        opciones["carpetas"] = carpetas
     return opciones
 
 
@@ -60,7 +78,8 @@ def main(argv: list[str] | None = None) -> int:
     comando, resto = argumentos[0], argumentos[1:]
 
     id_fuente: str | None = None
-    opciones_agregar_fuente: dict[str, str] | None = None
+    id_fuente_carpetas: str | None = None
+    opciones_agregar_fuente: dict[str, object] | None = None
     if comando == "entrar" and len(resto) == 2 and resto[0] == "--fuente":
         id_fuente = resto[1]
         resto = []
@@ -69,6 +88,12 @@ def main(argv: list[str] | None = None) -> int:
         if opciones_agregar_fuente is None:
             print(_USO, file=sys.stderr)
             return 2
+        resto = []
+    elif comando == "carpetas":
+        if len(resto) != 1:
+            print(_USO, file=sys.stderr)
+            return 2
+        id_fuente_carpetas = resto[0]
         resto = []
     if resto:
         print(_USO, file=sys.stderr)
@@ -94,10 +119,14 @@ def main(argv: list[str] | None = None) -> int:
             id_fuente=opciones_agregar_fuente["id"],
             direccion=opciones_agregar_fuente["direccion"],
             host=opciones_agregar_fuente["host"],
-            puerto=int(opciones_agregar_fuente["port"]),
+            puerto=int(str(opciones_agregar_fuente["port"])),
             token_finanzas=opciones_agregar_fuente["token-finanzas"],
             etiqueta=opciones_agregar_fuente.get("etiqueta"),
+            carpetas=opciones_agregar_fuente.get("carpetas"),
         )
+    if comando == "carpetas":
+        assert id_fuente_carpetas is not None
+        return cli.comando_carpetas(config, id_fuente_carpetas)
     return cli.comando_fuentes(config)
 
 

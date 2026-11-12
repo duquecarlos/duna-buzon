@@ -144,6 +144,90 @@ def test_cargar_fuente_imap_con_origen_cuenta_se_rechaza(tmp_path: Path) -> None
         cargar_fuente(str(tmp_path), "rara")
 
 
+def test_carpetas_por_defecto_es_none() -> None:
+    assert _fuente(proveedor="imap", host="imap.zoho.com", port=993).carpetas is None
+
+
+def test_guardar_y_cargar_fuente_con_carpetas_ida_y_vuelta(tmp_path: Path) -> None:
+    fuente_imap = _fuente(
+        id="legal-duna",
+        proveedor="imap",
+        direccion="carlos@duna.solutions",
+        host="imap.zoho.com",
+        port=993,
+        carpetas=("Legal", "Compartidos/Facturas"),
+    )
+    guardar_fuente(str(tmp_path), fuente_imap)
+    assert cargar_fuente(str(tmp_path), "legal-duna") == fuente_imap
+
+
+def test_fuente_json_sin_campo_carpetas_se_lee_como_none(tmp_path: Path) -> None:
+    # Every `fuente.json` written before this slice never had a `carpetas`
+    # key at all -- absent must keep meaning exactly what it always meant:
+    # every selectable folder.
+    ruta = tmp_path / "fuentes" / "legal-duna"
+    ruta.mkdir(parents=True)
+    (ruta / "fuente.json").write_text(
+        json.dumps(
+            {
+                "proveedor": "imap",
+                "direccion": "carlos@duna.solutions",
+                "etiqueta": "Legal",
+                "token_finanzas_ref": "carlos",
+                "activa": True,
+                "host": "imap.zoho.com",
+                "port": 993,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert cargar_fuente(str(tmp_path), "legal-duna").carpetas is None
+
+
+def test_cargar_fuente_carpetas_no_es_lista_se_rechaza(tmp_path: Path) -> None:
+    ruta = tmp_path / "fuentes" / "legal-duna"
+    ruta.mkdir(parents=True)
+    (ruta / "fuente.json").write_text(
+        json.dumps(
+            {
+                "proveedor": "imap",
+                "direccion": "carlos@duna.solutions",
+                "etiqueta": "Legal",
+                "token_finanzas_ref": "carlos",
+                "activa": True,
+                "host": "imap.zoho.com",
+                "port": 993,
+                "carpetas": "Legal",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(FuenteInvalidaError):
+        cargar_fuente(str(tmp_path), "legal-duna")
+
+
+def test_cargar_fuente_carpetas_vacia_se_rechaza(tmp_path: Path) -> None:
+    ruta = tmp_path / "fuentes" / "legal-duna"
+    ruta.mkdir(parents=True)
+    (ruta / "fuente.json").write_text(
+        json.dumps(
+            {
+                "proveedor": "imap",
+                "direccion": "carlos@duna.solutions",
+                "etiqueta": "Legal",
+                "token_finanzas_ref": "carlos",
+                "activa": True,
+                "host": "imap.zoho.com",
+                "port": 993,
+                "carpetas": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(FuenteInvalidaError):
+        cargar_fuente(str(tmp_path), "legal-duna")
+
+
 def test_archivo_de_fuente_es_modo_0600(tmp_path: Path, no_es_windows: None) -> None:
     guardar_fuente(str(tmp_path), _fuente())
     ruta = tmp_path / "fuentes" / "hotmail-carlos" / "fuente.json"

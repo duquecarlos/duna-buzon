@@ -61,6 +61,7 @@ def construir_proveedor(
             usuario=fuente.direccion,
             password=token,
             cursor_proveedor_inicial=cursor_proveedor_inicial,
+            carpetas=fuente.carpetas,
         )
     raise ProveedorDesconocidoError(
         f"source {fuente.id!r} names provider {fuente.proveedor!r}, not yet implemented"

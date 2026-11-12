@@ -24,6 +24,15 @@ successful pull rather than written once by `agregar-fuente`. Only
 providers Cuenta Duna's own wire names); only `"microsoft"` and `"imap"`
 can be `origen="local"` -- Carlos never signs this connector into a Google
 account directly, only through Cuenta Duna's OAuth.
+
+`carpetas` (`BUZON-IMAP-CARPETAS-INCLUIDAS-1`) narrows which folders an `imap`
+source reads to a named allow-list, for the shared-mailbox case: a Zoho
+login that exposes several SHARED MAILBOXES (not separate logins) alongside
+the signed-in account's own personal folders, where only the shared ones
+belong to Finanzas. Absent (the default, and every `fuente.json` written
+before this slice) means today's behaviour exactly -- every selectable
+folder minus Trash/Junk/Sent/Drafts/All-Mail, Carlos's own personal mail
+included. See `cliente_imap.py`'s own docstring for how an entry matches.
 """
 
 from __future__ import annotations
@@ -76,6 +85,15 @@ class FuenteConfig:
     # `fuente.json` written before this slice (no `origen` key at all)
     # keeps meaning exactly what it always meant.
     origen: OrigenFuente = "local"
+    # Only meaningful for `proveedor == "imap"`. `None` (absent from
+    # `fuente.json`) means today's behaviour exactly: every selectable
+    # folder, minus Trash/Junk/Sent/Drafts/All-Mail. Present means ONLY
+    # folders whose LIST name equals one of these entries or sits under one
+    # of them in the server's own hierarchy -- still minus those same
+    # excluded kinds (BUZON-IMAP-CARPETAS-INCLUIDAS-1, so a shared-mailbox
+    # IMAP source never pulls in the signed-in account's own personal
+    # folders alongside it).
+    carpetas: tuple[str, ...] | None = None
 
     @property
     def etiqueta_registro(self) -> str:
@@ -139,6 +157,7 @@ def _fuente_desde_json(id_fuente: str, datos: dict) -> FuenteConfig:
 
     host: str | None = None
     port: int | None = None
+    carpetas: tuple[str, ...] | None = None
     if proveedor == "imap":
         host = datos.get("host")
         port = datos.get("port")
@@ -150,6 +169,17 @@ def _fuente_desde_json(id_fuente: str, datos: dict) -> FuenteConfig:
             raise FuenteInvalidaError(
                 f"fuente.json for {id_fuente!r} is missing required field: port"
             )
+        if "carpetas" in datos and datos["carpetas"] is not None:
+            valor_carpetas = datos["carpetas"]
+            if (
+                not isinstance(valor_carpetas, list)
+                or not valor_carpetas
+                or not all(isinstance(c, str) and c for c in valor_carpetas)
+            ):
+                raise FuenteInvalidaError(
+                    f"fuente.json for {id_fuente!r} names an invalid carpetas: {valor_carpetas!r}"
+                )
+            carpetas = tuple(valor_carpetas)
 
     return FuenteConfig(
         id=id_fuente,
@@ -161,6 +191,7 @@ def _fuente_desde_json(id_fuente: str, datos: dict) -> FuenteConfig:
         host=host,
         port=port,
         origen=origen,
+        carpetas=carpetas,
     )
 
 
@@ -191,6 +222,7 @@ def guardar_fuente(directorio_datos: str, fuente: FuenteConfig) -> None:
             "host": fuente.host,
             "port": fuente.port,
             "origen": fuente.origen,
+            "carpetas": list(fuente.carpetas) if fuente.carpetas is not None else None,
         }
     ).encode("utf-8")
     cripto.escribir_archivo_sensible(ruta, contenido)

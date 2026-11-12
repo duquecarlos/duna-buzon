@@ -28,6 +28,22 @@ no folder at all, by name or otherwise, so there was nothing to cite --
 `_NOMBRES_EXCLUIDOS` is this provider's own, built from the names Zoho,
 Gmail and Outlook actually use for Trash/Junk/Sent/Drafts/All-Mail.
 
+`carpetas` (`BUZON-IMAP-CARPETAS-INCLUIDAS-1`), when given, narrows
+`_carpetas_a_examinar` to ONLY folders whose LIST name equals one of its
+entries or sits under one of them in the server's own hierarchy --
+`entrada + <delimiter> + anything`, the delimiter each LIST response line
+carries itself (quoted string, or `NIL` -- no hierarchy -- parsed to
+`None`). This is never a bare prefix match: a folder named "Legales" is
+never mistaken for a child of an entry "Legal", since it does not start
+with `"Legal" + delimiter`. The exclusion rules above still apply first --
+`carpetas` can only ever narrow further, never pull in a Trash/Junk/Sent/
+Drafts/All-Mail folder. `None` (the default, and every source before this
+slice) means today's behaviour exactly: every folder not excluded. The
+cursor is pruned to match: a folder whose stored cursor is no longer
+included (because `carpetas` changed, or the folder itself became
+excluded) is dropped from `cursor_proveedor` the next time `listar_mensajes`
+runs, never carried forward silently.
+
 The cursor is now per folder: `(UIDVALIDITY, UID)` for each folder kept,
 since UID is only unique within one folder and UIDVALIDITY changing means
 the server reset that folder's own UID numbering, never another folder's.
@@ -241,21 +257,21 @@ def _parsear_atomo(texto: str, pos: int) -> tuple[str | None, int]:
     return (None if atomo == "NIL" else atomo), pos
 
 
-def _parsear_linea_list(texto: str) -> tuple[list[str], str] | None:
+def _parsear_linea_list(texto: str) -> tuple[list[str], str | None, str] | None:
     """One `LIST` response line: `(<flags>) "<delimiter>" <name>`, where
     `<name>` (and the delimiter) may be a quoted string or an atom (`NIL`
-    for the delimiter on a server that has none). Reuses the same
-    parenthesized-list/string/atom grammar `_parsear_valor` already speaks
-    for `BODYSTRUCTURE`, since IMAP's flag list is exactly that grammar.
-    Returns `None` for a line this provider cannot make sense of -- caller
-    skips it rather than failing the whole `LIST`."""
+    for the delimiter on a server that has none, parsed to `None` here).
+    Reuses the same parenthesized-list/string/atom grammar `_parsear_valor`
+    already speaks for `BODYSTRUCTURE`, since IMAP's flag list is exactly
+    that grammar. Returns `None` for a line this provider cannot make sense
+    of -- caller skips it rather than failing the whole `LIST`."""
     texto = texto.strip()
     if not texto.startswith("("):
         return None
     try:
         banderas, pos = _parsear_lista(texto, 0)
         pos = _saltar_espacios(texto, pos)
-        _, pos = _parsear_valor(texto, pos)  # the delimiter -- unused here
+        delimitador, pos = _parsear_valor(texto, pos)
         pos = _saltar_espacios(texto, pos)
         if pos >= len(texto):
             return None
@@ -264,7 +280,11 @@ def _parsear_linea_list(texto: str) -> tuple[list[str], str] | None:
         return None
     if not isinstance(nombre, str):
         return None
-    return [str(b) for b in banderas if b is not None], nombre
+    return (
+        [str(b) for b in banderas if b is not None],
+        delimitador if isinstance(delimitador, str) else None,
+        nombre,
+    )
 
 
 def _carpeta_excluida(banderas: Sequence[str], nombre: str) -> bool:
@@ -279,6 +299,20 @@ def _carpeta_excluida(banderas: Sequence[str], nombre: str) -> bool:
         # regardless of what it happens to be named.
         return False
     return nombre.casefold() in _NOMBRES_EXCLUIDOS
+
+
+def _carpeta_en_lista(nombre: str, delimitador: str | None, carpetas: Sequence[str]) -> bool:
+    """`nombre` matches one of `carpetas`' own entries exactly, or sits
+    under one of them in the server's own hierarchy (`entrada +
+    delimitador + lo-que-sea`). Never a bare prefix match -- without the
+    delimiter boundary, an entry "Legal" would wrongly match a sibling
+    folder "Legales"."""
+    for entrada in carpetas:
+        if nombre == entrada:
+            return True
+        if delimitador and nombre.startswith(entrada + delimitador):
+            return True
+    return False
 
 
 def _entrecomillar_imap(nombre: str) -> str:
@@ -480,6 +514,7 @@ class ClienteImap:
         usuario: str,
         password: str,
         cursor_proveedor_inicial: str | None = None,
+        carpetas: Sequence[str] | None = None,
         construir_conexion: Callable[[str, int], ConexionImapProtocolo] = _construir_conexion_ssl_real,
     ) -> None:
         self._host = host
@@ -488,6 +523,7 @@ class ClienteImap:
         self._password = password
         self._cursor_inicial = cursor_proveedor_inicial
         self._cursor_inicial_mapa = _analizar_cursor_multi(cursor_proveedor_inicial)
+        self._carpetas = tuple(carpetas) if carpetas is not None else None
         self._construir_conexion = construir_conexion
         self._conexion: ConexionImapProtocolo | None = None
         self._carpeta_actual: str | None = None
@@ -521,19 +557,17 @@ class ClienteImap:
         self._conexion = conexion
         return conexion
 
-    def _carpetas_a_examinar(self) -> list[str]:
-        """Every folder this pass should `EXAMINE`: the server's own `LIST`
-        of selectable folders, minus `\\Noselect` and whichever SPECIAL-USE
-        attribute or (failing that) name marks Trash/Junk/Sent/Drafts/
-        All-Mail -- see this module's own docstring. Sorted for a
-        deterministic, repeatable order across passes; a line this
-        provider cannot parse is skipped, not fatal, since one odd entry
-        from a server must never stop every other folder from being read."""
+    def _listar_carpetas_crudo(self) -> list[tuple[list[str], str | None, str]]:
+        """The server's own `LIST` of selectable folders, parsed but
+        unfiltered -- every line `_parsear_linea_list` can make sense of, in
+        the order the server sent them. A line this provider cannot parse is
+        skipped, not fatal, since one odd entry from a server must never
+        stop every other folder from being read."""
         conexion = self._conexion_activa()
         typ, dat = conexion.list()
         if typ != "OK":
             raise ClienteImapErrorTransitorio("list", detalle=typ)
-        carpetas: list[str] = []
+        resultado: list[tuple[list[str], str | None, str]] = []
         for entrada in dat or []:
             if entrada is None:
                 continue
@@ -541,11 +575,42 @@ class ClienteImap:
             analizada = _parsear_linea_list(texto)
             if analizada is None:
                 continue
-            banderas, nombre = analizada
-            if _carpeta_excluida(banderas, nombre):
-                continue
-            carpetas.append(nombre)
-        return sorted(carpetas)
+            resultado.append(analizada)
+        return resultado
+
+    def _incluida(self, banderas: Sequence[str], delimitador: str | None, nombre: str) -> bool:
+        """Whether THIS source would read `nombre`: not excluded (SPECIAL-USE
+        or the name fallback), AND -- when `self._carpetas` narrows this
+        source -- matched by it."""
+        if _carpeta_excluida(banderas, nombre):
+            return False
+        if self._carpetas is None:
+            return True
+        return _carpeta_en_lista(nombre, delimitador, self._carpetas)
+
+    def _carpetas_a_examinar(self) -> list[str]:
+        """Every folder this pass should `EXAMINE` -- every folder
+        `_incluida` keeps, sorted for a deterministic, repeatable order
+        across passes."""
+        return sorted(
+            nombre
+            for banderas, delimitador, nombre in self._listar_carpetas_crudo()
+            if self._incluida(banderas, delimitador, nombre)
+        )
+
+    def listar_carpetas_con_estado(self) -> list[tuple[str, tuple[str, ...], bool]]:
+        """For the `carpetas` operator command: every folder the server's
+        `LIST` returns -- INCLUDING an excluded one, so the operator can see
+        the whole picture before the first sync -- with its own flags and
+        whether THIS source would read it. A read-only `LIST` only: no
+        `EXAMINE`, no message content, no credential printed anywhere."""
+        return sorted(
+            (
+                (nombre, tuple(banderas), self._incluida(banderas, delimitador, nombre))
+                for banderas, delimitador, nombre in self._listar_carpetas_crudo()
+            ),
+            key=lambda fila: fila[0],
+        )
 
     def _examinar_carpeta(self, nombre: str) -> tuple[int, int | None]:
         conexion = self._conexion_activa()
@@ -611,9 +676,16 @@ class ClienteImap:
         return sorted({int(tok) for tok in cadena.split()})
 
     def listar_mensajes(self, desde: datetime.datetime) -> Iterator[MensajeResumen]:
-        mapa_cursor = dict(self._cursor_inicial_mapa)
+        carpetas_incluidas = self._carpetas_a_examinar()
+        # Pruned up front: a folder's stored cursor is dropped the moment
+        # that folder is no longer included -- `carpetas` narrowed, or the
+        # folder itself became excluded -- never carried forward silently
+        # (BUZON-IMAP-CARPETAS-INCLUIDAS-1).
+        mapa_cursor = {
+            carpeta: par for carpeta, par in self._cursor_inicial_mapa.items() if carpeta in carpetas_incluidas
+        }
 
-        for nombre_carpeta in self._carpetas_a_examinar():
+        for nombre_carpeta in carpetas_incluidas:
             uidvalidity, uidnext = self._examinar_carpeta(nombre_carpeta)
             cursor_previo = mapa_cursor.get(nombre_carpeta)
 
