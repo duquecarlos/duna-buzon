@@ -106,6 +106,63 @@ def test_estado_reporta_cursor_y_la_ultima_pasada(
     assert "fuente=hotmail-carlos vistos=1 reenviados=1" in salida.out
 
 
+def test_estado_fuente_nunca_entrada_sugiere_entrar(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1 -- a source with no cursor AND no
+    # credencial.bin never even ran `entrar`; the next step is that, not
+    # `sincronizar`.
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos")
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "fuente=hotmail-carlos cursor=none" in salida
+    assert "fuente=hotmail-carlos siguiente: ejecute 'entrar --fuente hotmail-carlos' para firmar" in salida
+    assert "sincronizar" not in salida
+
+
+def test_estado_fuente_entrada_pero_sin_sincronizar_sugiere_sincronizar(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path, id="hotmail-carlos")
+    cripto.escribir_archivo_sensible(
+        directorio / "credencial.bin", cripto.cifrar(b"{}", config.clave_cifrado)
+    )
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "fuente=hotmail-carlos cursor=none" in salida
+    assert "fuente=hotmail-carlos siguiente: ejecute 'sincronizar' para la primera pasada" in salida
+    assert "entrar" not in salida
+
+
+def test_estado_fuente_de_cuenta_sin_sincronizar_sugiere_sincronizar(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A `origen="cuenta"` source never has a `credencial.bin` at all --
+    # `entrar` is never its next step.
+    config = _config(tmp_path)
+    guardar_fuente(
+        str(tmp_path),
+        FuenteConfig(
+            id="cuenta-abc123",
+            proveedor="microsoft",
+            direccion="carlos@outlook.com",
+            etiqueta="carlos@outlook.com",
+            token_finanzas_ref="carlos",
+            activa=True,
+            origen="cuenta",
+        ),
+    )
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "fuente=cuenta-abc123 siguiente: ejecute 'sincronizar' para la primera pasada" in salida
+    assert "entrar" not in salida
+
+
 def test_estado_con_clave_equivocada_falla(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     config = _config(tmp_path)
     otra_clave = bytes((b + 1) % 256 for b in config.clave_cifrado)
@@ -646,6 +703,26 @@ def test_fuentes_sin_nada_configurado(tmp_path: Path, capsys: pytest.CaptureFixt
     config = _config(tmp_path)
     assert cli.comando_fuentes(config) == 0
     assert "no sources configured" in capsys.readouterr().out
+
+
+def test_fuentes_una_fuente_rota_no_aborta_la_lista_de_las_sanas(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # BUZON-FUENTES-LISTAR-RESILIENTE-1 -- one bad `fuente.json` used to
+    # make `fuentes` (and every other command) raise and print nothing.
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", direccion="carlos@hotmail.com")
+    ruta_rota = tmp_path / "fuentes" / "legal-rota"
+    ruta_rota.mkdir(parents=True)
+    (ruta_rota / "fuente.json").write_text(
+        json.dumps({"proveedor": "imap", "direccion": "a@b.com"}), encoding="utf-8"
+    )
+
+    assert cli.comando_fuentes(config) == 1
+    salida = capsys.readouterr()
+    assert "hotmail-carlos proveedor=microsoft direccion=carlos@hotmail.com" in salida.out
+    assert "fuente=legal-rota error:" in salida.err
+    assert "missing required field" in salida.err
 
 
 def test_agregar_fuente_imap_escribe_fuente_json_sin_firmar(tmp_path: Path) -> None:

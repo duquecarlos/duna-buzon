@@ -9,6 +9,7 @@ import pytest
 from duna_buzon import cripto
 from duna_buzon.fuentes import (
     FuenteConfig,
+    FuenteError,
     FuenteInvalidaError,
     cargar_fuente,
     directorio_fuente,
@@ -16,6 +17,7 @@ from duna_buzon.fuentes import (
     guardar_fuente,
     id_fuente_cuenta,
     listar_fuentes,
+    listar_fuentes_con_errores,
     migrar_fuente_unica_si_necesario,
 )
 
@@ -363,6 +365,43 @@ def test_listar_fuentes_ordenadas_por_id(tmp_path: Path) -> None:
 
     fuentes = listar_fuentes(str(tmp_path))
     assert [f.id for f in fuentes] == ["a-fuente", "z-fuente"]
+
+
+def test_listar_fuentes_una_fuente_rota_no_aborta_el_resto(tmp_path: Path) -> None:
+    # BUZON-FUENTES-LISTAR-RESILIENTE-1 -- one bad `fuente.json` used to
+    # make `listar_fuentes` raise and abort the whole listing.
+    guardar_fuente(str(tmp_path), _fuente(id="a-sana"))
+    guardar_fuente(str(tmp_path), _fuente(id="z-sana"))
+    ruta_rota = tmp_path / "fuentes" / "b-rota"
+    ruta_rota.mkdir(parents=True)
+    (ruta_rota / "fuente.json").write_text(
+        json.dumps({"proveedor": "microsoft", "direccion": "a@b.com"}), encoding="utf-8"
+    )
+
+    fuentes = listar_fuentes(str(tmp_path))
+    assert [f.id for f in fuentes] == ["a-sana", "z-sana"]
+
+
+def test_listar_fuentes_con_errores_reporta_id_y_motivo_sin_contenido(tmp_path: Path) -> None:
+    guardar_fuente(str(tmp_path), _fuente(id="a-sana"))
+    ruta_rota = tmp_path / "fuentes" / "b-rota"
+    ruta_rota.mkdir(parents=True)
+    (ruta_rota / "fuente.json").write_text(
+        json.dumps({"proveedor": "microsoft", "direccion": "a@b.com"}), encoding="utf-8"
+    )
+
+    fuentes, errores = listar_fuentes_con_errores(str(tmp_path))
+    assert [f.id for f in fuentes] == ["a-sana"]
+    assert errores == [
+        FuenteError(id="b-rota", motivo="fuente.json for 'b-rota' is missing required field: etiqueta")
+    ]
+
+
+def test_listar_fuentes_con_errores_sin_nada_roto(tmp_path: Path) -> None:
+    guardar_fuente(str(tmp_path), _fuente(id="a-sana"))
+    fuentes, errores = listar_fuentes_con_errores(str(tmp_path))
+    assert [f.id for f in fuentes] == ["a-sana"]
+    assert errores == []
 
 
 def test_fuentes_activas_filtra_las_inactivas(tmp_path: Path) -> None:

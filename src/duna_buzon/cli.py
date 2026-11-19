@@ -55,6 +55,15 @@ def _migrar_si_necesario(config: Config) -> None:
     modulo_fuentes.migrar_fuente_unica_si_necesario(config.directorio_datos, config.clave_cifrado)
 
 
+def _tiene_credencial(directorio_fuente: str) -> bool:
+    """Whether a `local`-origen source ever completed `entrar` --
+    `credencial.bin` present and non-empty, the same "empty is absent"
+    convention `auth.py` and `credencial_imap.py` already use for this
+    same file (`BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1`)."""
+    ruta = Path(directorio_fuente) / modulo_fuentes.NOMBRE_ARCHIVO_CREDENCIAL
+    return ruta.is_file() and ruta.stat().st_size > 0
+
+
 def comando_entrar(config: Config, id_fuente: str | None) -> int:
     _migrar_si_necesario(config)
     todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
@@ -328,6 +337,14 @@ def comando_estado(config: Config) -> int:
             print(f"fuente={fuente.id} cursor={datos['cursor']}")
         else:
             print(f"fuente={fuente.id} cursor=none")
+            # BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1 -- no cursor yet means
+            # either "never completed entrar" or "signed in but never
+            # synced"; `origen="cuenta"` has no entrar step at all, so it
+            # is always the second. Each gets its own next command.
+            if fuente.origen == "local" and not _tiene_credencial(directorio):
+                print(f"fuente={fuente.id} siguiente: ejecute 'entrar --fuente {fuente.id}' para firmar")
+            else:
+                print(f"fuente={fuente.id} siguiente: ejecute 'sincronizar' para la primera pasada")
 
         ruta_estado = Path(directorio) / NOMBRE_ARCHIVO_ESTADO
         if ruta_estado.is_file():
@@ -338,8 +355,8 @@ def comando_estado(config: Config) -> int:
 
 def comando_fuentes(config: Config) -> int:
     _migrar_si_necesario(config)
-    todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
-    if not todas:
+    todas, errores = modulo_fuentes.listar_fuentes_con_errores(config.directorio_datos)
+    if not todas and not errores:
         print("no sources configured")
         return 0
 
@@ -349,7 +366,9 @@ def comando_fuentes(config: Config) -> int:
             f"{fuente.id} proveedor={fuente.proveedor} direccion={fuente.direccion} "
             f"etiqueta={fuente.etiqueta} estado={estado_txt}"
         )
-    return 0
+    for error in errores:
+        print(f"fuente={error.id} error: {error.motivo}", file=sys.stderr)
+    return 1 if errores else 0
 
 
 def comando_agregar_fuente(
