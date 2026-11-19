@@ -11,9 +11,11 @@ prints every folder that source's own server exposes
 (`BUZON-IMAP-CARPETAS-INCLUIDAS-1`). `carpetas-graph <id>` is its
 microsoft-source twin (`BUZON-CARPETAS-MICROSOFT-CLI-1`). `fijar-carpetas
 <id> [--carpeta X ...] [--todas]` sets or removes an EXISTING imap or
-microsoft source's `carpetas` setting (same slice). Every other command
-touches every configured source on its own, `fuentes.py`'s own job to
-enumerate."""
+microsoft source's `carpetas` setting (same slice). `rebobinar-cursor
+<fuente> <fecha> [--aplicar]` rewinds one source's cursor to an earlier
+ISO date -- dry-run by default, `--aplicar` writes
+(`BUZON-CURSOR-REBOBINAR-CLI-1`). Every other command touches every
+configured source on its own, `fuentes.py`'s own job to enumerate."""
 
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ _COMANDOS = (
     "carpetas",
     "carpetas-graph",
     "fijar-carpetas",
+    "rebobinar-cursor",
 )
 
 _OPCIONES_AGREGAR_FUENTE = (
@@ -54,7 +57,8 @@ _USO = (
     "[--carpeta <nombre> ...]\n"
     "       python -m duna_buzon carpetas <id>\n"
     "       python -m duna_buzon carpetas-graph <id>\n"
-    "       python -m duna_buzon fijar-carpetas <id> (--carpeta <nombre> ... | --todas)"
+    "       python -m duna_buzon fijar-carpetas <id> (--carpeta <nombre> ... | --todas)\n"
+    "       python -m duna_buzon rebobinar-cursor <fuente> <fecha ISO> [--aplicar]"
 )
 
 
@@ -83,6 +87,17 @@ def _parsear_agregar_fuente(resto: list[str]) -> dict[str, object] | None:
     if carpetas:
         opciones["carpetas"] = carpetas
     return opciones
+
+
+def _parsear_rebobinar_cursor(resto: list[str]) -> tuple[str, str, bool] | None:
+    """`<fuente> <fecha> [--aplicar]` -- exactly two positionals, an
+    optional trailing `--aplicar` flag. `None` on any other shape, same
+    convention as `_parsear_fijar_carpetas`."""
+    if len(resto) == 2:
+        return resto[0], resto[1], False
+    if len(resto) == 3 and resto[2] == "--aplicar":
+        return resto[0], resto[1], True
+    return None
 
 
 def _parsear_fijar_carpetas(resto: list[str]) -> tuple[str, list[str] | None, bool] | None:
@@ -125,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     id_fuente_carpetas_graph: str | None = None
     opciones_agregar_fuente: dict[str, object] | None = None
     opciones_fijar_carpetas: tuple[str, list[str] | None, bool] | None = None
+    opciones_rebobinar_cursor: tuple[str, str, bool] | None = None
     pasadas_estado: int | None = None
     if comando == "entrar" and len(resto) == 2 and resto[0] == "--fuente":
         id_fuente = resto[1]
@@ -156,6 +172,12 @@ def main(argv: list[str] | None = None) -> int:
     elif comando == "fijar-carpetas":
         opciones_fijar_carpetas = _parsear_fijar_carpetas(resto)
         if opciones_fijar_carpetas is None:
+            print(_USO, file=sys.stderr)
+            return 2
+        resto = []
+    elif comando == "rebobinar-cursor":
+        opciones_rebobinar_cursor = _parsear_rebobinar_cursor(resto)
+        if opciones_rebobinar_cursor is None:
             print(_USO, file=sys.stderr)
             return 2
         resto = []
@@ -199,6 +221,12 @@ def main(argv: list[str] | None = None) -> int:
         id_fuente_fijar, carpetas_fijar, todas_fijar = opciones_fijar_carpetas
         return cli.comando_fijar_carpetas(
             config, id_fuente_fijar, carpetas=carpetas_fijar, todas=todas_fijar
+        )
+    if comando == "rebobinar-cursor":
+        assert opciones_rebobinar_cursor is not None
+        id_fuente_rebobinar, fecha_rebobinar, aplicar_rebobinar = opciones_rebobinar_cursor
+        return cli.comando_rebobinar_cursor(
+            config, id_fuente_rebobinar, fecha_rebobinar, aplicar=aplicar_rebobinar
         )
     return cli.comando_fuentes(config)
 

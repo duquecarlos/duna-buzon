@@ -9,8 +9,11 @@ early. A 10-minute overlap on every read is this module's caller's job
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from duna_buzon import cripto
@@ -45,6 +48,30 @@ def guardar_cursor(directorio_datos: str, momento: datetime.datetime) -> None:
     cripto.escribir_archivo_sensible(_ruta(directorio_datos), contenido)
 
 
+def guardar_cursor_atomico(directorio_datos: str, momento: datetime.datetime) -> None:
+    """Like `guardar_cursor`, but via a temp file in the SAME directory
+    followed by `os.replace` -- never a window where a reader (or a
+    concurrent `sincronizar` pass) could see a truncated or half-written
+    `cursor.json`. `rebobinar-cursor --aplicar` (BUZON-CURSOR-REBOBINAR-
+    CLI-1) uses this; every other caller keeps `guardar_cursor`'s own
+    truncate-in-place write, unchanged -- the same convention
+    `fuentes.guardar_fuente_atomico` already set for `fuente.json`."""
+    ruta = _ruta(directorio_datos)
+    contenido = json.dumps({"cursor": momento.isoformat()}).encode("utf-8")
+    cripto.asegurar_directorio_datos(ruta.parent)
+    descriptor, temporal = tempfile.mkstemp(dir=str(ruta.parent), prefix=".cursor-", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "wb") as archivo:
+            archivo.write(contenido)
+        if os.name == "posix":
+            os.chmod(temporal, 0o600)
+        os.replace(temporal, ruta)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(temporal)
+        raise
+
+
 def cargar_cursor_proveedor(directorio_datos: str) -> str | None:
     """The provider's own opaque resume token (e.g. IMAP's
     `"<uidvalidity>:<uid>"`, from `graph.MensajeResumen.cursor_proveedor`)
@@ -61,3 +88,17 @@ def guardar_cursor_proveedor(directorio_datos: str, valor: str) -> None:
     cripto.asegurar_directorio_datos(Path(directorio_datos))
     contenido = json.dumps({"cursor_proveedor": valor}).encode("utf-8")
     cripto.escribir_archivo_sensible(_ruta_proveedor(directorio_datos), contenido)
+
+
+def borrar_cursor_proveedor(directorio_datos: str) -> None:
+    """Removes `cursor_proveedor.json` if present. `rebobinar-cursor
+    --aplicar` (BUZON-CURSOR-REBOBINAR-CLI-1) calls this alongside
+    `guardar_cursor_atomico`: an IMAP source's own per-folder UID
+    watermark (`cliente_imap.py`'s `_buscar_uids`) takes precedence over
+    the date cursor whenever one is stored, so rewinding `cursor.json`
+    alone would not make that source re-read anything -- clearing this
+    file forces its next pass back onto the date-based `SINCE` fallback,
+    from the rewound date. Microsoft and Gmail never read this file at
+    all (`graph.py`, `gmail.py` are purely date-driven), so removing it
+    is a safe no-op for them."""
+    _ruta_proveedor(directorio_datos).unlink(missing_ok=True)

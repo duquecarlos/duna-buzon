@@ -1601,3 +1601,170 @@ def test_fuente_de_cuenta_reconectada_reanuda_el_cursor_existente(
 
     assert cli.comando_sincronizar(config) == 0
     assert cursores_vistos == [cursor_previo]
+
+
+# ---------------------------------------------------------------------------
+# `rebobinar-cursor <fuente> <fecha> [--aplicar]` (BUZON-CURSOR-REBOBINAR-CLI-1)
+# ---------------------------------------------------------------------------
+
+
+def _pinned_now(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> datetime.datetime:
+    # Midnight-aligned so "N days back" lands on a clean calendar date --
+    # 2026-11-19T00:00:00 minus 90 days is exactly 2026-08-21T00:00:00.
+    ahora = datetime.datetime(2026, 11, 19, 0, 0, tzinfo=datetime.UTC)
+    monkeypatch.setattr(cli, "_ahora", lambda: ahora)
+    return ahora
+
+
+def test_rebobinar_cursor_id_desconocido_es_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _pinned_now(tmp_path, monkeypatch)
+    assert cli.comando_rebobinar_cursor(config, "no-existe", "2026-11-01", aplicar=False) == 1
+    assert "no-existe" in capsys.readouterr().err
+
+
+def test_rebobinar_cursor_fecha_invalida_es_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+    _pinned_now(tmp_path, monkeypatch)
+    assert cli.comando_rebobinar_cursor(config, "hotmail-carlos", "no-es-una-fecha", aplicar=False) == 1
+    salida = capsys.readouterr().err
+    assert "not a valid" in salida.lower()
+
+
+def test_rebobinar_cursor_rechaza_fecha_futura(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+    _pinned_now(tmp_path, monkeypatch)
+    assert cli.comando_rebobinar_cursor(config, "hotmail-carlos", "2026-12-01", aplicar=False) == 1
+    assert "future" in capsys.readouterr().err.lower()
+
+
+def test_rebobinar_cursor_rechaza_mas_de_90_dias_atras(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+    _pinned_now(tmp_path, monkeypatch)
+    # "now" is pinned to 2026-11-19; 91 days back is 2026-08-20.
+    assert cli.comando_rebobinar_cursor(config, "hotmail-carlos", "2026-08-20", aplicar=False) == 1
+    assert "90" in capsys.readouterr().err
+
+
+def test_rebobinar_cursor_acepta_exactamente_90_dias_atras(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+    _pinned_now(tmp_path, monkeypatch)
+    # 90 days back from 2026-11-19 is 2026-08-21.
+    assert cli.comando_rebobinar_cursor(config, "hotmail-carlos", "2026-08-21", aplicar=False) == 0
+
+
+def test_rebobinar_cursor_dry_run_no_escribe_nada(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon import cursor as modulo_cursor
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+    _pinned_now(tmp_path, monkeypatch)
+    cursor_previo = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
+    modulo_cursor.guardar_cursor(str(directorio), cursor_previo)
+
+    assert cli.comando_rebobinar_cursor(config, "hotmail-carlos", "2026-11-01", aplicar=False) == 0
+    salida = capsys.readouterr().out
+    assert "cursor antes=2026-10-01T00:00:00+00:00" in salida
+    assert "cursor despues=2026-11-01T00:00:00+00:00" in salida
+    assert "dry-run" in salida.lower()
+
+    # Nothing changed on disk.
+    recargado = modulo_cursor.cargar_cursor(
+        str(directorio), valor_inicial=datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
+    )
+    assert recargado == cursor_previo
+
+
+def test_rebobinar_cursor_dry_run_sin_cursor_previo_muestra_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+    _pinned_now(tmp_path, monkeypatch)
+
+    assert cli.comando_rebobinar_cursor(config, "hotmail-carlos", "2026-11-01", aplicar=False) == 0
+    salida = capsys.readouterr().out
+    assert "cursor antes=none" in salida
+
+
+def test_rebobinar_cursor_aplicar_escribe_atomicamente_y_sin_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon import cursor as modulo_cursor
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+    _pinned_now(tmp_path, monkeypatch)
+    cursor_previo = datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC)
+    modulo_cursor.guardar_cursor(str(directorio), cursor_previo)
+
+    assert cli.comando_rebobinar_cursor(config, "hotmail-carlos", "2026-11-01", aplicar=True) == 0
+    salida = capsys.readouterr().out
+    assert "cursor antes=2026-10-01T00:00:00+00:00" in salida
+    assert "cursor despues=2026-11-01T00:00:00+00:00" in salida
+
+    recargado = modulo_cursor.cargar_cursor(
+        str(directorio), valor_inicial=datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
+    )
+    assert recargado == datetime.datetime(2026, 11, 1, tzinfo=datetime.UTC)
+
+    nombres = [p.name for p in directorio.iterdir()]
+    assert modulo_cursor.NOMBRE_ARCHIVO in nombres
+    assert not any(n.endswith(".tmp") for n in nombres)
+
+
+def test_rebobinar_cursor_aplicar_borra_el_cursor_proveedor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rewind clears the IMAP per-folder UID watermark too, so the next
+    pass actually re-reads from the rewound date instead of resuming past
+    it -- without this, `cliente_imap.py`'s own UID-resume path would
+    silently override the rewound date cursor (`cursor.borrar_cursor_
+    proveedor`'s own docstring)."""
+    from duna_buzon import cursor as modulo_cursor
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(
+        tmp_path, id="legal-duna", proveedor="imap", direccion="legal@duna.solutions"
+    )
+    _pinned_now(tmp_path, monkeypatch)
+    modulo_cursor.guardar_cursor(str(directorio), datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC))
+    modulo_cursor.guardar_cursor_proveedor(str(directorio), '{"INBOX": "1:42"}')
+
+    assert cli.comando_rebobinar_cursor(config, "legal-duna", "2026-11-01", aplicar=True) == 0
+    assert modulo_cursor.cargar_cursor_proveedor(str(directorio)) is None
+
+
+def test_rebobinar_cursor_aplicar_sin_cursor_proveedor_no_falla(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+    _pinned_now(tmp_path, monkeypatch)
+    assert cli.comando_rebobinar_cursor(config, "hotmail-carlos", "2026-11-01", aplicar=True) == 0
+
+
+def test_rebobinar_cursor_fecha_sin_zona_se_asume_utc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path, id="hotmail-carlos", proveedor="microsoft")
+    _pinned_now(tmp_path, monkeypatch)
+    assert cli.comando_rebobinar_cursor(config, "hotmail-carlos", "2026-11-01T08:00:00", aplicar=False) == 0
+    assert "cursor despues=2026-11-01T08:00:00+00:00" in capsys.readouterr().out
