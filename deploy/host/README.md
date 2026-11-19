@@ -74,6 +74,7 @@ sudo -n /usr/local/sbin/duna-deploy-buzon carpetas <id>
 sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> <carpeta>...
 sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> --todas
 sudo -n /usr/local/sbin/duna-deploy-buzon registros <unidad> [n]
+sudo -n /usr/local/sbin/duna-deploy-buzon rebobinar-cursor <id> <fecha ISO> [--aplicar]
 ```
 
 `status` is read-only: the owner's own `git` HEAD, `duna-buzon.timer`'s `systemctl is-active`,
@@ -94,7 +95,9 @@ session): it signs in interactively and prints Microsoft's own device-code URL t
 autoactualizar kept, undoing its most recent install. `carpetas <id>` and `fijar-carpetas <id> ...` are
 `BUZON-CARPETAS-MICROSOFT-CLI-1`'s operator tooling over an existing source's `carpetas` setting -- see
 "Choosing and setting `carpetas`" below. `registros <unidad> [n]` is read-only: see "Reading a unit's
-own log (`registros`)" below.
+own log (`registros`)" below. `rebobinar-cursor <id> <fecha> [--aplicar]` rewinds one source's own
+cursor to re-read from an earlier date -- dry-run by default: see "Re-reading a source from an earlier
+date (`rebobinar-cursor`)" below.
 
 ## Operator steps (first deploy, by Carlos)
 
@@ -260,6 +263,25 @@ credentials half of any `postgres://`/`postgresql://` URL, and the value of any
 redacted `journalctl` call on its own, automatically, for the last 30 lines of `duna-buzon.service`
 whenever that unit's `systemctl is-active` reports `failed` -- so a failing pass is diagnosable from
 `status` alone, without a separate `registros` call.
+
+## Re-reading a source from an earlier date (`rebobinar-cursor`)
+
+As of `BUZON-CURSOR-REBOBINAR-CLI-1`, there is an operator verb to re-read a source from an earlier
+date after a bad pass -- before this, the only way was hand-editing `cursor.json` on the server:
+
+```
+sudo -n /usr/local/sbin/duna-deploy-buzon rebobinar-cursor <id> <fecha ISO> [--aplicar]
+```
+
+DRY-RUN BY DEFAULT: prints the source's current cursor and the computed new one, writes nothing.
+`--aplicar` writes `cursor.json` atomically and also clears `cursor_proveedor.json` -- necessary for an
+IMAP source, whose own per-folder UID watermark would otherwise override the rewound date on the very
+next pass; a safe no-op for Microsoft and Gmail sources, which never read that file. Refuses an unknown
+source, a date that is not valid ISO 8601, a date in the future, and a date more than 90 days back.
+Re-forwarding mail already sent is NOT this command's own job to prevent: the next pass's duplicate
+guard (Finanzas answers a re-seen message with `200`, not `201`, on `id_externo`) counts it as
+`duplicados`, never `reenviados`. Takes effect on the next scheduled pass, or run one by hand with
+`systemd-run` as in `status`'s own health check.
 
 ## Trust boundary
 

@@ -2209,3 +2209,122 @@ connector's own internal state and CLI-output logic. All three conditions clear,
 Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): a reversible addition to an existing
 read-only operator surface (`estado`), no wire, no schema, following directly from the hub census this
 slice is a named follow-up to.
+
+## BUZON-CURSOR-REBOBINAR-CLI-1 -- `rebobinar-cursor`, dry-run by default (2026-11-19)
+
+### Why
+
+Follow-up to `BUZON-HUB-CENSO-2026-11-19`: there is no supported way to re-read a source from an
+earlier date after a bad pass -- today that means hand-editing `cursor.json` on the server, which the
+orchestrator may not do (it runs only entry-script verbs).
+
+### What changed
+
+**A new CLI verb, `rebobinar-cursor <fuente> <fecha ISO> [--aplicar]`** (`cli.comando_rebobinar_cursor`,
+wired in `__main__.py`). DRY-RUN BY DEFAULT: validates the source and the date, then prints the current
+cursor and the computed new one, writing nothing. `--aplicar` writes `cursor.json` atomically via a new
+`cursor.guardar_cursor_atomico` (temp file in the same directory + `os.replace`, mode 0600 where the OS
+supports it -- the same shape `fuentes.guardar_fuente_atomico` already uses for `fuente.json`;
+`cursor.guardar_cursor`'s own existing truncate-in-place write is untouched, since every other caller of
+it keeps that behaviour). Refuses, before writing anything: an unknown source (`FuenteInvalidaError`,
+same message `fijar-carpetas` already uses), a date that is not valid ISO 8601, a date in the future,
+and a date more than `LIMITE_REBOBINAR_DIAS` (90, a named constant) days before now.
+
+**`--aplicar` also clears `cursor_proveedor.json`** (a new `cursor.borrar_cursor_proveedor`, a plain
+`Path.unlink(missing_ok=True)`). This is NOT optional polish: reading `cliente_imap.py` showed that an
+IMAP source's own per-folder UID watermark (`_buscar_uids`'s `cursor_previo`) takes precedence over the
+date cursor whenever one is stored for that folder -- rewinding `cursor.json` alone would leave an IMAP
+source's next pass resuming from its old UID, never re-reading anything, which would make the verb a
+silent no-op for exactly the provider most likely to need it (a shared mailbox with folder-filed
+invoices). Clearing the file forces the next pass back onto the date-based `SINCE` fallback, from the
+rewound date. Microsoft (`graph.py`) and Gmail (`gmail.py`) are purely date-driven and never read this
+file at all (confirmed by reading both modules' own `listar_mensajes`), so clearing it for them is a
+safe no-op.
+
+**Exposed on the host entry script** as `rebobinar-cursor <id> <fecha ISO> [--aplicar]`
+(`cmd_rebobinar_cursor`), with the same argument-shape guard style as every other verb: `<id>` against
+the existing `ID_FUENTE_RE`, `<fecha>` against a new `FECHA_ISO_RE` (shape only -- a bare ISO date or a
+full timestamp with an optional fractional second and `Z`/offset suffix; calendar validity, the future
+check and the 90-day cap are all python's own job, never duplicated in bash). Each argument reaches
+python as its own argv element, never a shell string.
+
+**The duplicate guard, measured, not assumed.** `sincronizar.ejecutar_pasada` calls
+`FinanzasClient.enviar_entrada` for every message that matches this source's own rules; Finanzas answers
+a message whose `id_externo` it already holds with HTTP `200` (not `201`), which `finanzas.py`'s own
+`enviar_entrada` turns into `ResultadoEnvio(estado="duplicated", ...)`, and `ejecutar_pasada` counts that
+as `Contadores.duplicados`, advancing the cursor past it, NEVER incrementing `Contadores.reenviados` or
+calling anything that could re-send to a downstream system. This is true regardless of how the pass's
+own starting cursor was set, so a rewound source's next pass can only ever re-count mail Finanzas
+already holds (`duplicados`) or newly forward mail it does not (`reenviados`) -- never re-forward the
+same entry twice. Read from `src/duna_buzon/finanzas.py` lines 120-131 and
+`src/duna_buzon/sincronizar.py` lines 143-151; no live run against a real mailbox or a real Finanzas
+instance was needed or performed, per this repository's own gate contract.
+
+### Shape decisions this slice made, not otherwise specified
+
+- **`--aplicar` also clears `cursor_proveedor.json`**, which the spec's own build instructions did not
+  name. Not doing so would make the verb's own stated purpose ("re-read a source from an earlier date")
+  silently fail for every IMAP source -- a correctness gap discovered by reading `cliente_imap.py`
+  before writing a single line of CLI code, not a product-shape question, so it did not warrant
+  `RULING_NEEDED`.
+- **`cursor.guardar_cursor_atomico` is a new function, not a change to `guardar_cursor`.** Every other
+  caller of `guardar_cursor` (`sincronizar`'s own per-pass advance, many times a day) keeps its existing
+  truncate-in-place write unchanged; only this one, occasional, operator-triggered write gets the
+  temp-file-then-`os.replace` treatment the spec asked for.
+- **Dry-run prints `cursor antes=<...>`/`cursor despues=<...>`** (and, when present, a third line noting
+  `cursor_proveedor` will also be cleared), the same two-line `antes=`/`despues=` shape
+  `fijar-carpetas` already uses for `carpetas` -- one convention for every "show the change" CLI output,
+  not a new one for this verb.
+- **A naive (no-timezone) `<fecha>` is assumed UTC**, matching `reglas.json`'s own `desde` field and
+  every other datetime this connector parses from outside input.
+
+### Tests, measured
+
+27 new `def test_` functions (one `grep -c '^+def test_'` over this slice's own diff against `main`):
+`tests/test_cursor.py` gets 6 -- `guardar_cursor_atomico`'s round trip, no leftover `.tmp` file,
+overwriting an existing cursor, and its own 0600 mode (skipped on Windows, same convention as this
+file's existing tests); `borrar_cursor_proveedor` with no file present (no-op, never raises) and
+removing an existing one. `tests/test_cli.py` gets 11 -- an unknown source, an invalid date, a future
+date, more than 90 days back refused, exactly 90 days back accepted, dry-run prints before/after and
+writes nothing (with and without a prior cursor), `--aplicar` writes atomically with no leftover `.tmp`,
+`--aplicar` clears an existing `cursor_proveedor.json` for an imap source, `--aplicar` with no
+`cursor_proveedor.json` present does not fail, and a naive date is read as UTC. `tests/test_main.py`
+gets 5 -- missing arguments, an unrecognized third argument, dispatch without `--aplicar`, dispatch with
+`--aplicar`, and an unrecognized flag in the `--aplicar` position are all usage errors or correct
+dispatch. `tests/test_host_deploy_entry_script.py` gets 5 -- the subcommand is recognised, a
+parametrized set of invalid shapes (missing arguments, an invalid id, an invalid date shape, a trailing
+unknown argument, shell metacharacters in either positional) are refused with usage, a parametrized set
+of valid shapes (a bare date, a full timestamp with `Z` or an offset, with and without `--aplicar`)
+passes shape-checking and fails only on EUID, python-forwarding never interpolates into a shell string,
+and `--aplicar` is translated to the python flag only inside its own `if`.
+
+`uv run pytest -q` on the slice branch (`feat/buzon-cursor-rebobinar-cli-1`), tree
+`e7068156e1dd99aa8155e50f338282f8de13dbeb` (slice commit `80c486dbc76a9ea2810c82b8cd7e42afe6d03654`):
+
+    530 passed, 9 skipped in 280.15s (0:04:40)
+
+The 9 skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger has
+recorded, plus this slice's own new `guardar_cursor_atomico` mode-0600 test skipping the same way on
+this Windows development machine -- one more skip than the previous entry's 8, exactly accounting for
+the one new `no_es_windows`-gated test. This slice's base (`main` at the commit this branch forked
+from, `31b445dbb00eee86f32dbffba5540f662ef51465`) already carried 503 passing tests (530 minus this
+slice's own 27, all of which pass), ahead of the 493 the previous ledger entry measured -- the
+difference is other work landed on `main` between that entry and this slice's base, outside this
+slice's own diff and not re-verified here.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, same as every earlier entry. No
+customer-facing bytes -- every new byte here is operator-facing: `rebobinar-cursor`'s own stdout/stderr,
+read only by Carlos (or the orchestrator, running the entry script through `sudo -n`) as this
+connector's own operator, and the two `README.md` files, read only by the same operator -- the same
+reasoning every earlier CLI-verb entry in this ledger recorded. No cross-repo contract -- nothing here
+touches the Finanzas wire or the Cuenta Duna wire; the duplicate-guard behaviour this slice depends on
+and documents is read, not changed. All three conditions clear, and the approval ("Merge on GREEN.")
+authorizes merging without waiting -- merged on green, no pause.
+
+### Attribution
+
+Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): an operator CLI verb with a
+dry-run default over existing per-source state, no wire, no schema, following directly from the hub
+census this slice is a named follow-up to.

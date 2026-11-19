@@ -136,6 +136,18 @@ The commands:
   EXISTING imap or microsoft source's `carpetas` setting (same slice), for when a source was created
   without `--carpeta` or needs it changed later. Validates the id exists, writes `fuente.json`
   atomically, prints the before and after lists, and never touches `credencial.bin` or the cursor.
+- `rebobinar-cursor <fuente> <fecha ISO> [--aplicar]` -- rewinds one source's own cursor to an earlier
+  date, so its next `sincronizar` pass re-reads what the provider still has from that date on
+  (`BUZON-CURSOR-REBOBINAR-CLI-1`) -- the only way to re-read a source after a bad pass; otherwise that
+  means hand-editing `cursor.json` on the server. DRY-RUN BY DEFAULT: prints the current cursor and the
+  computed new one, writes nothing. `--aplicar` writes `cursor.json` atomically (same temp-file-then-
+  `os.replace` technique `fijar-carpetas` uses for `fuente.json`) and also clears
+  `cursor_proveedor.json` -- an IMAP source's own per-folder UID watermark otherwise overrides the
+  rewound date on the very next pass; a safe no-op for Microsoft and Gmail, which never read that file.
+  Refuses an unknown source, an invalid or future date, and a date more than 90 days back. Re-forwarding
+  mail already sent is prevented by `sincronizar`'s own duplicate guard on `id_externo` (Finanzas
+  answers a re-seen message `200`, not `201`, counted as `duplicados`, never `reenviados`), never by
+  this command itself.
 
 ### Narrowing an IMAP source to specific folders (BUZON-IMAP-CARPETAS-INCLUIDAS-1)
 
