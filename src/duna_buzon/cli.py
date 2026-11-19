@@ -50,6 +50,10 @@ PASADAS_PREDETERMINADAS = 5
 # needs the >64 fallback below for a source this connector itself created.
 LIMITE_ID_FUENTE_AGREGAR = 48
 
+# BUZON-CURSOR-REBOBINAR-CLI-1 -- `rebobinar-cursor` refuses a date more
+# than this many days before now: a named constant, never a magic number.
+LIMITE_REBOBINAR_DIAS = 90
+
 
 def _ahora() -> datetime.datetime:
     """BUZON-GRAPH-TIMEOUT-1 -- the one clock read this module does, so a
@@ -608,4 +612,84 @@ def comando_fijar_carpetas(
     despues = list(nuevas) if nuevas else []
     print(f"fuente={id_fuente} carpetas antes={antes}")
     print(f"fuente={id_fuente} carpetas despues={despues}")
+    return 0
+
+
+def comando_rebobinar_cursor(
+    config: Config, id_fuente: str, fecha: str, *, aplicar: bool
+) -> int:
+    """Rewinds one source's own date cursor to an earlier ISO date, so its
+    next `sincronizar` pass re-reads everything the provider still has
+    from that date on -- the only way to re-read a source after a bad
+    pass (BUZON-CURSOR-REBOBINAR-CLI-1); today that otherwise means
+    hand-editing `cursor.json` on the server. DRY-RUN by default: prints
+    the current cursor and the computed new one, writes nothing. Only
+    `--aplicar` writes, atomically (`cursor.guardar_cursor_atomico`, the
+    same temp-file-then-`os.replace` technique `fijar-carpetas` already
+    uses for `fuente.json`), and also clears `cursor_proveedor.json` --
+    required for an IMAP source, whose own per-folder UID watermark would
+    otherwise override the rewound date on the very next pass (see
+    `cursor.borrar_cursor_proveedor`'s own docstring); a safe no-op for
+    Microsoft and Gmail, which never read that file.
+
+    Refuses: an unknown source (`FuenteInvalidaError`, same message
+    `fijar-carpetas` already uses), a date that is not valid ISO 8601, a
+    date in the future, and a date more than `LIMITE_REBOBINAR_DIAS` days
+    before now.
+
+    Re-forwarding mail already sent is NOT this command's own job to
+    prevent: the next pass's own duplicate guard
+    (`sincronizar.ejecutar_pasada`, via Finanzas' 200-vs-201 response on
+    `id_externo` -- `finanzas.FinanzasClient.enviar_entrada`) answers
+    every re-seen message `"duplicated"`, counted in
+    `Contadores.duplicados`, never `reenviados` -- so a rewind can only
+    ever re-count or newly forward mail, never re-forward what Finanzas
+    already holds."""
+    _migrar_si_necesario(config)
+    try:
+        fuente = modulo_fuentes.cargar_fuente(config.directorio_datos, id_fuente)
+    except FuenteInvalidaError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        nueva = datetime.datetime.fromisoformat(fecha)
+    except ValueError:
+        print(f"error: {fecha!r} is not a valid ISO 8601 date", file=sys.stderr)
+        return 1
+    if nueva.tzinfo is None:
+        nueva = nueva.replace(tzinfo=datetime.UTC)
+
+    ahora = _ahora()
+    if nueva > ahora:
+        print(f"error: {fecha!r} is in the future", file=sys.stderr)
+        return 1
+    if nueva < ahora - datetime.timedelta(days=LIMITE_REBOBINAR_DIAS):
+        print(
+            f"error: {fecha!r} is more than {LIMITE_REBOBINAR_DIAS} days back "
+            f"(the {LIMITE_REBOBINAR_DIAS}-day limit)",
+            file=sys.stderr,
+        )
+        return 1
+
+    directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
+    ruta_cursor = Path(directorio) / modulo_cursor.NOMBRE_ARCHIVO
+    actual = (
+        modulo_cursor.cargar_cursor(directorio, valor_inicial=nueva) if ruta_cursor.is_file() else None
+    )
+    antes_txt = actual.isoformat() if actual is not None else "none"
+    tenia_cursor_proveedor = (Path(directorio) / modulo_cursor.NOMBRE_ARCHIVO_PROVEEDOR).is_file()
+
+    print(f"fuente={fuente.id} cursor antes={antes_txt}")
+    print(f"fuente={fuente.id} cursor despues={nueva.isoformat()}")
+    if tenia_cursor_proveedor:
+        print(f"fuente={fuente.id} cursor_proveedor antes=presente despues=none")
+
+    if not aplicar:
+        print(f"fuente={fuente.id} dry-run: nothing written (pass --aplicar to write)")
+        return 0
+
+    modulo_cursor.guardar_cursor_atomico(directorio, nueva)
+    modulo_cursor.borrar_cursor_proveedor(directorio)
+    print(f"fuente={fuente.id} cursor rebobinado")
     return 0

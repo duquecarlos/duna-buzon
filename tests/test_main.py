@@ -429,6 +429,77 @@ def test_fijar_carpetas_todas_se_despacha(tmp_path: Path, monkeypatch: pytest.Mo
     assert recibido[0] == ("hotmail-carlos", None, True)
 
 
+# ---------------------------------------------------------------------------
+# `rebobinar-cursor <fuente> <fecha> [--aplicar]` (BUZON-CURSOR-REBOBINAR-CLI-1)
+# ---------------------------------------------------------------------------
+
+
+def test_rebobinar_cursor_sin_argumentos_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["rebobinar-cursor"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+    assert main(["rebobinar-cursor", "hotmail-carlos"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_rebobinar_cursor_con_argumento_extra_desconocido_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["rebobinar-cursor", "hotmail-carlos", "2026-01-01", "algo-mas"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_rebobinar_cursor_se_despacha_sin_aplicar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(
+        cli,
+        "comando_rebobinar_cursor",
+        lambda config, id_fuente, fecha, *, aplicar: (
+            recibido.append((id_fuente, fecha, aplicar)),
+            0,
+        )[1],
+    )
+    assert main(["rebobinar-cursor", "hotmail-carlos", "2026-01-01"]) == 0
+    assert recibido[0] == ("hotmail-carlos", "2026-01-01", False)
+
+
+def test_rebobinar_cursor_se_despacha_con_aplicar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(
+        cli,
+        "comando_rebobinar_cursor",
+        lambda config, id_fuente, fecha, *, aplicar: (
+            recibido.append((id_fuente, fecha, aplicar)),
+            0,
+        )[1],
+    )
+    assert main(["rebobinar-cursor", "hotmail-carlos", "2026-01-01", "--aplicar"]) == 0
+    assert recibido[0] == ("hotmail-carlos", "2026-01-01", True)
+
+
+def test_rebobinar_cursor_bandera_desconocida_en_tercer_lugar_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["rebobinar-cursor", "hotmail-carlos", "2026-01-01", "--algo"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
 def test_agregar_fuente_puerto_no_numerico_es_uso_incorrecto(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

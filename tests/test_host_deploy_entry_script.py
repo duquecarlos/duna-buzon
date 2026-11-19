@@ -818,6 +818,73 @@ def test_cmd_deploy_instala_solo_las_unidades_que_difieren() -> None:
     assert indice_fin_for < indice_daemon_reload
 
 
+# ---------------------------------------------------------------------------
+# `rebobinar-cursor <id> <fecha> [--aplicar]` (BUZON-CURSOR-REBOBINAR-CLI-1)
+# ---------------------------------------------------------------------------
+
+
+def test_rebobinar_cursor_es_subcomando_reconocido() -> None:
+    contenido = _contenido()
+    assert "rebobinar-cursor)" in contenido
+    assert "cmd_rebobinar_cursor" in contenido
+    assert "FECHA_ISO_RE" in contenido
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("rebobinar-cursor",),
+        ("rebobinar-cursor", "legal-duna"),
+        ("rebobinar-cursor", "legal-duna", "2026-11-01", "--aplicar", "algo-mas"),
+        ("rebobinar-cursor", "Mayusculas-No-Validas", "2026-11-01"),
+        ("rebobinar-cursor", "legal-duna", "no-es-una-fecha"),
+        ("rebobinar-cursor", "legal-duna", "2026-11-01", "--algo"),
+        ("rebobinar-cursor", "legal-duna;rm -rf /", "2026-11-01"),
+        ("rebobinar-cursor", "legal-duna", "2026-11-01;rm -rf /"),
+    ],
+)
+def test_rebobinar_cursor_formas_invalidas_se_rechazan_con_uso(
+    argumentos: tuple[str, ...],
+) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 2
+    assert "usage" in resultado.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("rebobinar-cursor", "legal-duna", "2026-11-01"),
+        ("rebobinar-cursor", "legal-duna", "2026-11-01T08:00:00"),
+        ("rebobinar-cursor", "legal-duna", "2026-11-01T08:00:00Z"),
+        ("rebobinar-cursor", "legal-duna", "2026-11-01T08:00:00+00:00"),
+        ("rebobinar-cursor", "legal-duna", "2026-11-01", "--aplicar"),
+    ],
+)
+def test_rebobinar_cursor_forma_valida_pasa_el_chequeo_de_forma_y_solo_falla_por_euid(
+    argumentos: tuple[str, ...],
+) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 1
+    assert "root" in resultado.stderr.lower()
+    assert "usage" not in resultado.stderr.lower()
+
+
+def test_rebobinar_cursor_nunca_interpola_en_una_cadena_de_shell() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("cmd_rebobinar_cursor() {") : contenido.index("dispatch() {")]
+    assert 'comando=("$REPO/.venv/bin/python" "-m" "duna_buzon" "rebobinar-cursor" "$id" "$fecha")' in bloque
+    assert "eval" not in bloque
+
+
+def test_rebobinar_cursor_aplicar_se_traduce_a_la_bandera_python() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("cmd_rebobinar_cursor() {") : contenido.index("dispatch() {")]
+    indice_if = bloque.index('if [[ "$aplicar" == "1" ]]')
+    indice_append = bloque.index('comando+=("--aplicar")')
+    assert indice_if < indice_append
+
+
 def test_status_reporta_drift_user_y_datos_dir() -> None:
     contenido = _contenido()
     bloque = contenido[contenido.index("cmd_status() {") : contenido.index("cmd_deploy() {")]

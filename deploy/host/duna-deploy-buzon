@@ -13,6 +13,16 @@
 #   sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> <carpeta>...
 #   sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> --todas
 #   sudo -n /usr/local/sbin/duna-deploy-buzon registros <unidad> [n]
+#   sudo -n /usr/local/sbin/duna-deploy-buzon rebobinar-cursor <id> <fecha> [--aplicar]
+#
+# BUZON-CURSOR-REBOBINAR-CLI-1 -- `rebobinar-cursor <id> <fecha ISO>
+# [--aplicar]` forwards straight to `python -m duna_buzon rebobinar-cursor`,
+# dry-run by default. `<id>` and `<fecha>` are each checked against their own
+# fixed regex before anything runs (ID_FUENTE_RE, FECHA_ISO_RE), and each
+# reaches python as its own argv element, never a shell string. python itself
+# refuses an unknown source, a future date, and a date more than 90 days
+# back; this script only ever shapes and forwards the argv, never any of
+# those decisions.
 #
 # BUZON-ENTRADA-UNIDADES-REGISTROS-1 -- `deploy` now diffs EVERY unit file
 # under deploy/systemd/ (duna-buzon.service, duna-buzon.timer) against what
@@ -94,6 +104,14 @@ UNIDADES_JOB=("$SERVICIO")
 ID_FUENTE_RE='^[a-z0-9-]+$'
 CARPETA_RE='^[A-Za-z0-9_ .-]+$'
 
+# BUZON-CURSOR-REBOBINAR-CLI-1 -- the one shape `rebobinar-cursor` ever
+# accepts for its own `<fecha>` argument: a bare ISO date, or a full ISO
+# timestamp with an optional fractional second and an optional `Z`/offset
+# suffix. Checked before anything runs, same convention as ID_FUENTE_RE
+# above; python itself still refuses a future date or one more than 90 days
+# back -- this regex only shapes what reaches argv.
+FECHA_ISO_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})?)?$'
+
 # autoactualizar's own fixed paths (HOST-AUTOACTUALIZAR-BUZON-1) -- constants,
 # like every other path above, never taken from argv or the environment.
 ENTRY_INSTALADO="/usr/local/sbin/duna-deploy-buzon"
@@ -106,7 +124,7 @@ SUDOERS_PREV="/etc/sudoers.d/.duna-deploy-buzon.prev"
 usage() {
     echo "usage: duna-deploy-buzon {status|deploy [--dry-run]|entrar|rollback-script|" \
         "carpetas <id>|fijar-carpetas <id> <carpeta>...|fijar-carpetas <id> --todas|" \
-        "registros <unidad> [n]}" >&2
+        "registros <unidad> [n]|rebobinar-cursor <id> <fecha> [--aplicar]}" >&2
     exit 2
 }
 
@@ -129,6 +147,9 @@ parse_args() {
     FIJAR_CARPETAS=()
     REGISTROS_UNIDAD=""
     REGISTROS_N=""
+    REBOBINAR_ID=""
+    REBOBINAR_FECHA=""
+    REBOBINAR_APLICAR=0
     case "$SUBCOMMAND" in
         status | entrar | rollback-script)
             [[ $# -eq 0 ]] || usage
@@ -177,6 +198,17 @@ parse_args() {
                     FIJAR_CARPETAS+=("$carpeta")
                 done
                 [[ ${#FIJAR_CARPETAS[@]} -gt 0 ]] || usage
+            fi
+            ;;
+        rebobinar-cursor)
+            [[ $# -eq 2 || $# -eq 3 ]] || usage
+            REBOBINAR_ID="$1"
+            [[ "$REBOBINAR_ID" =~ $ID_FUENTE_RE ]] || usage
+            REBOBINAR_FECHA="$2"
+            [[ "$REBOBINAR_FECHA" =~ $FECHA_ISO_RE ]] || usage
+            if [[ $# -eq 3 ]]; then
+                [[ "$3" == "--aplicar" ]] || usage
+                REBOBINAR_APLICAR=1
             fi
             ;;
         *)
@@ -599,6 +631,22 @@ cmd_registros() {
     _mostrar_registros "$unidad" "$n"
 }
 
+# `rebobinar-cursor <id> <fecha> [--aplicar]` -- forwards straight to
+# `python -m duna_buzon rebobinar-cursor`, each argument its own argv
+# element, never a shell string. Dry-run by default; python itself refuses
+# an unknown source, a future date, and a date more than 90 days back
+# (BUZON-CURSOR-REBOBINAR-CLI-1).
+cmd_rebobinar_cursor() {
+    local id="$1" fecha="$2" aplicar="$3"
+    local -a comando=("$REPO/.venv/bin/python" "-m" "duna_buzon" "rebobinar-cursor" "$id" "$fecha")
+    if [[ "$aplicar" == "1" ]]; then
+        comando+=("--aplicar")
+    fi
+    systemd-run --pipe --quiet --wait --uid=duna --gid=duna \
+        --property="EnvironmentFile=$ENV_CLIENTE" --property="EnvironmentFile=$ENV_TOKEN" \
+        --property="WorkingDirectory=$REPO" -- "${comando[@]}"
+}
+
 # For Carlos, at his own terminal: never systemd-run, never --pty -- a real
 # tty is already attached, and this just hands it straight to `duna`. `duna`
 # cannot traverse /srv/duna/env/ on this host, so it can never source either
@@ -657,6 +705,7 @@ dispatch() {
         carpetas) cmd_carpetas "$CARPETA_ID" ;;
         fijar-carpetas) cmd_fijar_carpetas "$FIJAR_ID" "$FIJAR_TODAS" "${FIJAR_CARPETAS[@]+"${FIJAR_CARPETAS[@]}"}" ;;
         registros) cmd_registros "$REGISTROS_UNIDAD" "$REGISTROS_N" ;;
+        rebobinar-cursor) cmd_rebobinar_cursor "$REBOBINAR_ID" "$REBOBINAR_FECHA" "$REBOBINAR_APLICAR" ;;
     esac
 }
 
