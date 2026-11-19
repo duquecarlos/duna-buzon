@@ -55,6 +55,22 @@ copied if it differs, printed as `sin cambios` or `actualizada`, with exactly on
 daemon-reload` after both -- this is unrelated to autoactualizar, which only concerns this entry script
 and its sudoers fragment.
 
+## Automatic rollback on a failed health check (BUZON-DEPLOY-REVIERTE-SOLO-1)
+
+Buzón is a timer job, not a server, so `deploy`'s own health check -- the same `python -m duna_buzon
+estado` run `status` also runs -- IS its health: one pass, not a port to poll. When that check fails,
+`deploy` itself reverts the CODE to the `before` sha it captured at the start of this run (carried
+across autoactualizar's own re-exec, so a changed entry script never loses the real rollback point),
+re-syncs the environment (`uv sync --frozen`) and re-runs that same check once more, printing exactly
+one line -- `rolled back to <sha>: healthy` or `rolled back to <sha>: STILL UNHEALTHY` -- and exiting
+non-zero either way: a rollback that restores the pass is still a failed deploy. `deploy --dry-run`
+prints this revert plan too, without running any of it.
+
+This NEVER rolls back `/srv/duna/data/buzon/` -- cursors, the token cache and `estado.json` are left
+exactly as this run left them. This rollback only undoes a bad CODE change; a bad PASS (a stale cursor,
+a source that read garbage) is `rebobinar-cursor`'s job (see "Re-reading a source from an earlier date"
+below), not this one's.
+
 ## Remove
 
 ```

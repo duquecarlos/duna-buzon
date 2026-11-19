@@ -2328,3 +2328,108 @@ authorizes merging without waiting -- merged on green, no pause.
 Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): an operator CLI verb with a
 dry-run default over existing per-source state, no wire, no schema, following directly from the hub
 census this slice is a named follow-up to.
+
+## BUZON-DEPLOY-REVIERTE-SOLO-1 -- `deploy` reverts code automatically on a failed health check (2026-11-19)
+
+### Why
+
+Guardrail of Carlos's standing deploy go (`ORCH-STANDING-DEPLOY-GO-HASTA-PRIMER-CLIENTE-1`):
+`deploy/host/duna-deploy-buzon` already captured a `before` sha at the start of every `deploy`, but did
+nothing with it -- a deploy whose final health check failed left the broken code running, requiring
+Carlos (or an orchestrator) to notice and fix it by hand. `duna-pagos`' own entry script already reverts
+on a failed health check; this slice ports that shape to a connector that is a timer job, not a server.
+
+### What changed
+
+**`deploy`'s own health check is the one pass this product already calls "health"** -- `python -m
+duna_buzon estado`, run via `systemd-run` as `duna`, the same call `status` runs. Buzón has no port to
+poll and no process to watch stay up, so this one pass IS the health check, unlike `duna-pagos`' own
+HTTP poll. Factored this call out into a new shared `_chequear_salud` (used by `status`, `deploy`'s own
+final check, and the new rollback's own re-check below), so all three agree on exactly what "healthy"
+means without three copies of the same `systemd-run` invocation drifting apart.
+
+**A new `revertir_despliegue`, called ONLY when that health check fails:** reverts the code to the
+`before` sha (`runuser -u "$owner" -- git -C "$REPO" reset --hard "$antes"`), re-syncs the environment
+(`runuser -u "$owner" -- env --chdir="$REPO" uv sync --frozen`), re-runs `_chequear_salud` once more, and
+prints exactly one line -- `rolled back to <sha>: healthy` or `rolled back to <sha>: STILL UNHEALTHY` --
+before exiting non-zero either way: a rollback that restores the pass is still a failed deploy, and
+Carlos (or the orchestrator reading `deploy`'s own exit code) should not read a `0` out of this run.
+`deploy --dry-run` prints this same revert plan as text (`_desc_revertir_despliegue`), alongside every
+other planned step, without running any of it.
+
+**The carried `before` sha is now REAL across autoactualizar's own re-exec**, fixing a latent bug this
+slice's own work surfaced: `cmd_deploy` captured `before` via `git -C "$REPO" rev-parse HEAD` BEFORE the
+pull, but on autoactualizar's re-exec (`exec "$ENTRY_INSTALADO" deploy --internal-reexec`) that same
+rev-parse, run again in the fresh process, answered the commit the pull had ALREADY landed -- not the
+real rollback point. This never mattered before, because nothing ever read `before` for anything; it
+would have mattered the first time an entry-script change shipped in the same deploy as a bad commit.
+Fixed the same way `duna-pagos` fixes it: `autoactualizar` now takes the captured `before` as its own
+argument and exports it as `DUNA_AUTOACTUALIZAR_BEFORE_SHA` immediately before its `exec`; `cmd_deploy`
+reads that env var first (falling back to the normal `rev-parse HEAD` when it is unset, i.e. on every
+deploy that never re-execs) so the sha `revertir_despliegue` reverts to is always the one captured
+before THIS run's own pull, never a pull two processes ago re-measured too late.
+
+**This NEVER rolls back `/srv/duna/data/buzon/`** -- cursors, the token cache and `estado.json` are left
+exactly as the failed run left them, confirmed by a dedicated test that walks every non-comment line of
+`revertir_despliegue` and refuses any line that names `$DATOS_DIR` outside an `echo`. A bad PASS (a stale
+cursor, a source that read garbage) is still `rebobinar-cursor`'s job (`BUZON-CURSOR-REBOBINAR-CLI-1`),
+documented as such in both the entry script's own comment and `deploy/host/README.md`'s new section.
+
+### Shape decisions this slice made, not otherwise specified
+
+- **The revert is code-only, never a cursor/state rollback** -- the spec said this explicitly
+  ("it never rolls back cursors or state files"), so this is not a shape decision so much as a
+  confirmation that `revertir_despliegue` touches nothing under `$DATOS_DIR`, verified by the dedicated
+  test above rather than left to review.
+- **`_chequear_salud` is a new shared helper, replacing three near-identical `systemd-run` blocks**
+  (`status`'s own check, `deploy`'s own final check, and the new rollback's re-check) with one. Not
+  asked for by name in the spec, but the alternative -- three copies of the same invocation -- is exactly
+  the kind of drift this slice's own guardrail exists to prevent elsewhere.
+- **The carried-before-sha fix is in scope**, even though the spec's own prose only said "including the
+  carried `--before-sha` on a re-exec" in passing: without it, the new rollback would have reverted to
+  the WRONG commit on exactly the deploy where autoactualizar's own re-exec fires, silently undermining
+  the guardrail this slice exists to add. Read as part of the build instruction, not a scope expansion.
+- **Message format is plain English** (`rolled back to <sha>: healthy` / `... STILL UNHEALTHY`), matching
+  the spec's own literal wording, rather than Spanish like most of this script's other operator-facing
+  text -- the spec quoted these two lines verbatim, so they are reproduced verbatim.
+
+### Tests, measured
+
+8 new `def test_` functions (`git diff -- tests/test_host_deploy_entry_script.py | grep -c
+'^+def test_'` over this slice's own diff against `main`): the subcommand/function pair is recognised;
+`revertir_despliegue` is called from `cmd_deploy` ONLY inside the failed-health-check branch, and exactly
+once in the whole function; `revertir_despliegue` itself reverts, re-syncs and re-checks in that order,
+prints both possible one-line outcomes, and exits non-zero exactly once; `revertir_despliegue` never
+touches `$DATOS_DIR` outside an `echo`; every `git` call inside it carries `runuser -u` on the same line
+(the same invariant the rest of this script's own test suite already enforces); the before-sha is
+exported before autoactualizar's own `exec`, read back before `cmd_deploy`'s own pull, and reaches
+`autoactualizar` as its own argument; `deploy --dry-run`'s revert plan is present and every line in that
+branch is still a bare `echo` (the same invariant `test_deploy_dry_run_no_ejecuta_nada_real` already
+enforces for the rest of the branch); and `_desc_revertir_despliegue` itself names the reset, the sync,
+both healthy/unhealthy outcomes, and says "never touches" rather than describing a deletion.
+
+`uv run pytest -q` on the slice branch (`feat/buzon-deploy-revierte-solo-1`), tree
+`9ca6d7c780298fd317a6c18420a7d2246cff8eec` (slice commit `16413010f24d1f76d64a788c88d5e4f156e177a1`):
+
+    538 passed, 9 skipped in 427.63s (0:07:07)
+
+The 9 skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger has
+recorded -- this slice added no new skip-gated test. 538 is exactly 530 (this slice's own base,
+`main` at `8a2d16000bc7f3cf8d05f1a89bbce3117b190686`, the tip `BUZON-CURSOR-REBOBINAR-CLI-1-M` left) plus
+this slice's own 8 new tests, all of which pass -- no drift between the two measurements.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, same as every earlier entry. No
+customer-facing bytes -- every changed and new byte here is operator-facing: the entry script's own
+stdout/stderr (read only by Carlos or an orchestrator running it through `sudo -n`) and
+`deploy/host/README.md` (read only by the same operator) -- the same reasoning every earlier host-deploy
+entry in this ledger recorded. No cross-repo contract -- nothing here touches the Finanzas wire, the
+Graph client, or any other repository's contract; the `duna-pagos` entry script this slice reads from is
+read-only reference, never changed. All three conditions clear, and the approval ("Merge on GREEN.")
+authorizes merging without waiting -- merged on green, no pause.
+
+### Attribution
+
+Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): a host-deploy-tooling-only guardrail
+ported from `duna-pagos`' own entry script, no wire, no schema, directly named by the approval.
