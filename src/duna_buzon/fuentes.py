@@ -279,19 +279,48 @@ def guardar_fuente_atomico(directorio_datos: str, fuente: FuenteConfig) -> None:
         raise
 
 
-def listar_fuentes(directorio_datos: str) -> list[FuenteConfig]:
-    """Every source under `fuentes/`, sorted by id. An absent or empty
-    `fuentes/` directory is zero sources, never an error."""
+@dataclass(frozen=True)
+class FuenteError:
+    """One `fuentes/<id>/fuente.json` that `listar_fuentes_con_errores`
+    could not parse -- `motivo` is `FuenteInvalidaError`'s own message,
+    which (like every message that module raises) names only the id and
+    the shape complaint, never a credential or a message's own content."""
+
+    id: str
+    motivo: str
+
+
+def listar_fuentes_con_errores(directorio_datos: str) -> tuple[list[FuenteConfig], list[FuenteError]]:
+    """Every source under `fuentes/`, sorted by id, split into the ones
+    that parsed and the ones that did not. A single bad `fuente.json` is
+    caught and reported HERE, never raised -- one broken child directory
+    never aborts the listing of every other source
+    (`BUZON-FUENTES-LISTAR-RESILIENTE-1`, hub principle `hit_01m7szasnqh2sqbs4dzjrsvyqm`:
+    one failing part is reported, never takes the whole read down)."""
     base = directorio_fuentes(directorio_datos)
     if not base.is_dir():
-        return []
-    fuentes = []
+        return [], []
+    fuentes: list[FuenteConfig] = []
+    errores: list[FuenteError] = []
     for hijo in sorted(base.iterdir(), key=lambda p: p.name):
         if not hijo.is_dir():
             continue
         if not (hijo / NOMBRE_ARCHIVO_FUENTE).is_file():
             continue
-        fuentes.append(cargar_fuente(directorio_datos, hijo.name))
+        try:
+            fuentes.append(cargar_fuente(directorio_datos, hijo.name))
+        except FuenteInvalidaError as exc:
+            errores.append(FuenteError(id=hijo.name, motivo=str(exc)))
+    return fuentes, errores
+
+
+def listar_fuentes(directorio_datos: str) -> list[FuenteConfig]:
+    """Every source under `fuentes/` that parsed cleanly, sorted by id. An
+    absent or empty `fuentes/` directory is zero sources, never an error,
+    and neither is one other source's broken `fuente.json` -- see
+    `listar_fuentes_con_errores` for the one caller (`cli.comando_fuentes`)
+    that also needs to know which source and why."""
+    fuentes, _ = listar_fuentes_con_errores(directorio_datos)
     return fuentes
 
 

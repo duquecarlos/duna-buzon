@@ -107,8 +107,14 @@ The commands:
   `$top=1`, before finally giving up -- the same messages, in the same order, just fewer per page; see "When Graph
   can't list the whole mailbox" below.
 - `estado` -- prints every source's own cursor and last-pass counts, when that pass finished, how many Graph
-  retries it used, and -- for a Microsoft source -- the `$top` it was last using. Nothing personal.
-- `fuentes` -- lists every configured source (id, provider, address, label, active/inactive). No secrets.
+  retries it used, and -- for a Microsoft source -- the `$top` it was last using. Nothing personal. A source with
+  no cursor yet also gets the next command to run: `entrar --fuente <id>` when a `local`-origen source never even
+  signed in, or `sincronizar` when it has (or is `origen="cuenta"`, which has no `entrar` step at all) but has
+  never completed a pass (`BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1`).
+- `fuentes` -- lists every configured source (id, provider, address, label, active/inactive). No secrets. One
+  source whose own `fuente.json` is broken is reported by id and reason (never its contents) on its own line,
+  without stopping the rest of the list from printing (`BUZON-FUENTES-LISTAR-RESILIENTE-1`); every other command
+  that enumerates sources skips a broken one the same way, so a healthy, named source keeps working.
 - `carpetas <id>` -- read-only, for ONE imap source: signs in with its already-stored app password and prints
   every folder the server's `LIST` returns, with its flags and whether this source would read it today. Never
   prints message content or the credential itself -- see "Narrowing an IMAP source to specific folders" below.
