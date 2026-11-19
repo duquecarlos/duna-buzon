@@ -1891,6 +1891,109 @@ next such incident needs no hand edit and no python one-liner.
 
 ---
 
+## BUZON-FUENTES-LISTAR-RESILIENTE-1 -- one broken `fuente.json` is reported, not a crash; `estado` nudges `entrar`/`sincronizar` (2026-11-19)
+
+### Why
+
+From the 19 Nov hub census of this repository (`logs/worker-*-hub-censo-2026-11-19-duna-buzon-*.json`,
+follow-up `BUZON-FUENTES-LISTAR-RESILIENTE-1`), under hub principle `hit_01m7szasnqh2sqbs4dzjrsvyqm`
+("one failing part is reported, never takes the whole read down"): `fuentes.listar_fuentes`
+(`fuentes.py:282-295`) was called by every CLI command and raised `FuenteInvalidaError` on the FIRST bad
+`fuente.json` it found, aborting the listing of every other source -- a healthy source sitting right
+next to a broken one became unreachable by every command (`entrar --fuente <healthy-id>`,
+`sincronizar`, `estado`, `fuentes`, all of them) the moment the broken one existed. Folded in the same
+slice: `BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1`, since `comando_estado` printed `cursor=none` identically for
+a source that had never run `entrar` at all and one that had signed in but never completed a
+`sincronizar` pass -- Carlos could not tell from `estado`'s own output which command to run next.
+Approved under `ORCH-CARLOS-DELEGATES-TIER-1-1` (Carlos delegates), Main as decider.
+
+### What changed
+
+**`fuentes.listar_fuentes` no longer raises on a broken sibling.** A new
+`listar_fuentes_con_errores(directorio_datos) -> tuple[list[FuenteConfig], list[FuenteError]]` walks
+`fuentes/` exactly as before but now catches `FuenteInvalidaError` PER child directory: a source whose
+`fuente.json` fails to parse is skipped and recorded as a `FuenteError(id, motivo)` -- `motivo` is
+`FuenteInvalidaError`'s own message, which (every raise site in `fuentes.py`) names only the id and the
+shape complaint, never a credential or a message's own content. `listar_fuentes` itself is now a thin
+wrapper that returns only the healthy half of that pair, so every existing caller (`comando_entrar`,
+`comando_sincronizar`, `comando_estado`, `comando_carpetas`, `comando_carpetas_graph`,
+`comando_agregar_fuente`) is resilient with no call-site change: a named, healthy source keeps working
+exactly as before, regardless of what else is broken under `fuentes/`.
+
+**`comando_fuentes` (`fuentes`, the one command whose whole job is to show the roster) surfaces the
+errors.** It now calls `listar_fuentes_con_errores` directly, prints every healthy source exactly as
+before, then prints one line per broken source to stderr:
+
+    fuente={id} error: {motivo}
+
+and returns `1` when any source is broken (`0` when the roster is entirely healthy or entirely empty) --
+the same "non-zero means look at stderr" convention `sincronizar` and `estado` already use.
+
+**`comando_estado` (`BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1`) tells the two "no cursor yet" cases apart.**
+Previously, a source with no `cursor.json` always printed only `fuente={id} cursor=none`, whether it had
+never run `entrar` or had signed in and simply never completed a sync pass. It now also prints, in the
+same no-cursor branch, the exact next command:
+
+    fuente={id} siguiente: ejecute 'entrar --fuente {id}' para firmar
+
+when the source is `origen="local"` and its own `credencial.bin` is absent or empty (the same
+"empty is absent" convention `auth.py`/`credencial_imap.py` already use for that file) -- it has never
+even signed in; or
+
+    fuente={id} siguiente: ejecute 'sincronizar' para la primera pasada
+
+otherwise -- either a `local`-origen source that has signed in but never synced, or an `origen="cuenta"`
+source, which has no `entrar` step at all (its token is pulled live, never stored) and so is always in
+this second bucket. A new `cli._tiene_credencial(directorio_fuente)` helper (file present and
+non-empty) backs the check. Both new lines mirror the existing sibling string
+`comando_agregar_fuente` already prints ("ejecute 'entrar --fuente {id_fuente}' para firmar.") --
+quoted here verbatim, decided within this repo's existing register (Spanish imperative instruction,
+English-style `key=value` fields) and reported as this slice's own choice
+(`ORCH-CARLOS-DELEGATES-TIER-1-1`).
+
+**`README.md`** documents both: `fuentes` now reports a broken source by id and reason without
+stopping the rest of the list, and `estado` now names the next command for a source with no cursor yet.
+
+### Tests, measured
+
+7 new `def test_` functions (`git diff main~1 main -- tests/test_fuentes.py tests/test_cli.py | grep -c
+'^+def test_'`): `tests/test_fuentes.py` gets `test_listar_fuentes_una_fuente_rota_no_aborta_el_resto`,
+`test_listar_fuentes_con_errores_reporta_id_y_motivo_sin_contenido`,
+`test_listar_fuentes_con_errores_sin_nada_roto`; `tests/test_cli.py` gets
+`test_fuentes_una_fuente_rota_no_aborta_la_lista_de_las_sanas`,
+`test_estado_fuente_nunca_entrada_sugiere_entrar`,
+`test_estado_fuente_entrada_pero_sin_sincronizar_sugiere_sincronizar`,
+`test_estado_fuente_de_cuenta_sin_sincronizar_sugiere_sincronizar`.
+
+`.venv/Scripts/python.exe -m pytest -q` on the slice branch (`feat/buzon-fuentes-listar-resiliente-1`),
+tree `980c5b0840013499ff6cf33fa635eb6bdde51632` (slice commit
+`be4d4e4edb6df83fd142074fe8a9d0aacb810a30`):
+
+    472 passed, 7 skipped in 416.49s (0:06:56)
+
+The 7 skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger has
+recorded; none are new. Merge commit `767c53e2145795055005d82e8a5efceb809a47f7` has tree
+`980c5b0840013499ff6cf33fa635eb6bdde51632`, IDENTICAL to the slice branch's own tree (`git diff
+feat/buzon-fuentes-listar-resiliente-1 HEAD` empty), so that run was not repeated for the merge.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, same as every earlier entry. No
+customer-facing bytes -- every new byte here is operator-facing: `fuentes`' and `estado`'s own stdout/
+stderr, read only by Carlos running this connector's CLI by hand on `duna-prod-1`, and `README.md`, read
+only by Carlos as this connector's own operator -- the same reasoning `BUZON-ENTRADA-UNIDADES-
+REGISTROS-1` and `BUZON-CARPETAS-MICROSOFT-CLI-1` recorded for their own operator-facing fields. No
+cross-repo contract -- nothing here touches the Finanzas wire or the Cuenta Duna wire; `fuentes.py` and
+`cli.py` are this connector's own internal enumeration and CLI-output logic. All three conditions clear,
+and the approval ("Merge on green.") authorizes merging without waiting -- merged on green, no pause.
+
+### Attribution
+
+Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): a reversible behaviour fix on an
+existing surface (`fuentes.listar_fuentes`, `cli.comando_estado`/`comando_fuentes`) under hub principle
+`hit_01m7szasnqh2sqbs4dzjrsvyqm`, with its two new person-facing strings decided within this repo's own
+register and quoted verbatim above, matching the sibling string `comando_agregar_fuente` already prints.
+
 ## BUZON-ENTRADA-UNIDADES-REGISTROS-1 -- diff-install every unit, a drift report, a `registros` verb (2026-11-12)
 
 ### Why
