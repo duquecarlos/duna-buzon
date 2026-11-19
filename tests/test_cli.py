@@ -175,6 +175,209 @@ def test_estado_con_clave_equivocada_falla(tmp_path: Path, capsys: pytest.Captur
     assert "key" in salida.err.lower()
 
 
+def _agregar_pasada_historial(
+    directorio: Path, *, finalizado_en: str, vistos: int = 0, errors: str | None = None
+) -> None:
+    from duna_buzon import historial
+
+    historial.agregar_pasada(
+        str(directorio),
+        historial.RegistroPasada(
+            finalizado_en=finalizado_en,
+            vistos=vistos,
+            reenviados=vistos,
+            duplicados=0,
+            omitidos=0,
+            errors=errors,
+        ),
+    )
+
+
+def test_estado_sin_historial_no_muestra_tabla(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # BUZON-ESTADO-HISTORIAL-PASADAS-1 -- a source that never ran a second
+    # pass has no PREVIOUS pass to show; "no history yet" is silence, not
+    # an empty table.
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path)
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "historial" not in salida
+
+
+def test_estado_una_sola_pasada_es_la_de_hoy_sin_tabla(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Exactly one recorded pass is "today"'s own -- already shown via
+    # estado.json -- so the table has nothing to add.
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    _agregar_pasada_historial(directorio, finalizado_en="2026-11-19T10:00:00Z", vistos=3)
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "historial" not in salida
+
+
+def test_estado_muestra_las_pasadas_previas_mas_recientes_primero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    for n in range(1, 4):
+        _agregar_pasada_historial(directorio, finalizado_en=f"2026-11-{n:02d}T10:00:00Z", vistos=n)
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    lineas = [l for l in salida.splitlines() if "fuente=hotmail-carlos historial " in l]
+    # Pass 3 is "today" (the latest) and is never in the table; passes 1
+    # and 2 are PREVIOUS, most recent (2) printed first.
+    assert len(lineas) == 2
+    assert "2026-11-02T10:00:00Z" in lineas[0]
+    assert "vistos=2" in lineas[0]
+    assert "2026-11-01T10:00:00Z" in lineas[1]
+    assert "vistos=1" in lineas[1]
+    assert "2026-11-03T10:00:00Z" not in salida
+
+
+def test_estado_tabla_lleva_el_motivo_de_una_pasada_fallida(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    _agregar_pasada_historial(
+        directorio, finalizado_en="2026-11-01T10:00:00Z", vistos=0, errors="finanzas enviar http=500"
+    )
+    _agregar_pasada_historial(directorio, finalizado_en="2026-11-02T10:00:00Z", vistos=5)
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "errors=finanzas enviar http=500" in salida
+
+
+def test_estado_pasada_sin_error_muestra_un_guion(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    _agregar_pasada_historial(directorio, finalizado_en="2026-11-01T10:00:00Z", vistos=1)
+    _agregar_pasada_historial(directorio, finalizado_en="2026-11-02T10:00:00Z", vistos=2)
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "errors=-" in salida
+
+
+def test_estado_respeta_el_numero_predeterminado_de_pasadas(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    # PASADAS_PREDETERMINADAS previous passes, plus one more that is "today".
+    for n in range(1, cli.PASADAS_PREDETERMINADAS + 2):
+        _agregar_pasada_historial(directorio, finalizado_en=f"2026-11-{n:02d}T10:00:00Z", vistos=n)
+
+    assert cli.comando_estado(config) == 0
+    lineas = [
+        l for l in capsys.readouterr().out.splitlines() if "fuente=hotmail-carlos historial " in l
+    ]
+    assert len(lineas) == cli.PASADAS_PREDETERMINADAS
+
+
+def test_estado_pasadas_amplia_mas_alla_del_predeterminado(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon import historial
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    for n in range(1, historial.CAPACIDAD + 1):
+        _agregar_pasada_historial(directorio, finalizado_en=f"2026-11-{n:02d}T10:00:00Z", vistos=n)
+
+    assert cli.comando_estado(config, pasadas=historial.CAPACIDAD) == 0
+    lineas = [
+        l for l in capsys.readouterr().out.splitlines() if "fuente=hotmail-carlos historial " in l
+    ]
+    # One entry (the latest) is "today", never in the table -- the cap
+    # bounds storage, not how many of the remaining previous passes show.
+    assert len(lineas) == historial.CAPACIDAD - 1
+
+
+def test_estado_pasadas_mas_alla_del_tope_se_limita_a_lo_disponible(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon import historial
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    for n in range(1, 4):
+        _agregar_pasada_historial(directorio, finalizado_en=f"2026-11-{n:02d}T10:00:00Z", vistos=n)
+
+    assert cli.comando_estado(config, pasadas=historial.CAPACIDAD * 5) == 0
+    lineas = [
+        l for l in capsys.readouterr().out.splitlines() if "fuente=hotmail-carlos historial " in l
+    ]
+    assert len(lineas) == 2
+
+
+def test_estado_pasadas_cero_no_muestra_tabla(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    for n in range(1, 4):
+        _agregar_pasada_historial(directorio, finalizado_en=f"2026-11-{n:02d}T10:00:00Z", vistos=n)
+
+    assert cli.comando_estado(config, pasadas=0) == 0
+    assert "historial" not in capsys.readouterr().out
+
+
+def test_estado_linea_de_historial_corrupta_se_descarta_con_una_nota(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    from duna_buzon import historial
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+
+    def _linea(vistos: int, finalizado_en: str) -> str:
+        return json.dumps(
+            {
+                "finalizado_en": finalizado_en,
+                "vistos": vistos,
+                "reenviados": vistos,
+                "duplicados": 0,
+                "omitidos": 0,
+                "errors": None,
+            }
+        )
+
+    # Written directly to the file (never through `agregar_pasada`, which
+    # would self-heal the corrupt line away before `estado` ever reads it)
+    # -- a valid pass, a corrupt line, then another valid (the "today")
+    # pass.
+    (directorio / historial.NOMBRE_ARCHIVO).write_text(
+        _linea(1, "2026-11-01T10:00:00Z")
+        + "\n"
+        + "esto no es json\n"
+        + _linea(2, "2026-11-02T10:00:00Z")
+        + "\n",
+        encoding="utf-8",
+    )
+
+    # The corrupt line must not fail the command, and the valid pass
+    # around it still shows.
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr()
+    assert "1 linea(s) descartada(s)" in salida.err
+    assert "fuente=hotmail-carlos" in salida.err
+    assert "vistos=1" in salida.out
+
+
 def test_entrar_delega_en_auth_entrar_con_la_sola_fuente(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

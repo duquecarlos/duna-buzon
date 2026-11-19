@@ -48,6 +48,7 @@ _PUERTO_IMAP_PREDETERMINADO = "993"
 
 _USO = (
     f"usage: python -m duna_buzon {{{'|'.join(_COMANDOS)}}} [--fuente <id>]\n"
+    "       python -m duna_buzon estado [--pasadas <n>]\n"
     "       python -m duna_buzon agregar-fuente imap --id <id> --direccion <direccion> "
     "--host <host> --token-finanzas <ref> [--port <puerto>] [--etiqueta <etiqueta>] "
     "[--carpeta <nombre> ...]\n"
@@ -124,8 +125,15 @@ def main(argv: list[str] | None = None) -> int:
     id_fuente_carpetas_graph: str | None = None
     opciones_agregar_fuente: dict[str, object] | None = None
     opciones_fijar_carpetas: tuple[str, list[str] | None, bool] | None = None
+    pasadas_estado: int | None = None
     if comando == "entrar" and len(resto) == 2 and resto[0] == "--fuente":
         id_fuente = resto[1]
+        resto = []
+    elif comando == "estado" and len(resto) == 2 and resto[0] == "--pasadas":
+        if not resto[1].isdigit():
+            print(_USO, file=sys.stderr)
+            return 2
+        pasadas_estado = int(resto[1])
         resto = []
     elif comando == "agregar-fuente":
         opciones_agregar_fuente = _parsear_agregar_fuente(resto)
@@ -166,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     if comando == "sincronizar":
         return cli.comando_sincronizar(config)
     if comando == "estado":
-        return cli.comando_estado(config)
+        return cli.comando_estado(config, pasadas=pasadas_estado)
     if comando == "agregar-fuente":
         assert opciones_agregar_fuente is not None
         return cli.comando_agregar_fuente(

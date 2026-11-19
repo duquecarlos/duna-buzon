@@ -23,6 +23,7 @@ from pathlib import Path
 from duna_buzon import auth, credencial_imap, cripto
 from duna_buzon import cursor as modulo_cursor
 from duna_buzon import fuentes as modulo_fuentes
+from duna_buzon import historial as modulo_historial
 from duna_buzon import registro
 from duna_buzon.cliente_imap import ClienteImap, ClienteImapError
 from duna_buzon.config import Config
@@ -37,6 +38,11 @@ from duna_buzon.sincronizar import Contadores, ejecutar_pasada
 
 NOMBRE_ARCHIVO_REGLAS = "reglas.json"
 NOMBRE_ARCHIVO_ESTADO = "estado.json"
+
+# `estado`'s own default when `--pasadas` is not given -- enough to see a
+# trend without flooding a normal terminal; `--pasadas N` widens this, up to
+# `historial.CAPACIDAD`.
+PASADAS_PREDETERMINADAS = 5
 
 # BUZON-ORIGEN-WIRE-1 -- a manual (`agregar-fuente`) source id longer than
 # this is refused at add time, well under `limites.LIMITE_ORIGEN` (64) once
@@ -108,6 +114,29 @@ def comando_entrar(config: Config, id_fuente: str | None) -> int:
     return 0
 
 
+def _agregar_historial(
+    directorio: str, contadores: Contadores, motivo: str | None, finalizado_en: datetime.datetime
+) -> None:
+    """Appends this pass's summary to the source's bounded history
+    (`historial.py`), right beside the `estado.json` write that already
+    carries the same numbers -- `estado.json` itself is untouched by this
+    slice, so every existing reader of it keeps working. `omitidos` merges
+    the two skip counters (`omitidos_por_reglas`, `omitidos_por_413_422`):
+    the compact table is a trend view, not the full breakdown `estado.json`
+    and `registro.linea_resumen` still carry for the latest pass."""
+    modulo_historial.agregar_pasada(
+        directorio,
+        modulo_historial.RegistroPasada(
+            finalizado_en=registro.formato_fecha_utc(finalizado_en),
+            vistos=contadores.vistos,
+            reenviados=contadores.reenviados,
+            duplicados=contadores.duplicados,
+            omitidos=contadores.omitidos_por_reglas + contadores.omitidos_por_413_422,
+            errors=motivo,
+        ),
+    )
+
+
 def _ejecutar_una_fuente(
     config: Config,
     fuente: FuenteConfig,
@@ -133,9 +162,11 @@ def _ejecutar_una_fuente(
         # No provider exists yet at this point (auth/rules both run before
         # `construir_proveedor`), so there were never any Graph retries to
         # report -- `reintentos=0` is exact, not a placeholder.
-        linea = registro.linea_resumen(Contadores(), motivo, finalizado_en=_ahora(), reintentos=0)
+        momento = _ahora()
+        linea = registro.linea_resumen(Contadores(), motivo, finalizado_en=momento, reintentos=0)
         cripto.asegurar_directorio_datos(Path(directorio))
         cripto.escribir_archivo_sensible(Path(directorio) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8"))
+        _agregar_historial(directorio, Contadores(), motivo, momento)
         return linea, motivo
 
     try:
@@ -197,15 +228,17 @@ def _ejecutar_una_fuente(
     # other provider has no such concept, so this omits it for them rather
     # than guessing a number that means nothing there.
     top_usado = getattr(proveedor, "top_lista_usado", None)
+    momento = _ahora()
     linea = registro.linea_resumen(
         resultado.contadores,
         resultado.motivo,
-        finalizado_en=_ahora(),
+        finalizado_en=momento,
         reintentos=reintentos,
         top=top_usado,
     )
     cripto.asegurar_directorio_datos(Path(directorio))
     cripto.escribir_archivo_sensible(Path(directorio) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8"))
+    _agregar_historial(directorio, resultado.contadores, resultado.motivo, momento)
     return linea, resultado.motivo
 
 
@@ -311,12 +344,40 @@ def comando_sincronizar(config: Config) -> int:
     return 1 if algun_fallo else 0
 
 
-def comando_estado(config: Config) -> int:
+def _imprimir_historial(id_fuente: str, directorio: str, limite: int) -> None:
+    """A compact table of PREVIOUS passes -- the line just printed above
+    this (from `estado.json`) already shows the latest one, so this drops
+    that same entry (`historial`'s own last line) and shows up to `limite`
+    of the ones before it, most recent first. A corrupt line is skipped and
+    noted once, by count -- never raised, and never shown as a row."""
+    registros, descartadas = modulo_historial.leer_historial(directorio)
+    if descartadas:
+        print(
+            f"fuente={id_fuente} historial: {descartadas} linea(s) descartada(s) (formato invalido)",
+            file=sys.stderr,
+        )
+    previas = registros[:-1] if registros else []
+    if not previas or limite <= 0:
+        return
+    for pasada in reversed(previas[-limite:]):
+        errors_txt = pasada.errors if pasada.errors is not None else "-"
+        print(
+            f"fuente={id_fuente} historial finalizado_en={pasada.finalizado_en} "
+            f"vistos={pasada.vistos} reenviados={pasada.reenviados} duplicados={pasada.duplicados} "
+            f"omitidos={pasada.omitidos} errors={errors_txt}"
+        )
+
+
+def comando_estado(config: Config, *, pasadas: int | None = None) -> int:
     _migrar_si_necesario(config)
     todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
     if not todas:
         print("cursor=none")
         return 0
+
+    limite_pasadas = (
+        min(pasadas, modulo_historial.CAPACIDAD) if pasadas is not None else PASADAS_PREDETERMINADAS
+    )
 
     algun_fallo = False
     for fuente in todas:
@@ -349,6 +410,8 @@ def comando_estado(config: Config) -> int:
         ruta_estado = Path(directorio) / NOMBRE_ARCHIVO_ESTADO
         if ruta_estado.is_file():
             print(f"fuente={fuente.id} {ruta_estado.read_text(encoding='utf-8').strip()}")
+
+        _imprimir_historial(fuente.id, directorio, limite_pasadas)
 
     return 1 if algun_fallo else 0
 

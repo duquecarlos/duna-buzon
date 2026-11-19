@@ -14,8 +14,10 @@ explicit outbound timeouts and in-pass retries for a transport failure or 429/50
 then 500/502/504 joined that retried class and a persistently failing page degrades its own `$top` (and the
 same `carpetas` narrowing IMAP already had, extended to this provider) by BUZON-GRAPH-502-1; gained a CLI for
 reading and setting that field on a microsoft source (`carpetas-graph`, `fijar-carpetas`) by
-BUZON-CARPETAS-MICROSOFT-CLI-1. See `CLAUDE.md` for the gate and
-the invariants, `DECISIONS.md` for the ledger, and `deploy/host/README.md` for the operator steps.
+BUZON-CARPETAS-MICROSOFT-CLI-1; `estado` gained a bounded per-source pass history, so a pass that forwarded
+nothing, or failed, no longer hides what the ones before it did, by BUZON-ESTADO-HISTORIAL-PASADAS-1. See
+`CLAUDE.md` for the gate and the invariants, `DECISIONS.md` for the ledger, and `deploy/host/README.md` for
+the operator steps.
 
 ## Shape
 
@@ -39,6 +41,10 @@ fuentes/<id>/reglas.json           -- this source's own matching rules (never co
 fuentes/<id>/estado.json           -- this source's own last-pass summary line: counts, when that pass
                                        finished, how many Graph retries it used, and -- for a Microsoft
                                        source -- the `$top` the LIST call was last using
+fuentes/<id>/historial.jsonl        -- this source's own last 20 pass summaries (one JSON object per line,
+                                       oldest first), so `estado` can still show a pass before the latest one
+                                       even after a pass that forwarded nothing or failed overwrote
+                                       estado.json -- see `historial.py` and BUZON-ESTADO-HISTORIAL-PASADAS-1
 ```
 
 `host`/`port` are only set for `proveedor == "imap"` (`None` otherwise).
@@ -106,11 +112,16 @@ The commands:
   call keeps failing even after that, BUZON-GRAPH-502-1 retries the same page once at `$top=10`, then once more at
   `$top=1`, before finally giving up -- the same messages, in the same order, just fewer per page; see "When Graph
   can't list the whole mailbox" below.
-- `estado` -- prints every source's own cursor and last-pass counts, when that pass finished, how many Graph
-  retries it used, and -- for a Microsoft source -- the `$top` it was last using. Nothing personal. A source with
-  no cursor yet also gets the next command to run: `entrar --fuente <id>` when a `local`-origen source never even
-  signed in, or `sincronizar` when it has (or is `origen="cuenta"`, which has no `entrar` step at all) but has
-  never completed a pass (`BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1`).
+- `estado [--pasadas <n>]` -- prints every source's own cursor and last-pass counts, when that pass finished,
+  how many Graph retries it used, and -- for a Microsoft source -- the `$top` it was last using. Nothing
+  personal. Below that, a compact table of up to 5 PREVIOUS passes (`finalizado_en`, `vistos`, `reenviados`,
+  `duplicados`, `omitidos`, `errors`), most recent first, read from that source's own `historial.jsonl`
+  (`BUZON-ESTADO-HISTORIAL-PASADAS-1`) -- so a pass that forwarded nothing, or failed, no longer hides what
+  the ones before it did; `--pasadas <n>` widens the table up to the 20 passes `historial.jsonl` itself keeps.
+  A corrupt history line is skipped and noted once, by count, never raised. A source with no cursor yet also
+  gets the next command to run: `entrar --fuente <id>` when a `local`-origen source never even signed in, or
+  `sincronizar` when it has (or is `origen="cuenta"`, which has no `entrar` step at all) but has never
+  completed a pass (`BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1`).
 - `fuentes` -- lists every configured source (id, provider, address, label, active/inactive). No secrets. One
   source whose own `fuente.json` is broken is reported by id and reason (never its contents) on its own line,
   without stopping the rest of the list from printing (`BUZON-FUENTES-LISTAR-RESILIENTE-1`); every other command
