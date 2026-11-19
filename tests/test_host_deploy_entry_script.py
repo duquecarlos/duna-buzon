@@ -885,6 +885,121 @@ def test_rebobinar_cursor_aplicar_se_traduce_a_la_bandera_python() -> None:
     assert indice_if < indice_append
 
 
+# ---------------------------------------------------------------------------
+# BUZON-DEPLOY-REVIERTE-SOLO-1 -- automatic rollback on a failed health check
+# at the end of `deploy`. Buzón is a timer job, not a server: "health" is
+# the one pass `python -m duna_buzon estado` runs, shared by `status` and
+# `deploy` through `_chequear_salud`.
+# ---------------------------------------------------------------------------
+
+
+def test_revertir_despliegue_es_funcion_reconocida() -> None:
+    contenido = _contenido()
+    assert "revertir_despliegue() {" in contenido
+    assert "_chequear_salud() {" in contenido
+
+
+def test_cmd_deploy_llama_a_revertir_solo_cuando_el_chequeo_de_salud_falla() -> None:
+    contenido = _contenido()
+    bloque_cmd_deploy = contenido[contenido.index("cmd_deploy() {") : contenido.index("cmd_entrar() {")]
+    bloque_real = bloque_cmd_deploy[bloque_cmd_deploy.index('owner="$(_owner_of "$REPO")"') :]
+
+    indice_chequeo = bloque_real.index("_chequear_salud")
+    indice_if = bloque_real.index('if [[ "$estado_salida" -ne 0 ]]', indice_chequeo)
+    indice_revertir = bloque_real.index('revertir_despliegue "$owner" "$before"', indice_if)
+    assert indice_chequeo < indice_if < indice_revertir
+
+    # revertir_despliegue is called ONLY inside that failure branch -- never
+    # unconditionally alongside the health check.
+    assert bloque_real.count("revertir_despliegue") == 1
+
+
+def test_revertir_despliegue_revierte_resincroniza_y_reejecuta_el_chequeo() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("\nrevertir_despliegue() {") : contenido.index("cmd_status() {")]
+
+    assert 'runuser -u "$owner" -- git -C "$REPO" reset --hard "$antes"' in bloque
+    assert 'runuser -u "$owner" -- env --chdir="$REPO" uv sync --frozen' in bloque
+    indice_reset = bloque.index("reset --hard")
+    indice_sync = bloque.index("uv sync --frozen")
+    indice_chequeo = bloque.index("_chequear_salud")
+    assert indice_reset < indice_sync < indice_chequeo
+
+    assert "rolled back to $antes: healthy" in bloque
+    assert "rolled back to $antes: STILL UNHEALTHY" in bloque
+    assert bloque.count("exit 1") == 1
+
+
+def test_revertir_despliegue_nunca_toca_datos_dir() -> None:
+    # Cursors, the token cache and estado.json under $DATOS_DIR are left
+    # exactly as the failed run left them -- a bad PASS is rebobinar-cursor's
+    # job, not this rollback's.
+    contenido = _contenido()
+    bloque = contenido[contenido.index("\nrevertir_despliegue() {") : contenido.index("cmd_status() {")]
+    for linea in bloque.splitlines():
+        despojada = linea.strip()
+        if despojada.startswith("#"):
+            continue
+        assert "$DATOS_DIR" not in linea or "echo" in despojada
+
+
+def test_revertir_despliegue_nunca_llama_a_git_sin_runuser() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("\nrevertir_despliegue() {") : contenido.index("cmd_status() {")]
+    for numero, linea in enumerate(bloque.splitlines(), start=1):
+        despojada = linea.strip()
+        if despojada.startswith("#"):
+            continue
+        if re.search(r"\bgit\b", linea):
+            assert "runuser -u" in linea, f"line {numero} runs git without runuser -u: {linea!r}"
+
+
+def test_before_sha_se_lleva_a_traves_del_reexec_de_autoactualizar() -> None:
+    contenido = _contenido()
+
+    bloque_autoactualizar = contenido[
+        contenido.index("autoactualizar() {") : contenido.index("_desc_estado_health() {")
+    ]
+    indice_export = bloque_autoactualizar.index('export DUNA_AUTOACTUALIZAR_BEFORE_SHA="$antes"')
+    indice_exec = bloque_autoactualizar.index('exec "$ENTRY_INSTALADO" deploy --internal-reexec')
+    assert indice_export < indice_exec
+
+    bloque_cmd_deploy = contenido[contenido.index("cmd_deploy() {") : contenido.index("cmd_entrar() {")]
+    assert 'if [[ -n "${DUNA_AUTOACTUALIZAR_BEFORE_SHA:-}" ]]; then' in bloque_cmd_deploy
+    indice_carried = bloque_cmd_deploy.index("DUNA_AUTOACTUALIZAR_BEFORE_SHA")
+    indice_pull = bloque_cmd_deploy.index('runuser -u "$owner" -- git -C "$REPO" pull --ff-only')
+    assert indice_carried < indice_pull
+    assert 'autoactualizar "$before"' in bloque_cmd_deploy
+
+
+def test_dry_run_de_deploy_incluye_el_plan_de_reversion_y_sigue_sin_ejecutar_nada() -> None:
+    contenido = _contenido()
+    bloque_cmd_deploy = contenido[contenido.index("cmd_deploy() {") : contenido.index("cmd_entrar() {")]
+    indice_dry_run = bloque_cmd_deploy.index('if [[ "$dry_run" == "1" ]]')
+    indice_fin_dry_run = bloque_cmd_deploy.index("return 0", indice_dry_run)
+    bloque_dry_run = bloque_cmd_deploy[indice_dry_run : indice_fin_dry_run + len("return 0")]
+
+    assert "_desc_revertir_despliegue" in bloque_dry_run
+    for numero, linea in enumerate(bloque_dry_run.splitlines()[1:-1], start=1):
+        despojada = linea.strip()
+        if not despojada:
+            continue
+        assert despojada.startswith("echo "), (
+            f"line {numero} of the --dry-run branch is not an echo: {despojada!r}"
+        )
+
+
+def test_desc_revertir_despliegue_menciona_reset_sync_y_nunca_datos_dir_como_borrado() -> None:
+    resultado = _source_and_echo("_desc_revertir_despliegue")
+    assert resultado.returncode == 0, resultado.stderr
+    salida = resultado.stdout
+    assert "reset --hard" in salida
+    assert "uv sync --frozen" in salida
+    assert "healthy" in salida
+    assert "STILL UNHEALTHY" in salida
+    assert "never touches" in salida
+
+
 def test_status_reporta_drift_user_y_datos_dir() -> None:
     contenido = _contenido()
     bloque = contenido[contenido.index("cmd_status() {") : contenido.index("cmd_deploy() {")]

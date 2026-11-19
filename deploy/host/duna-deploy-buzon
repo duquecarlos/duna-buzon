@@ -355,6 +355,7 @@ _forma_sudoers_es_estricta() {
 # code. Called only from cmd_deploy's real (non-dry-run) branch, after the
 # pull and before anything that depends on the new code.
 autoactualizar() {
+    local antes="$1"
     local entry_pulled="$REPO/deploy/host/duna-deploy-buzon"
     local sudoers_pulled="$REPO/deploy/host/duna-deploy-buzon.sudoers"
 
@@ -402,12 +403,56 @@ autoactualizar() {
     fi
 
     echo "duna-deploy-buzon: entry script updated; re-executing under the new copy"
+    export DUNA_AUTOACTUALIZAR_BEFORE_SHA="$antes"
     exec "$ENTRY_INSTALADO" deploy --internal-reexec
 }
 
 _desc_estado_health() {
     printf 'systemd-run --pipe --quiet --wait --uid=duna --gid=duna --property=EnvironmentFile=%s --property=EnvironmentFile=%s --property=WorkingDirectory=%s -- %s/.venv/bin/python -m duna_buzon estado' \
         "$ENV_CLIENTE" "$ENV_TOKEN" "$REPO" "$REPO"
+}
+
+_desc_revertir_despliegue() {
+    printf '(on failure only) runuser -u "$owner" -- git -C %s reset --hard <before-sha>; runuser -u "$owner" -- env --chdir=%s uv sync --frozen; re-run the health check; print "rolled back to <before-sha>: healthy" or "rolled back to <before-sha>: STILL UNHEALTHY"; exit non-zero either way (never touches %s)' \
+        "$REPO" "$REPO" "$DATOS_DIR"
+}
+
+# Runs the one pass this product calls "health" -- `python -m duna_buzon
+# estado` via systemd-run, as `duna`, with both env files -- and returns its
+# exit code. Shared by `status`, `deploy`'s own final check and
+# `revertir_despliegue`'s own re-check below, so all three agree on exactly
+# what "healthy" means.
+_chequear_salud() {
+    local salida=0
+    systemd-run --pipe --quiet --wait --uid=duna --gid=duna \
+        --property="EnvironmentFile=$ENV_CLIENTE" --property="EnvironmentFile=$ENV_TOKEN" \
+        --property="WorkingDirectory=$REPO" -- \
+        "$REPO/.venv/bin/python" -m duna_buzon estado || salida=$?
+    return "$salida"
+}
+
+# BUZON-DEPLOY-REVIERTE-SOLO-1 -- runs ONLY when `cmd_deploy`'s own health
+# check fails: reverts the CODE to $2 (the sha `cmd_deploy` captured before
+# this run's pull -- the real one even across autoactualizar's own re-exec,
+# carried through DUNA_AUTOACTUALIZAR_BEFORE_SHA), re-syncs the environment
+# and re-runs the SAME health check once more. NEVER touches $DATOS_DIR --
+# cursors, the token cache and estado.json are left exactly as this run left
+# them; a bad PASS (not a bad deploy) is `rebobinar-cursor`'s job, not this
+# one's. Prints exactly one line and always exits non-zero -- a rollback
+# that restores the service is still a failed deploy.
+revertir_despliegue() {
+    local owner="$1" antes="$2"
+    echo "duna-deploy-buzon: deploy health check failed -- reverting code to $antes (cursors and state files under $DATOS_DIR are left as-is; see rebobinar-cursor for a bad pass)" >&2
+    runuser -u "$owner" -- git -C "$REPO" reset --hard "$antes"
+    runuser -u "$owner" -- env --chdir="$REPO" uv sync --frozen
+    local revertido_salida=0
+    _chequear_salud || revertido_salida=$?
+    if [[ "$revertido_salida" -eq 0 ]]; then
+        echo "rolled back to $antes: healthy"
+    else
+        echo "rolled back to $antes: STILL UNHEALTHY"
+    fi
+    exit 1
 }
 
 # Read-only: never writes, never restarts, never installs anything. Shares
@@ -462,10 +507,7 @@ cmd_status() {
     fi
 
     local estado_salida=0
-    systemd-run --pipe --quiet --wait --uid=duna --gid=duna \
-        --property="EnvironmentFile=$ENV_CLIENTE" --property="EnvironmentFile=$ENV_TOKEN" \
-        --property="WorkingDirectory=$REPO" -- \
-        "$REPO/.venv/bin/python" -m duna_buzon estado || estado_salida=$?
+    _chequear_salud || estado_salida=$?
     if [[ "$estado_salida" -ne 0 ]]; then
         echo "duna-deploy-buzon: status check failed (python -m duna_buzon estado exited $estado_salida)" >&2
         exit 1
@@ -499,17 +541,23 @@ cmd_deploy() {
         echo "+ systemctl daemon-reload"
         echo "+ systemctl enable --now $TIMER"
         echo "+ $(_desc_estado_health)"
+        echo "+ $(_desc_revertir_despliegue)"
         return 0
     fi
 
     local owner before
     owner="$(_owner_of "$REPO")"
-    before="$(runuser -u "$owner" -- git -C "$REPO" rev-parse HEAD)"
-    echo "deploy: before=$before"
+    if [[ -n "${DUNA_AUTOACTUALIZAR_BEFORE_SHA:-}" ]]; then
+        before="$DUNA_AUTOACTUALIZAR_BEFORE_SHA"
+        echo "deploy: before=$before (carried across re-exec)"
+    else
+        before="$(runuser -u "$owner" -- git -C "$REPO" rev-parse HEAD)"
+        echo "deploy: before=$before"
+    fi
     runuser -u "$owner" -- git -C "$REPO" pull --ff-only
 
     if [[ "$reexec" != "1" ]]; then
-        autoactualizar
+        autoactualizar "$before"
     else
         echo "entry script: re-executed under the newly installed copy"
     fi
@@ -537,13 +585,10 @@ cmd_deploy() {
     done
 
     local estado_salida=0
-    systemd-run --pipe --quiet --wait --uid=duna --gid=duna \
-        --property="EnvironmentFile=$ENV_CLIENTE" --property="EnvironmentFile=$ENV_TOKEN" \
-        --property="WorkingDirectory=$REPO" -- \
-        "$REPO/.venv/bin/python" -m duna_buzon estado || estado_salida=$?
+    _chequear_salud || estado_salida=$?
     if [[ "$estado_salida" -ne 0 ]]; then
         echo "duna-deploy-buzon: deploy health check failed (python -m duna_buzon estado exited $estado_salida)" >&2
-        exit 1
+        revertir_despliegue "$owner" "$before"
     fi
 }
 
