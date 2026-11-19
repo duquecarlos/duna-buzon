@@ -40,13 +40,57 @@ def test_estado_se_despacha_con_la_config_del_entorno(
 
     recibido: list[Config] = []
 
-    def comando_falso(config: Config) -> int:
+    def comando_falso(config: Config, *, pasadas: int | None = None) -> int:
         recibido.append(config)
         return 0
 
     monkeypatch.setattr(cli, "comando_estado", comando_falso)
     assert main(["estado"]) == 0
     assert recibido[0].directorio_datos == str(tmp_path)
+
+
+def test_estado_pasa_pasadas_none_sin_la_bandera(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[int | None] = []
+    monkeypatch.setattr(
+        cli, "comando_estado", lambda config, *, pasadas=None: (recibido.append(pasadas), 0)[1]
+    )
+    assert main(["estado"]) == 0
+    assert recibido[0] is None
+
+
+def test_estado_con_pasadas_pasa_el_numero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[int | None] = []
+    monkeypatch.setattr(
+        cli, "comando_estado", lambda config, *, pasadas=None: (recibido.append(pasadas), 0)[1]
+    )
+    assert main(["estado", "--pasadas", "10"]) == 0
+    assert recibido[0] == 10
+
+
+def test_estado_con_pasadas_no_numerico_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["estado", "--pasadas", "no-es-un-numero"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_estado_con_pasadas_sin_valor_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["estado", "--pasadas"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
 
 
 def test_fuentes_se_despacha_sin_argumentos(

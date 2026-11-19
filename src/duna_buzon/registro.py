@@ -10,7 +10,9 @@ import datetime
 from duna_buzon.sincronizar import Contadores
 
 
-def _formato_fecha_utc(momento: datetime.datetime) -> str:
+def formato_fecha_utc(momento: datetime.datetime) -> str:
+    """Public so `historial.py` can stamp a pass record with the exact same
+    format `linea_resumen` itself uses for `finalizado_en`."""
     momento_utc = (
         momento.astimezone(datetime.UTC) if momento.tzinfo else momento.replace(tzinfo=datetime.UTC)
     )
@@ -38,7 +40,7 @@ def linea_resumen(
     if top is not None:
         partes.append(f"top={top}")
     if finalizado_en is not None:
-        partes.append(f"finalizado_en={_formato_fecha_utc(finalizado_en)}")
+        partes.append(f"finalizado_en={formato_fecha_utc(finalizado_en)}")
     linea = " ".join(partes)
     if motivo is None:
         return linea
