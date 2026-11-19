@@ -2095,3 +2095,117 @@ shape (`ORCH-CARLOS-DELEGATES-TIER-1-1`). This slice (`BUZON-ENTRADA-UNIDADES-RE
 unit this repo ships instead of blindly overwriting it, gives `status` a drift report and an automatic
 failure excerpt, and adds the read-only `registros` verb Carlos needed the evening `duna-buzon.service`
 failed against Microsoft's own 502 with nothing but a summary line to read.
+
+## BUZON-ESTADO-HISTORIAL-PASADAS-1 -- a bounded per-source pass history, so `estado` outlives a bad pass (2026-11-19)
+
+### Why
+
+Follow-up to `BUZON-HUB-CENSO-2026-11-19`, hub principle `hit_01m7syzg15w97bzrbfz4dmc6fq` ("bulk work
+stays visible after it runs"): `estado.json` is OVERWRITTEN on every `sincronizar` pass, so `estado` only
+ever shows the latest one. A pass that forwarded nothing, or stopped on an auth/transport/Finanzas
+failure, erased the summary of every successful pass before it -- the operator had no way to see "it was
+fine yesterday, then it started failing" without reading raw logs.
+
+### What changed
+
+**A new module, `historial.py`**, keeps the most recent `CAPACIDAD` (20) pass summaries per source,
+beside (never instead of) `estado.json` -- `fuentes/<id>/historial.jsonl`, one JSON object per line,
+oldest first. `agregar_pasada` rewrites the whole file atomically (temp file in the same directory +
+`os.replace`, mode 0600 where the OS supports it) every call, trimmed to the cap in that same write --
+the same atomic-rewrite shape `fuentes.guardar_fuente_atomico` already uses. `leer_historial` skips a
+line that is not valid JSON or is missing a required field, counting it rather than raising, so one
+corrupt line never hides every other recorded pass -- and the very next `agregar_pasada` heals it away,
+since every write is a full rewrite from what `leer_historial` itself could parse.
+
+**`cli._ejecutar_una_fuente` appends to this history at both of its `estado.json` writes** (the clean
+finish, and `_detenida`'s own early-stop path) -- same `Contadores`, same stop reason (`motivo`, already
+a content-free, controlled-vocabulary string: "auth error=...", "finanzas enviar http=...", never
+message content), same `finalizado_en` moment as the `estado.json` line just written. `estado.json`
+itself is byte-for-byte unchanged, so every existing reader of it (the health check in `deploy/host/
+duna-deploy-buzon`, `README.md`'s own description) keeps working with no change. `omitidos` in the
+history record merges `Contadores.omitidos_por_reglas` and `omitidos_por_413_422` -- the compact table is
+a trend view, not the full per-reason breakdown `estado.json`/`registro.linea_resumen` still carry for
+the latest pass.
+
+**`estado` prints the latest pass exactly as before, then a compact table of PREVIOUS passes.** The
+latest entry in `historial.jsonl` duplicates what `estado.json` already showed, so the table is
+`historial[:-1]`, most recent first, one line per pass:
+
+    fuente={id} historial finalizado_en=<...> vistos=<n> reenviados=<n> duplicados=<n> omitidos=<n> errors=<motivo|->
+
+`errors` is the pass's own stop reason, or `-` for a pass that finished clean. Default: up to 5 previous
+passes (`cli.PASADAS_PREDETERMINADAS`); a new `--pasadas <n>` flag (`__main__.py`, `estado` only) widens
+this, clamped to `historial.CAPACIDAD` -- never more than the file itself can hold, however large `n` is.
+`--pasadas 0` suppresses the table entirely; no history yet, or exactly one pass recorded ("today" with
+nothing before it), is silence, not an empty table. A corrupt history line is noted once on stderr by
+count (`fuente={id} historial: {n} linea(s) descartada(s) (formato invalido)`) and never fails the
+command.
+
+`registro.py`'s own `_formato_fecha_utc` is now public (`formato_fecha_utc`) so `cli.py` stamps a
+history record with the EXACT same timestamp format `linea_resumen` already uses for `finalizado_en` --
+one formatting rule, not two.
+
+**`README.md`** documents the new `historial.jsonl` file and `estado [--pasadas <n>]`'s new table.
+
+### Shape decisions this slice made, not otherwise specified
+
+- **`errors` carries the stop reason text, not just a count.** The spec's own compact-table column list
+  names `errors` alongside five integer counts, which could have meant "a count of errors". The
+  motivation line ("a pass that... failed, hides what the ones before it did") is about SEEING why a
+  past pass failed, and `motivo` is already a short, content-free, controlled-vocabulary string reused
+  unchanged from `estado.json`'s own `parada=` field -- the richer signal at no extra invariant risk.
+- **`omitidos` merges two existing counters** (`omitidos_por_reglas`, `omitidos_por_413_422`) rather than
+  adding two more columns -- the spec's own column list names one `omitidos`, and the full breakdown
+  stays available in `estado.json`'s own last-pass line directly above the table.
+- **Default table depth of 5**, not otherwise specified beyond "shows more" implying some smaller
+  default exists. Picked as a size that fits a normal terminal without scrolling for the common case
+  (one failure, a handful of successes around it), while `--pasadas <n>` reaches the full 20 on request.
+
+### Tests, measured
+
+22 new `def test_` functions: `tests/test_historial.py` (new file) gets 8 -- `leer_historial` with no
+file, a normal round trip, a stop reason preserved, trimming at `CAPACIDAD` (oldest dropped first), a
+corrupt line skipped and counted, a line missing a required field skipped and counted, a corrupt line on
+disk healed away by the next `agregar_pasada`, and the file's own 0600 mode (skipped on Windows, same
+convention as `test_cursor.py`). `tests/test_cli.py` gets 10 -- no history yet is silent, exactly one
+pass recorded is silent, previous passes shown most-recent-first excluding the latest, a failed pass's
+`errors` text shown, a clean pass's `errors=-`, the default depth of 5, `--pasadas` widening past the
+default, `--pasadas` beyond the cap clamped to what is actually available, `--pasadas 0` suppressing the
+table, and a corrupt line noted on stderr without failing the command. `tests/test_main.py` gets 4 --
+`--pasadas` omitted passes `None`, `--pasadas <n>` passes the parsed int, a non-numeric value and a
+value-less flag are both usage errors; one pre-existing test (`test_estado_se_despacha_con_la_config_del_
+entorno`) widened its fake's signature to accept the new `pasadas` keyword, since nothing about that
+test's own assertions changed.
+
+`uv run pytest -q` on the slice branch (`feat/buzon-estado-historial-pasadas-1`), tree
+`72134b3dcee3cf514d177a52ddb5d3e25ef972b3` (slice commit `5626f19ba5d296e4c3e880a6b765608a4556126f`):
+
+    493 passed, 8 skipped in 350.05s (0:05:50)
+
+The 8 skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger has
+recorded, plus this slice's own new `historial.jsonl` mode-0600 test skipping the same way on this
+Windows development machine -- one more skip than the previous entry's 7, exactly accounting for the one
+new `no_es_windows`-gated test. 472 passed on `main` before this slice (`BUZON-FUENTES-LISTAR-
+RESILIENTE-1`'s own measured figure) plus 21 of this slice's 22 new tests passing (the 22nd is the new
+skip) accounts for 493 exactly.
+
+Merge commit `42dccb55e9be9822783834d298dca2198bcf9fbd` has tree `72134b3dcee3cf514d177a52ddb5d3e25ef972b3`,
+IDENTICAL to the slice branch's own tree (`git diff feat/buzon-estado-historial-pasadas-1 HEAD -- .
+':!DECISIONS.md'` empty), so that run was not repeated for the merge.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, same as every earlier entry. No
+customer-facing bytes -- every new byte here is operator-facing: `estado`'s own stdout/stderr, read only
+by Carlos running this connector's CLI by hand, and `README.md`, read only by Carlos as this connector's
+own operator -- the same reasoning `BUZON-FUENTES-LISTAR-RESILIENTE-1` and `BUZON-ENTRADA-UNIDADES-
+REGISTROS-1` recorded for their own operator-facing fields. No cross-repo contract -- nothing here
+touches the Finanzas wire or the Cuenta Duna wire; `historial.py` and `cli.py`'s own changes are this
+connector's own internal state and CLI-output logic. All three conditions clear, and the approval
+("Merge on GREEN.") authorizes merging without waiting -- merged on green, no pause.
+
+### Attribution
+
+Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): a reversible addition to an existing
+read-only operator surface (`estado`), no wire, no schema, following directly from the hub census this
+slice is a named follow-up to.
