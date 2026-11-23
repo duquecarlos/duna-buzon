@@ -14,8 +14,14 @@ microsoft-source twin (`BUZON-CARPETAS-MICROSOFT-CLI-1`). `fijar-carpetas
 microsoft source's `carpetas` setting (same slice). `rebobinar-cursor
 <fuente> <fecha> [--aplicar]` rewinds one source's cursor to an earlier
 ISO date -- dry-run by default, `--aplicar` writes
-(`BUZON-CURSOR-REBOBINAR-CLI-1`). Every other command touches every
-configured source on its own, `fuentes.py`'s own job to enumerate."""
+(`BUZON-CURSOR-REBOBINAR-CLI-1`). `validar-reglas` reads a `reglas.json`
+candidate from stdin and validates it with `reglas.parsear_reglas`,
+printing the loader's own error and exiting 1 on anything it refuses --
+the ONE command that never builds `Config` and so needs no environment
+variable at all (BUZON-REGLAS-ENTRADA-1): the entry script's `reglas`/
+`reglas-ver` subcommands run it, as `duna`, with no env file sourced.
+Every other command touches every configured source on its own,
+`fuentes.py`'s own job to enumerate."""
 
 from __future__ import annotations
 
@@ -35,6 +41,7 @@ _COMANDOS = (
     "carpetas-graph",
     "fijar-carpetas",
     "rebobinar-cursor",
+    "validar-reglas",
 )
 
 _OPCIONES_AGREGAR_FUENTE = (
@@ -58,7 +65,8 @@ _USO = (
     "       python -m duna_buzon carpetas <id>\n"
     "       python -m duna_buzon carpetas-graph <id>\n"
     "       python -m duna_buzon fijar-carpetas <id> (--carpeta <nombre> ... | --todas)\n"
-    "       python -m duna_buzon rebobinar-cursor <fuente> <fecha ISO> [--aplicar]"
+    "       python -m duna_buzon rebobinar-cursor <fuente> <fecha ISO> [--aplicar]\n"
+    "       python -m duna_buzon validar-reglas < reglas.json"
 )
 
 
@@ -184,6 +192,14 @@ def main(argv: list[str] | None = None) -> int:
     if resto:
         print(_USO, file=sys.stderr)
         return 2
+
+    # `validar-reglas` is the ONE command dispatched before `Config` is
+    # ever built -- it touches no secret and no environment variable at
+    # all, by design (BUZON-REGLAS-ENTRADA-1), so it must never fail just
+    # because this invocation's caller (the entry script, as `duna`, with
+    # no env file sourced) has not set BUZON_GRAPH_CLIENT_ID and friends.
+    if comando == "validar-reglas":
+        return cli.comando_validar_reglas()
 
     try:
         config = Config.desde_entorno(os.environ)

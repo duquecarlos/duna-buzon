@@ -23,9 +23,13 @@ As of `HOST-AUTOACTUALIZAR-BUZON-1`, `deploy` installs its own newer copy of thi
 sudoers fragment BY ITSELF, as the first step after the pull and before anything that depends on the
 new code (`autoactualizar`, inside `deploy/host/duna-deploy-buzon`):
 
-1. Compares the just-pulled `deploy/host/duna-deploy-buzon` and `.sudoers` fragment against what is
-   actually installed (`/usr/local/sbin/duna-deploy-buzon`, `/etc/sudoers.d/duna-deploy-buzon`).
-   Identical: prints `entry script: up to date` and the rest of `deploy` continues unchanged.
+1. Compares the just-pulled `deploy/host/duna-deploy-buzon`, its `.sudoers` fragment, and
+   `deploy/host/env-permitidas.json` (`env-set`'s own allowlist, `BUZON-REGLAS-ENTRADA-1`) against what
+   is actually installed (`/usr/local/sbin/duna-deploy-buzon`, `/etc/sudoers.d/duna-deploy-buzon`,
+   `/usr/local/sbin/duna-deploy-buzon-env-permitidas.json`). All three identical: prints `entry script:
+   up to date` and the rest of `deploy` continues unchanged. `env-permitidas.json` is installed mode
+   0644, owned by root -- it names no secret, only which keys `env-set` may write and the pattern each
+   one's value must match.
 2. If the sudoers fragment changed, it REFUSES before installing anything unless the new fragment is
    EXACTLY one `NOPASSWD` rule on this one path -- no wildcard, no second command, no `ALL` -- and
    `visudo -cf` accepts it.
@@ -91,6 +95,10 @@ sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> <carpeta>...
 sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> --todas
 sudo -n /usr/local/sbin/duna-deploy-buzon registros <unidad> [n]
 sudo -n /usr/local/sbin/duna-deploy-buzon rebobinar-cursor <id> <fecha ISO> [--aplicar]
+sudo -n /usr/local/sbin/duna-deploy-buzon reglas-ver <fuente>
+sudo -n /usr/local/sbin/duna-deploy-buzon reglas <fuente> [--aplicar]
+sudo -n /usr/local/sbin/duna-deploy-buzon env-tiene <clave>
+sudo -n /usr/local/sbin/duna-deploy-buzon env-set <clave> <valor> [--aplicar]
 ```
 
 `status` is read-only: the owner's own `git` HEAD, `duna-buzon.timer`'s `systemctl is-active`,
@@ -113,7 +121,11 @@ autoactualizar kept, undoing its most recent install. `carpetas <id>` and `fijar
 "Choosing and setting `carpetas`" below. `registros <unidad> [n]` is read-only: see "Reading a unit's
 own log (`registros`)" below. `rebobinar-cursor <id> <fecha> [--aplicar]` rewinds one source's own
 cursor to re-read from an earlier date -- dry-run by default: see "Re-reading a source from an earlier
-date (`rebobinar-cursor`)" below.
+date (`rebobinar-cursor`)" below. `reglas-ver <fuente>` and `reglas <fuente> [--aplicar]` are
+`BUZON-REGLAS-ENTRADA-1`'s operator tooling over an existing source's `reglas.json` -- see "Setting a
+source's own rules (`reglas`)" below. `env-tiene <clave>` and `env-set <clave> <valor> [--aplicar]` are
+the same slice's tooling over `/srv/duna/env/buzon.env` -- see "Setting a non-secret env variable
+(`env-set`)" below.
 
 ## Operator steps (first deploy, by Carlos)
 
@@ -298,6 +310,61 @@ Re-forwarding mail already sent is NOT this command's own job to prevent: the ne
 guard (Finanzas answers a re-seen message with `200`, not `201`, on `id_externo`) counts it as
 `duplicados`, never `reenviados`. Takes effect on the next scheduled pass, or run one by hand with
 `systemd-run` as in `status`'s own health check.
+
+## Setting a source's own rules (`reglas`)
+
+As of `BUZON-REGLAS-ENTRADA-1`, Main and the desk can read and set a source's own `reglas.json` without
+Carlos's sudo password -- before this, the only way was hand-editing the file on the server as `duna`.
+Rules are not secret: `reglas.json` holds only sender addresses/domains and matching keywords, never a
+credential.
+
+```
+sudo -n /usr/local/sbin/duna-deploy-buzon reglas-ver <fuente>
+sudo -n /usr/local/sbin/duna-deploy-buzon reglas <fuente> --aplicar < reglas.json
+```
+
+`reglas-ver <fuente>` is read-only: it prints `fuentes/<fuente>/reglas.json` as-is. `reglas <fuente>
+[--aplicar]` reads a CANDIDATE `reglas.json` from stdin (at most 64 KiB), validates it with this
+connector's own loader (`duna_buzon.reglas.parsear_reglas`, run as `duna` via `python -m duna_buzon
+validar-reglas` -- the one python subcommand that builds no `Config` and touches no env file, so this
+never needs a secret), and prints a unified diff of the existing file against the candidate. Without
+`--aplicar` it stops there, writing nothing. With `--aplicar`, it backs up the existing file to
+`reglas.json.<UTC stamp>.bak` beside it, writes the new one atomically (temp file, then rename) as
+duna:duna mode 0600, and logs one line via `logger -t duna-deploy-buzon` -- the source id, the old and
+new file's sha256, and the backup's name, never the rules' own content. Example:
+
+```
+sudo -n /usr/local/sbin/duna-deploy-buzon reglas duna-zoho --aplicar < reglas.json
+```
+
+Takes effect on the next scheduled pass, or run one by hand with `systemd-run` as in `status`'s own
+health check. Both subcommands refuse an unknown source, and `reglas` also refuses invalid JSON (with
+the loader's own error) and stdin over the 64 KiB cap -- before writing anything.
+
+## Setting a non-secret env variable (`env-set`)
+
+Same slice: a narrow, passwordless way to read and change ONE allowlisted variable in
+`/srv/duna/env/buzon.env` -- today only `BUZON_ENVIAR_ORIGEN` (see "Turning on `origen`" above).
+
+```
+sudo -n /usr/local/sbin/duna-deploy-buzon env-tiene <clave>
+sudo -n /usr/local/sbin/duna-deploy-buzon env-set <clave> <valor> [--aplicar]
+```
+
+`env-tiene <clave>` works for ANY key shaped like an environment variable name, including a secret's own
+name, and prints only `definida`/`no definida` -- never the value. `env-set <clave> <valor>
+[--aplicar]` writes `/srv/duna/env/buzon.env`, but ONLY for a key listed in this repository's own
+`deploy/host/env-permitidas.json` (installed by autoactualizar, mapping each allowed key to the one
+regex its value must match -- seeded with exactly `BUZON_ENVIAR_ORIGEN` and pattern `^(0|1)$`), and a
+hard, in-script denylist on the key's own NAME (any key containing `TOKEN`, `SECRET`, `PASSWORD`,
+`CLAVE`, `_KEY`, `CIFRADO`, `CLIENT_ID`, `DSN` or `PRIVATE`) is checked FIRST and wins even over the
+allowlist -- so a future allowlist entry that merely looks like a secret's name can never be used to
+write one through this path. Dry-run by default: prints the current and the proposed value (safe to
+show, since only an allowlisted, denylist-cleared key ever reaches this point). `--aplicar` backs up
+`buzon.env` to `buzon.env.<UTC stamp>.bak`, changes EXACTLY the one matching line (or appends it if the
+key was not set before) atomically, and logs one line via `logger -t duna-deploy-buzon` naming the key
+and the backup -- never the value. No restart is needed: the timer's next scheduled pass reads the file
+fresh.
 
 ## Trust boundary
 

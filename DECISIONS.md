@@ -2490,3 +2490,102 @@ merging without waiting -- merged on green, no pause.
 
 Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): a selection-matching widening, no
 wire, no schema, directly named by the approval.
+
+---
+
+## BUZON-REGLAS-ENTRADA-1 -- passwordless `reglas`/`env-set` subcommands (2026-11-23)
+
+### Why
+
+Carlos, typed in the desk 23 Nov 2026 and relayed: "it would be amazing that you can run all the
+commands that you want on the server yourself." Setting a source's selection rules, and the one
+non-secret env flag (`BUZON_ENVIAR_ORIGEN`), both still needed Carlos's own sudo password and a hand
+edit as `duna` -- narrow, logged entry-script subcommands close that gap, the same shape
+`ORCH-CARLOS-HOST-SELF-SERVICE-2026-11-23` put to him and he approved, never a general sudo grant.
+
+### What changed
+
+Four new passwordless subcommands of `deploy/host/duna-deploy-buzon`, every one validated by shape
+before the EUID check, like every subcommand before it:
+
+- `reglas-ver <fuente>` -- read-only, prints `fuentes/<fuente>/reglas.json` as-is (never a secret).
+- `reglas <fuente> [--aplicar]` -- reads a candidate `reglas.json` from stdin, capped at 64 KiB
+  (`LIMITE_REGLAS_BYTES`, measured in BYTES via `wc -c`, never bash's own character count, so a
+  multi-byte accented word in `palabras` is never undercounted). Validates it with the PROGRAM's own
+  loader, never a shell re-implementation: `reglas.py` gained `parsear_reglas(texto)`, the same
+  validation `cargar_reglas` already ran on a file's content, now runnable on an in-memory string;
+  `__main__.py` gained `validar-reglas`, the ONE command dispatched BEFORE `Config` is ever built, so
+  it needs no environment variable and no secret at all -- the entry script runs it as `duna` via
+  `runuser`, with neither env file sourced. Refuses whatever the loader refuses and prints its error;
+  otherwise prints a unified diff (`diff -u`, process substitution, no temp file for the dry-run path)
+  and stops there unless `--aplicar` is given. `--aplicar` backs up the old file to
+  `reglas.json.<UTC stamp>.bak` (duna:duna mode 0600), writes the new one atomically (temp file in the
+  same directory, then `mv`, duna:duna mode 0600), and logs one line via `logger -t duna-deploy-buzon`
+  -- the source id, the old and new file's sha256, and the backup's name, never the rules' own content.
+- `env-tiene <CLAVE>` -- works for ANY key shaped like an environment variable name (`CLAVE_ENV_RE`),
+  including a secret's own name, and prints only `definida`/`no definida` against
+  `/srv/duna/env/buzon.env` -- never the value.
+- `env-set <CLAVE> <VALOR> [--aplicar]` -- writes that same file, but ONLY for a key listed in a new
+  allowlist this repo ships, `deploy/host/env-permitidas.json` (seeded with exactly
+  `BUZON_ENVIAR_ORIGEN` -> pattern `^(0|1)$`), installed by `autoactualizar` beside the entry script
+  itself (root:root mode 0644) the same way it already installs the entry script and its sudoers
+  fragment -- `autoactualizar` now diffs and installs THREE files, not two, and only reports "up to
+  date" when all three match. A hard, in-script denylist on the key's own NAME
+  (`TOKEN|SECRET|PASSWORD|CLAVE|_KEY|CIFRADO|CLIENT_ID|DSN|PRIVATE`) is checked FIRST, before the
+  allowlist lookup, so a future allowlist entry that merely looks like a secret's name can never be
+  used to write one through this path. Dry-run by default, prints the current and proposed value
+  (safe: only an allowlisted, denylist-cleared key ever reaches that point); `--aplicar` backs up the
+  env file, changes EXACTLY the one matching line (or appends it if the key was not set before)
+  atomically, and logs one line -- never the value. No restart needed: the timer's next scheduled pass
+  reads the file fresh.
+
+Neither `reglas`/`reglas-ver` nor `env-tiene`/`env-set` ever reads `credencial.bin`, the cursor, or
+`buzon-conector.env` (the token env file) -- only `reglas.json` and `buzon.env`, neither of which this
+repository's own invariants treat as secret.
+
+### Tests, measured
+
+38 new `def test_` functions across `tests/test_reglas.py`, `tests/test_cli.py`, `tests/test_main.py`
+and `tests/test_host_deploy_entry_script.py` (`git diff -- tests/ | grep -c '^+def test_'` over this
+slice's own diff against `main`), several parametrized into more collected items: `parsear_reglas`'s
+own validation (valid text, invalid JSON, a missing field, an invalid date, and that `cargar_reglas`
+now delegates to it byte-for-byte); `comando_validar_reglas` (valid stdin, invalid JSON, a missing
+field, prints nothing on success); `main(["validar-reglas"])` dispatching with every env variable
+unset AND with `Config.desde_entorno` itself replaced by a function that raises if ever called --
+proving the bypass is structural, not incidental; every new subcommand's argument-shape table (missing
+args, a bad source id, a lowercase/space/semicolon-laden env key, a value with mixed arities, a literal
+newline in an env value) refused with `usage`, and every shape-valid form failing ONLY on the EUID
+check, never on usage; the pure helpers directly (`_excede_limite_bytes` on a multi-byte string,
+`_clave_es_secreta` against every denylist token and a clean key, `_patron_permitido` against a real
+and a missing key/file, `_valor_env_actual`/`_env_tiene_clave`, `_escribir_env_con_clave` replacing one
+line and appending when absent, never touching a look-alike comment line); `cmd_reglas`/`cmd_env_set`
+text-inspected for no `eval` and no `cat`; `autoactualizar`'s own text-inspected for the third
+(`cambio_permitidas`) compare-and-install; the allowlist file's own existence and JSON shape; and both
+READMEs documenting the new subcommands, including the exact example the spec named.
+
+`uv run pytest -q` on the slice branch (`feat/buzon-reglas-entrada-1`), on the final tree (after the
+`cat`-literal self-correction in a comment, caught by this repo's own
+`test_los_archivos_de_entorno_nunca_se_leen_con_cat`):
+
+    614 passed, 9 skipped in 76.64s
+
+623 total (614 + 9) against this slice's own base (`main` at
+`962cd1039cda46b73d9b30a1eaeb2a26e1dcf789`, 554 total: `BUZON-REMITENTE-SUBDOMINIO-1-M`'s own recorded
+545 passed + 9 skipped) -- 623 - 554 = 69 new collected test items, consistent with 38 new function
+defs once parametrization is counted. No drift: every test passes, nothing pre-existing broke.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database. No customer-facing bytes -- every new byte
+is operator/orchestrator-facing: a root-owned host script only Main, the desk or Carlos himself ever
+invoke over SSH, its own README, and this ledger; no customer of Duna's products ever sees any of it.
+No cross-repo contract -- nothing here touches the Finanzas wire, the Graph client, or any other
+repository's contract; `validar-reglas` and the four new entry-script subcommands are purely local to
+this connector's own data (`reglas.json`) and its own non-secret env flag. All three conditions clear,
+and the approval ("MERGE IS APPROVED on GREEN.") authorizes merging without waiting.
+
+### Attribution
+
+Main, deciding under delegation (`ORCH-CARLOS-HOST-SELF-SERVICE-2026-11-23`, `ORCH-CARLOS-DELEGATES-
+TIER-1-1` for the shape): narrow, logged host-tooling subcommands directly named by the approval, never
+a general sudo grant.

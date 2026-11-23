@@ -42,7 +42,9 @@ fuentes/<id>/reglas.json           -- this source's own matching rules (never co
                                        AND any of its subdomains (`hetzner.com` also matches
                                        `mail.hetzner.com`), never a look-alike like `nothetzner.com`; an
                                        entry with `@` stays an exact address match
-                                       (`BUZON-REMITENTE-SUBDOMINIO-1`).
+                                       (`BUZON-REMITENTE-SUBDOMINIO-1`). Readable and settable without a
+                                       sudo password via the host entry script's `reglas-ver`/`reglas`
+                                       subcommands (`BUZON-REGLAS-ENTRADA-1`; see `deploy/host/README.md`).
 fuentes/<id>/estado.json           -- this source's own last-pass summary line: counts, when that pass
                                        finished, how many Graph retries it used, and -- for a Microsoft
                                        source -- the `$top` the LIST call was last using
@@ -153,6 +155,11 @@ The commands:
   mail already sent is prevented by `sincronizar`'s own duplicate guard on `id_externo` (Finanzas
   answers a re-seen message `200`, not `201`, counted as `duplicados`, never `reenviados`), never by
   this command itself.
+- `validar-reglas` -- reads a `reglas.json` candidate from stdin and validates it with
+  `reglas.parsear_reglas`, printing the loader's own error and exiting 1 on anything it refuses
+  (`BUZON-REGLAS-ENTRADA-1`). The ONE command that never builds `Config`, so it needs no environment
+  variable at all -- the host entry script's `reglas`/`reglas-ver` subcommands run it, as `duna`, with
+  no env file sourced (see `deploy/host/README.md`).
 
 ### Narrowing an IMAP source to specific folders (BUZON-IMAP-CARPETAS-INCLUIDAS-1)
 

@@ -523,3 +523,49 @@ def test_agregar_fuente_puerto_no_numerico_es_uso_incorrecto(
         == 2
     )
     assert "port" in capsys.readouterr().err.lower()
+
+
+# ---------------------------------------------------------------------------
+# `validar-reglas` (BUZON-REGLAS-ENTRADA-1) -- the one command dispatched
+# before Config is ever built, so it needs no environment variable at all.
+# ---------------------------------------------------------------------------
+
+
+def test_validar_reglas_con_argumento_extra_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["validar-reglas", "algo-mas"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_validar_reglas_no_requiere_ninguna_variable_de_entorno(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    for variable in (
+        "BUZON_GRAPH_CLIENT_ID",
+        "BUZON_CLAVE_CIFRADO",
+        "FINANZAS_BUZON_TOKEN",
+        "BUZON_DATOS",
+        "BUZON_FINANZAS_URL",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO('{"desde": "2026-01-01T00:00:00+00:00", "remitentes": ["a@b.com"], "palabras": []}'),
+    )
+    assert main(["validar-reglas"]) == 0
+
+
+def test_validar_reglas_se_despacha_antes_de_construir_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    def _config_falsa(entorno: object) -> Config:
+        raise AssertionError("Config.desde_entorno must never run for validar-reglas")
+
+    monkeypatch.setattr(Config, "desde_entorno", staticmethod(_config_falsa))
+    monkeypatch.setattr("sys.stdin", io.StringIO("esto no es json"))
+    assert main(["validar-reglas"]) == 1
