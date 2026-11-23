@@ -8,6 +8,7 @@ import pytest
 
 import httpx
 
+from duna_buzon import alerta as modulo_alerta
 from duna_buzon import auth, cli, credencial_imap, cripto
 from duna_buzon.config import Config
 from duna_buzon.cuenta import CuentaPullError, FuenteCuenta
@@ -1824,4 +1825,414 @@ def test_validar_reglas_nunca_imprime_nada_en_exito(
     assert cli.comando_validar_reglas() == 0
     salida = capsys.readouterr()
     assert salida.out == ""
+
+
+# ---------------------------------------------------------------------------
+# BUZON-ALERTA-AUTH-1 -- a dead credential becomes visible: per-source
+# `auth_fallando_desde`, a derived ALERTA once it passes the threshold, in
+# `estado`, in the sincronizar journal line, and in `alertas --json`.
+# ---------------------------------------------------------------------------
+
+
+def test_fallo_de_auth_temprano_marca_la_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    momento = datetime.datetime(2026, 11, 20, 8, 0, tzinfo=datetime.UTC)
+    monkeypatch.setattr(cli, "_ahora", lambda: momento)
+
+    def falso_obtener_token(cfg: Config, directorio_fuente: str) -> str:
+        raise auth.SinCuentaError("no account is signed in: run entrar")
+
+    monkeypatch.setattr(auth, "obtener_token", falso_obtener_token)
+    assert cli.comando_sincronizar(config) == 1
+    assert modulo_alerta.cargar_auth_fallando_desde(str(directorio)) == momento
+
+
+def test_fallo_de_auth_repetido_conserva_el_primer_momento(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+
+    def falso_obtener_token(cfg: Config, directorio_fuente: str) -> str:
+        raise auth.SinCuentaError("no account is signed in: run entrar")
+
+    monkeypatch.setattr(auth, "obtener_token", falso_obtener_token)
+
+    primero = datetime.datetime(2026, 11, 20, 8, 0, tzinfo=datetime.UTC)
+    monkeypatch.setattr(cli, "_ahora", lambda: primero)
+    assert cli.comando_sincronizar(config) == 1
+
+    segundo = datetime.datetime(2026, 11, 20, 20, 0, tzinfo=datetime.UTC)
+    monkeypatch.setattr(cli, "_ahora", lambda: segundo)
+    assert cli.comando_sincronizar(config) == 1
+
+    assert modulo_alerta.cargar_auth_fallando_desde(str(directorio)) == primero
+
+
+def test_fallo_de_auth_durante_la_pasada_marca_la_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    resultado_falso = ResultadoPasada(
+        contadores=Contadores(vistos=1), detenida_por_autenticacion=True, motivo="graph listar http=401"
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: resultado_falso)
+
+    momento = datetime.datetime(2026, 11, 20, 9, 0, tzinfo=datetime.UTC)
+    monkeypatch.setattr(cli, "_ahora", lambda: momento)
+    assert cli.comando_sincronizar(config) == 1
+    assert modulo_alerta.cargar_auth_fallando_desde(str(directorio)) == momento
+
+
+def test_error_transitorio_no_marca_ni_limpia_la_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+
+    momento_previo = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), momento_previo)
+
+    resultado_falso = ResultadoPasada(
+        contadores=Contadores(vistos=1),
+        detenida_por_error_transitorio=True,
+        motivo="finanzas enviar http=503",
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: resultado_falso)
+    monkeypatch.setattr(cli, "_ahora", lambda: datetime.datetime(2026, 11, 20, 8, 0, tzinfo=datetime.UTC))
+    assert cli.comando_sincronizar(config) == 1
+    assert modulo_alerta.cargar_auth_fallando_desde(str(directorio)) == momento_previo
+
+
+def test_reglas_invalidas_limpia_la_alerta_porque_el_token_si_funciono(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    (directorio / "reglas.json").write_text("esto no es json", encoding="utf-8")
+
+    momento_previo = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), momento_previo)
+
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    assert cli.comando_sincronizar(config) == 1
+    assert modulo_alerta.cargar_auth_fallando_desde(str(directorio)) is None
+
+
+def test_pasada_limpia_sin_fallos_limpia_la_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+
+    momento_previo = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), momento_previo)
+
+    resultado_falso = ResultadoPasada(contadores=Contadores(vistos=1))
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: resultado_falso)
+    assert cli.comando_sincronizar(config) == 0
+    assert modulo_alerta.cargar_auth_fallando_desde(str(directorio)) is None
+
+
+def test_rechazo_permanente_limpia_la_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+
+    momento_previo = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), momento_previo)
+
+    resultado_falso = ResultadoPasada(
+        contadores=Contadores(vistos=1),
+        detenida_por_rechazo_permanente=True,
+        motivo="finanzas enviar http=403",
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: resultado_falso)
+    assert cli.comando_sincronizar(config) == 1
+    assert modulo_alerta.cargar_auth_fallando_desde(str(directorio)) is None
+
+
+def test_remedio_credencial_microsoft_local(tmp_path: Path) -> None:
+    fuente = FuenteConfig(
+        id="hotmail-carlos",
+        proveedor="microsoft",
+        direccion="carlos@hotmail.com",
+        etiqueta="Hotmail",
+        token_finanzas_ref="carlos",
+        activa=True,
+    )
+    assert cli._remedio_credencial(fuente) == "ejecute 'entrar --fuente hotmail-carlos' para firmar"
+
+
+def test_remedio_credencial_imap_menciona_contrasena_de_aplicacion(tmp_path: Path) -> None:
+    fuente = FuenteConfig(
+        id="legal-duna",
+        proveedor="imap",
+        direccion="legal@duna.solutions",
+        etiqueta="Legal",
+        token_finanzas_ref="carlos",
+        activa=True,
+        host="imap.zoho.com",
+        port=993,
+    )
+    remedio = cli._remedio_credencial(fuente)
+    assert "contrasena de aplicacion" in remedio
+    assert "entrar --fuente legal-duna" in remedio
+
+
+def test_remedio_credencial_fuente_cuenta_menciona_cuenta_duna() -> None:
+    fuente = FuenteConfig(
+        id="cuenta-abc",
+        proveedor="microsoft",
+        direccion="carlos@outlook.com",
+        etiqueta="Outlook",
+        token_finanzas_ref="carlos",
+        activa=True,
+        origen="cuenta",
+    )
+    assert cli._remedio_credencial(fuente) == "reconecte en Cuenta Duna"
+
+
+def test_estado_sin_pasar_el_umbral_no_muestra_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    ahora = datetime.datetime(2026, 11, 20, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), ahora - datetime.timedelta(hours=23))
+    monkeypatch.setattr(cli, "_ahora", lambda: ahora)
+
+    assert cli.comando_estado(config) == 0
+    assert "ALERTA" not in capsys.readouterr().out
+
+
+def test_estado_pasado_el_umbral_muestra_alerta_con_remedio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=25))
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert (
+        "fuente=hotmail-carlos ALERTA credencial caida desde 2026-11-19T08:00:00Z (25 h)" in salida
+    )
+    assert "entrar --fuente hotmail-carlos" in salida
+
+
+def test_estado_en_el_umbral_exacto_muestra_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=24))
+
+    assert cli.comando_estado(config) == 0
+    assert "ALERTA" in capsys.readouterr().out
+
+
+def test_estado_umbral_personalizado_via_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = Config.desde_entorno(
+        {
+            "BUZON_GRAPH_CLIENT_ID": "cliente",
+            "BUZON_CLAVE_CIFRADO": CLAVE_VALIDA_BASE64,
+            "FINANZAS_BUZON_TOKEN": "token",
+            "BUZON_DATOS": str(tmp_path),
+            "BUZON_FINANZAS_URL": "http://127.0.0.1:8010",
+            "BUZON_ALERTA_AUTH_HORAS": "2",
+        }
+    )
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=3))
+
+    assert cli.comando_estado(config) == 0
+    assert "ALERTA" in capsys.readouterr().out
+
+
+def test_estado_y_alertas_nunca_imprimen_el_token_finanzas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secreto = "TOKEN-FINANZAS-SECRETO-NO-DEBE-APARECER"
+    config = Config.desde_entorno(
+        {
+            "BUZON_GRAPH_CLIENT_ID": "cliente",
+            "BUZON_CLAVE_CIFRADO": CLAVE_VALIDA_BASE64,
+            "FINANZAS_BUZON_TOKEN": secreto,
+            "BUZON_DATOS": str(tmp_path),
+            "BUZON_FINANZAS_URL": "http://127.0.0.1:8010",
+        }
+    )
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=30))
+
+    assert cli.comando_estado(config) == 0
+    assert secreto not in capsys.readouterr().out
+
+    assert cli.comando_alertas(config) == 0
+    assert secreto not in capsys.readouterr().out
+
+
+def test_alertas_json_vacio_sin_fuentes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    config = _config(tmp_path)
+    assert cli.comando_alertas(config) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_alertas_json_vacio_cuando_ninguna_fuente_esta_en_alerta(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path)
+    assert cli.comando_alertas(config) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_alertas_json_lista_la_fuente_en_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=30))
+
+    assert cli.comando_alertas(config) == 0
+    salida = json.loads(capsys.readouterr().out)
+    assert salida == [
+        {
+            "fuente": "hotmail-carlos",
+            "tipo": "auth",
+            "desde": "2026-11-19T08:00:00Z",
+            "horas": 30,
+            "remedio": "ejecute 'entrar --fuente hotmail-carlos' para firmar",
+        }
+    ]
+
+
+def test_alertas_json_omite_una_fuente_con_fuente_json_roto(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    (tmp_path / "fuentes" / "rota").mkdir(parents=True)
+    (tmp_path / "fuentes" / "rota" / "fuente.json").write_text("esto no es json", encoding="utf-8")
+    assert cli.comando_alertas(config) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_parada_de_auth_en_el_journal_lleva_alerta_si_tras_el_umbral(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), desde)
+
+    resultado_falso = ResultadoPasada(
+        contadores=Contadores(vistos=1), detenida_por_autenticacion=True, motivo="graph listar http=401"
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: resultado_falso)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=26))
+
+    assert cli.comando_sincronizar(config) == 1
+    salida = capsys.readouterr()
+    assert salida.err.strip() == "fuente=hotmail-carlos parada: graph listar http=401 alerta=si"
+
+
+def test_parada_de_auth_sin_pasar_el_umbral_no_lleva_alerta_si(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    resultado_falso = ResultadoPasada(
+        contadores=Contadores(vistos=1), detenida_por_autenticacion=True, motivo="graph listar http=401"
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: resultado_falso)
+
+    assert cli.comando_sincronizar(config) == 1
+    salida = capsys.readouterr()
+    assert salida.err.strip() == "fuente=hotmail-carlos parada: graph listar http=401"
+
+
+def test_parada_no_auth_nunca_lleva_alerta_si_aunque_haya_alerta_vieja(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A transient stop never carries alerta=si even when an OLD, already
+    # past-threshold auth marker still sits on disk from a previous run --
+    # bullet 4 names "a pass that stops on auth", not every stop.
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), desde)
+
+    resultado_falso = ResultadoPasada(
+        contadores=Contadores(vistos=1),
+        detenida_por_error_transitorio=True,
+        motivo="finanzas enviar http=503",
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: resultado_falso)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=26))
+
+    assert cli.comando_sincronizar(config) == 1
+    salida = capsys.readouterr()
+    assert salida.err.strip() == "fuente=hotmail-carlos parada: finanzas enviar http=503"
     assert salida.err == ""

@@ -1347,3 +1347,55 @@ def test_readme_documenta_reglas_y_env_set() -> None:
     assert (
         "sudo -n /usr/local/sbin/duna-deploy-buzon reglas duna-zoho --aplicar < reglas.json" in contenido
     )
+
+
+# ---------------------------------------------------------------------------
+# `alertas` (BUZON-ALERTA-AUTH-1) -- read-only, no sudoers change: the
+# installed rule is a bare script path, so a new subcommand needs none.
+# ---------------------------------------------------------------------------
+
+
+def test_alertas_es_subcomando_reconocido() -> None:
+    contenido = _contenido()
+    assert "alertas)" in contenido
+    assert "cmd_alertas" in contenido
+    assert "alertas" in contenido[contenido.index("usage() {") : contenido.index("parse_args() {")]
+
+
+def test_alertas_rechaza_argumentos() -> None:
+    resultado = _run("alertas", "algo-mas")
+    assert resultado.returncode == 2
+    assert "usage" in resultado.stderr.lower()
+
+
+def test_alertas_forma_valida_pasa_el_chequeo_de_forma_y_solo_falla_por_euid() -> None:
+    resultado = _run("alertas")
+    assert resultado.returncode == 1
+    assert "root" in resultado.stderr.lower()
+    assert "usage" not in resultado.stderr.lower()
+
+
+def test_cmd_alertas_es_de_solo_lectura_via_systemd_run() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("cmd_alertas() {") : contenido.index("cmd_carpetas() {")]
+    assert "systemd-run --pipe --quiet --wait --uid=duna --gid=duna" in bloque
+    assert "duna_buzon alertas --json" in bloque
+    # Read-only: no write, no mv, no install, no logger call inside this
+    # function's own body.
+    for linea in bloque.splitlines():
+        despojada = linea.strip()
+        if despojada.startswith("#"):
+            continue
+        assert "logger -t" not in despojada
+        assert not despojada.startswith("mv ")
+        assert not despojada.startswith("install ")
+
+
+def test_fragmento_sudoers_no_necesita_cambio_para_alertas() -> None:
+    # The installed sudoers rule is a bare script path with no argument
+    # restriction, so adding `alertas` needs no sudoers change at all --
+    # the fragment still holds exactly its one rule.
+    contenido = SUDOERS_FRAGMENT.read_text(encoding="utf-8")
+    lineas = contenido.splitlines()
+    assert len(lineas) == 1
+    assert lineas[0] == "carlos ALL=(root) NOPASSWD: /usr/local/sbin/duna-deploy-buzon"

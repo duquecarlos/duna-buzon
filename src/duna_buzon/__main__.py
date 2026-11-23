@@ -20,6 +20,10 @@ printing the loader's own error and exiting 1 on anything it refuses --
 the ONE command that never builds `Config` and so needs no environment
 variable at all (BUZON-REGLAS-ENTRADA-1): the entry script's `reglas`/
 `reglas-ver` subcommands run it, as `duna`, with no env file sourced.
+`alertas [--json]` prints every source currently past its own
+auth-failure threshold as a JSON list, `[]` when none, exit 0 either way
+(BUZON-ALERTA-AUTH-1) -- read-only, meant for Main's own session-start
+hub check via the host entry script's `alertas` subcommand.
 Every other command touches every configured source on its own,
 `fuentes.py`'s own job to enumerate."""
 
@@ -42,6 +46,7 @@ _COMANDOS = (
     "fijar-carpetas",
     "rebobinar-cursor",
     "validar-reglas",
+    "alertas",
 )
 
 _OPCIONES_AGREGAR_FUENTE = (
@@ -66,7 +71,8 @@ _USO = (
     "       python -m duna_buzon carpetas-graph <id>\n"
     "       python -m duna_buzon fijar-carpetas <id> (--carpeta <nombre> ... | --todas)\n"
     "       python -m duna_buzon rebobinar-cursor <fuente> <fecha ISO> [--aplicar]\n"
-    "       python -m duna_buzon validar-reglas < reglas.json"
+    "       python -m duna_buzon validar-reglas < reglas.json\n"
+    "       python -m duna_buzon alertas --json"
 )
 
 
@@ -189,6 +195,11 @@ def main(argv: list[str] | None = None) -> int:
             print(_USO, file=sys.stderr)
             return 2
         resto = []
+    elif comando == "alertas":
+        if resto not in ([], ["--json"]):
+            print(_USO, file=sys.stderr)
+            return 2
+        resto = []
     if resto:
         print(_USO, file=sys.stderr)
         return 2
@@ -244,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
         return cli.comando_rebobinar_cursor(
             config, id_fuente_rebobinar, fecha_rebobinar, aplicar=aplicar_rebobinar
         )
+    if comando == "alertas":
+        return cli.comando_alertas(config)
     return cli.comando_fuentes(config)
 
 

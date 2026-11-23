@@ -36,6 +36,12 @@ _VAR_CUENTA_CLIENT_SECRET = "BUZON_CUENTA_CLIENT_SECRET"
 _VAR_CUENTA_SUB = "BUZON_CUENTA_SUB"
 _VARS_CUENTA = (_VAR_CUENTA_URL, _VAR_CUENTA_CLIENT_ID, _VAR_CUENTA_CLIENT_SECRET, _VAR_CUENTA_SUB)
 
+# BUZON-ALERTA-AUTH-1 -- how long a source's own unbroken run of auth
+# failures (`alerta.py`) must last before `estado`/`alertas` call it an
+# ALERTA. A named, non-secret setting, never a literal buried in `cli.py`.
+_VAR_ALERTA_AUTH_HORAS = "BUZON_ALERTA_AUTH_HORAS"
+_ALERTA_AUTH_HORAS_PREDETERMINADO = 24
+
 _DATOS_PREDETERMINADO = "/srv/duna/data/buzon"
 _FINANZAS_URL_PREDETERMINADA = "http://127.0.0.1:8010"
 
@@ -108,6 +114,19 @@ def _validar_url_cuenta(url: str) -> str:
     return url
 
 
+def _alerta_auth_horas_desde_entorno(entorno: Mapping[str, str]) -> int:
+    valor = entorno.get(_VAR_ALERTA_AUTH_HORAS)
+    if valor is None or valor == "":
+        return _ALERTA_AUTH_HORAS_PREDETERMINADO
+    try:
+        horas = int(valor)
+    except ValueError as exc:
+        raise ConfigError(f"{_VAR_ALERTA_AUTH_HORAS} must be a positive integer") from exc
+    if horas <= 0:
+        raise ConfigError(f"{_VAR_ALERTA_AUTH_HORAS} must be a positive integer")
+    return horas
+
+
 def _cuenta_desde_entorno(entorno: Mapping[str, str]) -> tuple[str | None, str | None, str | None, str | None]:
     valores = {nombre: entorno.get(nombre) or None for nombre in _VARS_CUENTA}
     presentes = {nombre: valor for nombre, valor in valores.items() if valor}
@@ -144,6 +163,9 @@ class Config:
     # deployment that never set the variable, which is every deployment
     # before this slice.
     enviar_origen: bool = False
+    # BUZON-ALERTA-AUTH-1 -- see `_VAR_ALERTA_AUTH_HORAS` above. 24 for every
+    # deployment that never set the variable.
+    alerta_auth_horas: int = _ALERTA_AUTH_HORAS_PREDETERMINADO
 
     @property
     def cuenta_configurada(self) -> bool:
@@ -160,6 +182,7 @@ class Config:
         )
         cuenta_url, cuenta_client_id, cuenta_client_secret, cuenta_sub = _cuenta_desde_entorno(entorno)
         enviar_origen = entorno.get(_VAR_ENVIAR_ORIGEN) in _VALORES_ENVIAR_ORIGEN_VERDADEROS
+        alerta_auth_horas = _alerta_auth_horas_desde_entorno(entorno)
         return cls(
             graph_client_id=graph_client_id,
             clave_cifrado=clave_cifrado,
@@ -171,4 +194,5 @@ class Config:
             cuenta_client_secret=cuenta_client_secret,
             cuenta_sub=cuenta_sub,
             enviar_origen=enviar_origen,
+            alerta_auth_horas=alerta_auth_horas,
         )
