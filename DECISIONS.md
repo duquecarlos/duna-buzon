@@ -2433,3 +2433,60 @@ authorizes merging without waiting -- merged on green, no pause.
 
 Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): a host-deploy-tooling-only guardrail
 ported from `duna-pagos`' own entry script, no wire, no schema, directly named by the approval.
+
+---
+
+## BUZON-REMITENTE-SUBDOMINIO-1 -- a `remitentes` domain entry also matches its subdomains (2026-11-23)
+
+### Why
+
+Carlos asked to verify every Duna money movement from mail (memory 2026-11-23, `ORCH-CARLOS-DELEGATES-
+TIER-1-1`). The desk's census of his Hotmail found that vendor mail does not come from the bare domain in
+`reglas.json` -- it comes from a subdomain of it (`mail.anthropic.com`, `notify.cloudflare.com`,
+`tm.openai.com`). `_remitente_coincide` (`src/duna_buzon/reglas.py`) matched a domain entry only when it
+equalled the sender's domain exactly, so every one of those invoices was missed, not merely mis-sorted.
+
+### What changed
+
+One line in `_remitente_coincide`: a domain entry (no `@`) now matches the sender's domain when it EQUALS
+the entry OR ENDS WITH `.` + the entry -- a label-boundary suffix check, not a bare string suffix, so
+`hetzner.com` matches `mail.hetzner.com` and `billing.notificaciones.hetzner.com` but never
+`nothetzner.com` (no dot before `hetzner`) or `hetzner.com.evil.io` (the entry is a prefix, not a suffix,
+of that domain). A full-address entry (`x@y.com`) is untouched -- still an exact match only; casefolding
+and the existing leading-`@` tolerance on the entry are untouched. `coincide`'s own module docstring and
+`README.md`'s description of `fuentes/<id>/reglas.json` were updated to state the subdomain rule; neither
+previously said "exact", so there was no stale wording to correct beyond adding this.
+
+### Tests, measured
+
+7 new `def test_` functions (`git diff -- tests/test_reglas.py | grep -c '^+def test_'` over this slice's
+own diff against `main`): an equal domain still matches; a one-level subdomain matches; a two-level
+subdomain matches; the look-alike with no dot before the entry does not match; the look-alike where the
+entry is a domain-shaped prefix of a longer domain does not match; a full address stays exact (a
+different mailbox at the matching domain does NOT match merely because the domain matches); a leading
+`@` on the entry is still accepted for a subdomain match; and the whole match is still case-insensitive.
+
+`uv run pytest -q` on the slice branch (`feat/buzon-remitente-subdominio-1`), tree
+`a42a4fef920f7409f8cccc7cf5e22bfeb0488c83` (slice commit `af86c0ce6eb3f84b371dcab9b3c5c180b8528ec9`):
+
+    545 passed, 9 skipped in 39.18s
+
+545 is exactly 538 (this slice's own base, `main` at `0061c28a318d7640cf9df0c7181c99c4388a25bc`, the tip
+`BUZON-DEPLOY-REVIERTE-SOLO-1-M` left) plus this slice's own 7 new tests, all of which pass -- no drift
+between the two measurements. The 9 skips are the same pre-existing Windows file-mode skips every earlier
+slice in this ledger has recorded.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database. No customer-facing bytes -- `remitentes`
+widening is an operator-authored matching rule in `reglas.json` (never committed, never customer-facing),
+and the only prose touched is this ledger, `README.md` and a module docstring, both read only by an
+operator or an orchestrator, not a customer. No cross-repo contract -- nothing here touches the Finanzas
+wire, the Graph client, or any other repository's contract; which messages get selected is purely local
+matching logic. All three conditions clear, and the approval ("MERGE IS APPROVED on GREEN.") authorizes
+merging without waiting -- merged on green, no pause.
+
+### Attribution
+
+Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): a selection-matching widening, no
+wire, no schema, directly named by the approval.

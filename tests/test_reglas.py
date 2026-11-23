@@ -36,6 +36,62 @@ def test_regla_a_no_coincide_con_otro_remitente() -> None:
     assert not coincide(candidato, _reglas())
 
 
+def test_regla_a_subdominio_de_un_nivel_coincide() -> None:
+    candidato = MensajeCandidato(
+        remitente="facturas@mail.ejemplo-empleador.com", asunto=None, nombres_adjuntos=[]
+    )
+    assert coincide(candidato, _reglas())
+
+
+def test_regla_a_subdominio_de_dos_niveles_coincide() -> None:
+    candidato = MensajeCandidato(
+        remitente="alertas@billing.notificaciones.ejemplo-empleador.com",
+        asunto=None,
+        nombres_adjuntos=[],
+    )
+    assert coincide(candidato, _reglas())
+
+
+def test_regla_a_no_coincide_con_dominio_parecido_sin_punto() -> None:
+    candidato = MensajeCandidato(
+        remitente="alguien@notejemplo-empleador.com", asunto=None, nombres_adjuntos=[]
+    )
+    assert not coincide(candidato, _reglas())
+
+
+def test_regla_a_no_coincide_con_dominio_como_sufijo_de_otro() -> None:
+    candidato = MensajeCandidato(
+        remitente="alguien@ejemplo-empleador.com.evil.io", asunto=None, nombres_adjuntos=[]
+    )
+    assert not coincide(candidato, _reglas())
+
+
+def test_regla_a_direccion_completa_sigue_siendo_exacta() -> None:
+    candidato = MensajeCandidato(
+        remitente="otra-cuenta@banco-ejemplo.com", asunto=None, nombres_adjuntos=[]
+    )
+    assert not coincide(candidato, _reglas())
+
+
+def test_regla_a_arroba_inicial_en_la_entrada_sigue_aceptandose() -> None:
+    reglas = Reglas(
+        desde=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+        remitentes=("@ejemplo-empleador.com",),
+        palabras=(),
+    )
+    candidato = MensajeCandidato(
+        remitente="nomina@mail.ejemplo-empleador.com", asunto=None, nombres_adjuntos=[]
+    )
+    assert coincide(candidato, reglas)
+
+
+def test_regla_a_dominio_es_insensible_a_mayusculas() -> None:
+    candidato = MensajeCandidato(
+        remitente="Nomina@MAIL.Ejemplo-Empleador.COM", asunto=None, nombres_adjuntos=[]
+    )
+    assert coincide(candidato, _reglas())
+
+
 def test_regla_b_adjunto_pdf_mas_palabra_en_asunto_coincide() -> None:
     candidato = MensajeCandidato(
         remitente="alguien@otro-dominio.com",

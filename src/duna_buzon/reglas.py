@@ -5,7 +5,11 @@ never committed; `deploy/reglas.example.json` ships only placeholder
 senders and generic Spanish terms.
 
 A message matches when ANY of:
-  (a) its sender address or domain is in `remitentes`;
+  (a) its sender address is in `remitentes`, or its sender's domain is a
+      `remitentes` domain entry OR one of that domain's subdomains (an
+      entry `hetzner.com` also matches `mail.hetzner.com` and
+      `billing.hetzner.com`, but never `nothetzner.com` or
+      `hetzner.com.evil.io`);
   (b) it carries a PDF/XML/ZIP attachment (by name before download; the
       real recognition, by bytes, happens once the content is in hand) AND
       its subject or sender matches one of `palabras`;
@@ -94,7 +98,7 @@ def _remitente_coincide(remitente: str, remitentes_regla: tuple[str, ...]) -> bo
         if "@" in entrada_norm:
             if remitente_norm == entrada_norm:
                 return True
-        elif dominio_remitente == entrada_norm:
+        elif dominio_remitente == entrada_norm or dominio_remitente.endswith("." + entrada_norm):
             return True
     return False
 

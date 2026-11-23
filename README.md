@@ -37,7 +37,12 @@ fuentes/<id>/cursor.json           -- this source's own sync cursor (a timestamp
 fuentes/<id>/cursor_proveedor.json -- this source's own provider-defined resume token, if it has one (IMAP's
                                        JSON object mapping folder name to that folder's own
                                        "<uidvalidity>:<uid>" pair; absent for Microsoft and Google)
-fuentes/<id>/reglas.json           -- this source's own matching rules (never committed; see `reglas.py`)
+fuentes/<id>/reglas.json           -- this source's own matching rules (never committed; see `reglas.py`).
+                                       A `remitentes` entry without `@` is a domain and matches that domain
+                                       AND any of its subdomains (`hetzner.com` also matches
+                                       `mail.hetzner.com`), never a look-alike like `nothetzner.com`; an
+                                       entry with `@` stays an exact address match
+                                       (`BUZON-REMITENTE-SUBDOMINIO-1`).
 fuentes/<id>/estado.json           -- this source's own last-pass summary line: counts, when that pass
                                        finished, how many Graph retries it used, and -- for a Microsoft
                                        source -- the `$top` the LIST call was last using
