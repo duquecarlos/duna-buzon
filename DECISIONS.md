@@ -2589,3 +2589,113 @@ and the approval ("MERGE IS APPROVED on GREEN.") authorizes merging without wait
 Main, deciding under delegation (`ORCH-CARLOS-HOST-SELF-SERVICE-2026-11-23`, `ORCH-CARLOS-DELEGATES-
 TIER-1-1` for the shape): narrow, logged host-tooling subcommands directly named by the approval, never
 a general sudo grant.
+
+---
+
+## BUZON-ALERTA-AUTH-1 -- a dead credential becomes visible (2026-11-23)
+
+### Why
+
+Carlos asked through the desk 23 Nov 2026, his own words: "All this keys to fully access the emails, does
+it expire? How to do it for normal users later?" The desk asked for an alert when a source stays in auth
+error for more than one day. Before this slice, a dead credential (an app password revoked, an OAuth
+refresh token expired or revoked) only printed `parada=auth error=...` (or `parada=graph listar
+http=401`) to the journal on every pass, forever -- nobody was told (`ORCH-CARLOS-DELEGATES-TIER-1-1`,
+"Anything off the normal order flow raises a flag").
+
+### What changed
+
+A new per-source marker, `fuentes/<id>/alerta.json` (`src/duna_buzon/alerta.py`): `auth_fallando_desde`,
+a UTC timestamp, set on the FIRST auth failure of an unbroken run and kept across passes until one
+authenticates again. `cli.py`'s own `_ejecutar_una_fuente` decides when a pass counts: the early
+`SinCuentaError`/`SinCredencialError`/`ClaveInvalidaError` family (no provider built yet) and
+`ResultadoPasada.detenida_por_autenticacion` (`ProveedorAutenticacionError`, or Finanzas answering
+`unauthorized`) both SET it; a clean pass, a rules error (a token WAS obtained that pass), or a permanent
+Finanzas rejection all CLEAR it (auth plainly worked); a transient failure
+(`detenida_por_error_transitorio`) touches neither, per the build instructions. No second on-disk store
+was added beyond this one small file -- `estado.json`, `historial.jsonl` and `cursor.json` stayed exactly
+as they were, since none of them had anywhere to carry a value that must survive a pass which never even
+reaches the point where they are written.
+
+A new config setting, `BUZON_ALERTA_AUTH_HORAS` (`config.py`, default 24, must be a positive integer,
+refused by name like every other invalid setting) -- the threshold is DATA, never a literal in `cli.py`.
+`estado` now prints, per source past that threshold: `fuente=<id> ALERTA credencial caida desde <ts> (<n>
+h) -- reconectar: <how>`, `<how>` being `entrar --fuente <id>` for a `local`-origen microsoft source, a
+new app password followed by that same `entrar` for `local`-origen imap, or reconnecting in Cuenta Duna
+for an `origen="cuenta"` source (`cli.py`'s own `_remedio_credencial`) -- never a token, password or
+address beyond the source's own id. `sincronizar`'s own stderr journal line for a pass that stops on auth
+now also carries `alerta=si` once past the threshold, computed from the SAME shared helper
+(`cli._estado_alerta`) `estado` and the new `alertas` subcommand use, so all three agree on exactly what
+counts as in alerta. `alertas [--json]` (`__main__.py`, `cli.comando_alertas`) prints a JSON list, `[]`
+when none, exit 0 either way -- `[{"fuente", "tipo": "auth", "desde", "horas", "remedio"}, ...]`.
+`deploy/host/duna-deploy-buzon` gained a matching `alertas` subcommand, read-only, running `python -m
+duna_buzon alertas --json` as `duna` via the same `systemd-run --pipe --quiet --wait` shape `status` uses
+for its own health check -- the installed sudoers rule is a bare script path with no argument
+restriction, so this needed NO sudoers change, confirmed unchanged below.
+
+Both READMEs (`README.md`, `deploy/host/README.md`) document what the alert means, the per-kind remedy,
+the new `alerta.json` file and `BUZON_ALERTA_AUTH_HORAS` setting, and that Main relays an `alertas --json`
+result to Carlos's own desk at session start.
+
+### Not built, named instead
+
+A console line surfacing the same alert in the admin UI needs a Buzón-to-console read that does not
+exist today -- the smallest wire for that is a follow-up (`BUZON-ALERTA-CONSOLE-LINE-1`, open below), not
+built by this slice: the spec's own build instructions asked only to coin it in this report, not build it.
+
+### Tests, measured
+
+38 new `def test_` functions (`git diff main -- tests/ | grep -c '^+def test_'` over this slice's own
+diff against `main`), several parametrized into more collected items: `alerta.py`'s own
+set/keep-first/clear/no-op-clear behaviour in isolation (`tests/test_alerta.py`); `BUZON_ALERTA_AUTH_HORAS`
+parsing (default, a valid positive integer, zero/negative/non-numeric/empty) in `tests/test_config.py`;
+in `tests/test_cli.py` -- an early auth exception marks the alert and a second one keeps the FIRST
+moment; a mid-pass `detenida_por_autenticacion` marks it; a transient stop touches neither a fresh nor an
+existing marker; a rules error, a clean pass and a permanent rejection each clear a pre-existing marker
+(auth worked that pass); `_remedio_credencial` for each of the three source kinds; `estado` under,
+at, and over the threshold, and with a configured non-default threshold; neither `estado` nor `alertas`
+ever print a planted `FINANZAS_BUZON_TOKEN` value; `alertas --json`'s exact shape, its empty case with no
+sources and with sources none of which are in alerta, and that a broken `fuente.json` is silently
+skipped rather than failing the command; the sincronizar journal line carrying `alerta=si` only for an
+auth stop that has passed the threshold, never for one that has not, and never for a transient stop even
+when an old, already-past-threshold marker sits on disk. In `tests/test_main.py` -- `alertas` dispatches
+with the env-built `Config`, accepts an optional `--json`, and refuses any other argument. In
+`tests/test_host_deploy_entry_script.py` -- `alertas` is a recognized subcommand, refuses an extra
+argument, passes its own shape check and fails only on EUID, runs read-only via `systemd-run` with no
+`logger`/`mv`/`install` call in its own body, and the sudoers fragment still holds exactly its one
+pre-existing rule.
+
+`.venv/Scripts/python.exe -m pytest --junit-xml=.gate-out/gate.xml -q` on the slice branch
+(`feat/buzon-alerta-auth-1`), on the final tree (commit `4f60073`, after removing one stray leftover
+assertion caught by the gate's own first run):
+
+    656 passed, 9 skipped in 146.03s
+
+665 total (656 + 9) against this slice's own base (`main` at
+`350b0fd24df6426aefe95a7be54125c5d2949a8e`, 623 total: `BUZON-REGLAS-ENTRADA-1-M`'s own recorded 614
+passed + 9 skipped) -- 42 new collected items, more than the 38 new function defs once this slice's own
+parametrized cases (`BUZON_ALERTA_AUTH_HORAS` validation, `alertas`'s argument-shape table) are counted.
+No drift: the gate's FIRST run on this tree caught one stray leftover assertion this slice's own authoring
+left in a new test (`test_parada_no_auth_nunca_lleva_alerta_si_aunque_haya_alerta_vieja`); fixed and
+re-run GREEN before this entry, both runs on the gate's own JUnit XML, never inferred from an exit code.
+The 9 skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger has
+recorded.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database. No cross-repo contract -- nothing here
+touches the Finanzas wire, the Graph client, or any other repository's contract; `alerta.json` is this
+connector's own new on-disk file, never sent anywhere. Customer-facing bytes DID change: the new ALERTA
+line in `estado`, the `alerta=si` journal suffix, and the new `alertas --json` output are all bytes an
+OPERATOR reads (Carlos over SSH, Main and the desk over `sudo -n`) -- never a customer of a Duna product,
+but the dispatch's own definition of this condition is broader than that ("a byte a customer, operator or
+owner reads"), so this slice records the condition as tripped rather than narrowing it the way two earlier
+entries in this ledger did. The approval's own words -- "MERGE IS APPROVED on GREEN." -- are an explicit,
+in-words authorization to merge past a tripped condition once the gate is green, so this slice merges
+without waiting, same as the two before it, but on the broader reading of this one condition rather than
+a claim that it did not trip.
+
+### Attribution
+
+Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): a visibility feature over existing
+failure signals, no wire, no schema, directly named by the approval.
