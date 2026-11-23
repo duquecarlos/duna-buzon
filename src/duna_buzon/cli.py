@@ -20,6 +20,7 @@ import json
 import sys
 from pathlib import Path
 
+from duna_buzon import alerta as modulo_alerta
 from duna_buzon import auth, credencial_imap, cripto
 from duna_buzon import cursor as modulo_cursor
 from duna_buzon import fuentes as modulo_fuentes
@@ -59,6 +60,38 @@ def _ahora() -> datetime.datetime:
     """BUZON-GRAPH-TIMEOUT-1 -- the one clock read this module does, so a
     test can pin it with `monkeypatch.setattr(cli, "_ahora", ...)`."""
     return datetime.datetime.now(datetime.UTC)
+
+
+def _remedio_credencial(fuente: FuenteConfig) -> str:
+    """How to reconnect ONE source whose credential has died
+    (BUZON-ALERTA-AUTH-1) -- never a token, password or address, only the
+    next command to run or where to go. `origen="cuenta"` has no `entrar`
+    step here at all: Cuenta Duna owns that reconnect."""
+    if fuente.origen == "cuenta":
+        return "reconecte en Cuenta Duna"
+    if fuente.proveedor == "microsoft":
+        return f"ejecute 'entrar --fuente {fuente.id}' para firmar"
+    assert fuente.proveedor == "imap"
+    return f"genere una nueva contrasena de aplicacion, luego ejecute 'entrar --fuente {fuente.id}'"
+
+
+def _estado_alerta(
+    config: Config, fuente: FuenteConfig, ahora: datetime.datetime
+) -> tuple[datetime.datetime, int] | None:
+    """`(desde, horas)` when this source's own `auth_fallando_desde` has
+    passed `config.alerta_auth_horas`, `None` otherwise -- no marker at
+    all, or one still under the threshold. Shared by `estado`, `alertas`
+    and `sincronizar`'s own journal line, so all three agree on exactly
+    what counts as in alerta."""
+    directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
+    desde = modulo_alerta.cargar_auth_fallando_desde(directorio)
+    if desde is None:
+        return None
+    transcurrido = ahora - desde
+    if transcurrido < datetime.timedelta(hours=config.alerta_auth_horas):
+        return None
+    horas = int(transcurrido // datetime.timedelta(hours=1))
+    return desde, horas
 
 
 def _migrar_si_necesario(config: Config) -> None:
@@ -164,14 +197,21 @@ def _ejecutar_una_fuente(
     cliente_finanzas: FinanzasClient,
     *,
     token_cuenta: str | None = None,
-) -> tuple[str, str | None]:
-    """Runs one source's own pass end to end and returns `(linea, motivo)`
-    -- the summary line this source's `estado.json` carries, and the stop
-    reason (`None` if it finished cleanly). Never raises for a failure that
-    is this source's own (auth, rules, the provider, Finanzas): a source
-    that cannot even sign in is reported exactly like one that signs in and
-    then has its pass stopped, so one source's trouble never stops
-    another's.
+) -> tuple[str, str | None, bool]:
+    """Runs one source's own pass end to end and returns `(linea, motivo,
+    fue_fallo_auth)` -- the summary line this source's `estado.json`
+    carries, the stop reason (`None` if it finished cleanly), and whether
+    THIS pass's own stop was an authentication failure (BUZON-ALERTA-
+    AUTH-1; always `False` when `motivo` is `None`). Never raises for a
+    failure that is this source's own (auth, rules, the provider,
+    Finanzas): a source that cannot even sign in is reported exactly like
+    one that signs in and then has its pass stopped, so one source's
+    trouble never stops another's.
+
+    Also persists `fuentes/<id>/alerta.json` (`alerta.py`): set on the
+    FIRST auth failure of an unbroken run, kept while auth keeps failing,
+    cleared the moment a pass authenticates again -- a transient error
+    (`ProveedorErrorTransitorio`) touches neither.
 
     `token_cuenta` is the access token `_pull_fuentes_cuenta` already
     pulled for a `origen="cuenta"` source THIS run -- such a source has no
@@ -179,7 +219,7 @@ def _ejecutar_una_fuente(
     for it."""
     directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
 
-    def _detenida(motivo: str) -> tuple[str, str | None]:
+    def _detenida(motivo: str) -> tuple[str, str | None, bool]:
         # No provider exists yet at this point (auth/rules both run before
         # `construir_proveedor`), so there were never any Graph retries to
         # report -- `reintentos=0` is exact, not a placeholder.
@@ -188,7 +228,7 @@ def _ejecutar_una_fuente(
         cripto.asegurar_directorio_datos(Path(directorio))
         cripto.escribir_archivo_sensible(Path(directorio) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8"))
         _agregar_historial(directorio, Contadores(), motivo, momento)
-        return linea, motivo
+        return linea, motivo, False
 
     try:
         if fuente.origen == "cuenta":
@@ -200,12 +240,17 @@ def _ejecutar_una_fuente(
             assert fuente.proveedor == "imap"
             token = credencial_imap.obtener_credencial(config, directorio)
     except (auth.SinCuentaError, credencial_imap.SinCredencialError, cripto.ClaveInvalidaError) as exc:
-        return _detenida(f"auth error={exc}")
+        modulo_alerta.marcar_auth_fallando(directorio, _ahora())
+        linea, motivo, _ = _detenida(f"auth error={exc}")
+        return linea, motivo, True
 
     ruta_reglas = Path(directorio) / NOMBRE_ARCHIVO_REGLAS
     try:
         reglas = cargar_reglas(ruta_reglas)
     except ReglasInvalidasError as exc:
+        # A token was obtained this pass -- whatever stops it from here is
+        # not a credential problem, so the alert clears.
+        modulo_alerta.limpiar_auth_fallando(directorio)
         return _detenida(f"reglas error={exc}")
 
     cursor_inicial = modulo_cursor.cargar_cursor(directorio, valor_inicial=reglas.desde)
@@ -236,6 +281,15 @@ def _ejecutar_una_fuente(
     finally:
         proveedor.cerrar()
 
+    if resultado.detenida_por_autenticacion:
+        modulo_alerta.marcar_auth_fallando(directorio, _ahora())
+    elif not resultado.detenida_por_error_transitorio:
+        # Clean, duplicated/omitted, or a permanent Finanzas rejection --
+        # none of those is a credential problem, and a token was obtained
+        # to even reach this point, so the alert clears. A transient
+        # error touches neither (BUZON-ALERTA-AUTH-1).
+        modulo_alerta.limpiar_auth_fallando(directorio)
+
     if resultado.debe_persistir_cursor and resultado.cursor_final is not None:
         modulo_cursor.guardar_cursor(directorio, resultado.cursor_final)
     if resultado.debe_persistir_cursor and resultado.cursor_proveedor_final is not None:
@@ -260,7 +314,7 @@ def _ejecutar_una_fuente(
     cripto.asegurar_directorio_datos(Path(directorio))
     cripto.escribir_archivo_sensible(Path(directorio) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8"))
     _agregar_historial(directorio, resultado.contadores, resultado.motivo, momento)
-    return linea, resultado.motivo
+    return linea, resultado.motivo, resultado.detenida_por_autenticacion
 
 
 def _pull_fuentes_cuenta(config: Config) -> dict[str, str] | None:
@@ -350,14 +404,17 @@ def comando_sincronizar(config: Config) -> int:
                     # run this pass, and that is not a failure of the pass:
                     # its cursor is untouched, ready for the next pull.
                     continue
-                linea, motivo = _ejecutar_una_fuente(
+                linea, motivo, fue_fallo_auth = _ejecutar_una_fuente(
                     config, fuente, cliente_finanzas, token_cuenta=token_cuenta
                 )
             else:
-                linea, motivo = _ejecutar_una_fuente(config, fuente, cliente_finanzas)
+                linea, motivo, fue_fallo_auth = _ejecutar_una_fuente(config, fuente, cliente_finanzas)
             print(f"fuente={fuente.id} {linea}")
             if motivo is not None:
-                print(f"fuente={fuente.id} parada: {motivo}", file=sys.stderr)
+                parada = f"fuente={fuente.id} parada: {motivo}"
+                if fue_fallo_auth and _estado_alerta(config, fuente, _ahora()) is not None:
+                    parada += " alerta=si"
+                print(parada, file=sys.stderr)
                 algun_fallo = True
     finally:
         cliente_finanzas.cerrar()
@@ -432,9 +489,47 @@ def comando_estado(config: Config, *, pasadas: int | None = None) -> int:
         if ruta_estado.is_file():
             print(f"fuente={fuente.id} {ruta_estado.read_text(encoding='utf-8').strip()}")
 
+        en_alerta = _estado_alerta(config, fuente, _ahora())
+        if en_alerta is not None:
+            desde, horas = en_alerta
+            print(
+                f"fuente={fuente.id} ALERTA credencial caida desde "
+                f"{registro.formato_fecha_utc(desde)} ({horas} h) -- "
+                f"reconectar: {_remedio_credencial(fuente)}"
+            )
+
         _imprimir_historial(fuente.id, directorio, limite_pasadas)
 
     return 1 if algun_fallo else 0
+
+
+def comando_alertas(config: Config) -> int:
+    """Machine-readable: every source currently past its own auth-failure
+    threshold (BUZON-ALERTA-AUTH-1), as a JSON list -- `[]` when none.
+    Read-only, exits 0 either way: Main's own session-start hub check
+    reads this through `duna-deploy-buzon alertas` to relay a dead
+    credential to the desk, never a token, password or address beyond the
+    source's own id."""
+    _migrar_si_necesario(config)
+    todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
+    ahora = _ahora()
+    alertas: list[dict[str, object]] = []
+    for fuente in todas:
+        en_alerta = _estado_alerta(config, fuente, ahora)
+        if en_alerta is None:
+            continue
+        desde, horas = en_alerta
+        alertas.append(
+            {
+                "fuente": fuente.id,
+                "tipo": "auth",
+                "desde": registro.formato_fecha_utc(desde),
+                "horas": horas,
+                "remedio": _remedio_credencial(fuente),
+            }
+        )
+    print(json.dumps(alertas))
+    return 0
 
 
 def comando_fuentes(config: Config) -> int:

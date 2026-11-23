@@ -182,3 +182,36 @@ def test_enviar_origen_con_cualquier_otro_valor_queda_apagado(
     entorno_valido["BUZON_ENVIAR_ORIGEN"] = valor
     config = Config.desde_entorno(entorno_valido)
     assert config.enviar_origen is False
+
+
+# ---------------------------------------------------------------------------
+# BUZON_ALERTA_AUTH_HORAS (BUZON-ALERTA-AUTH-1) -- threshold as DATA, never a
+# literal in cli.py. 24 hours when unset; any other value must be a positive
+# integer, named by error without echoing what was actually given.
+# ---------------------------------------------------------------------------
+
+
+def test_alerta_auth_horas_usa_el_valor_predeterminado(entorno_valido: dict[str, str]) -> None:
+    config = Config.desde_entorno(entorno_valido)
+    assert config.alerta_auth_horas == 24
+
+
+def test_alerta_auth_horas_acepta_un_entero_positivo(entorno_valido: dict[str, str]) -> None:
+    entorno_valido["BUZON_ALERTA_AUTH_HORAS"] = "6"
+    config = Config.desde_entorno(entorno_valido)
+    assert config.alerta_auth_horas == 6
+
+
+@pytest.mark.parametrize("valor", ["0", "-1", "no-es-un-numero", "1.5", ""])
+def test_alerta_auth_horas_invalido_se_rechaza_nombrando_la_variable(
+    entorno_valido: dict[str, str], valor: str
+) -> None:
+    entorno_valido["BUZON_ALERTA_AUTH_HORAS"] = valor
+    if valor == "":
+        # Empty is treated the same as unset -- the default applies.
+        config = Config.desde_entorno(entorno_valido)
+        assert config.alerta_auth_horas == 24
+        return
+    with pytest.raises(ConfigError) as excinfo:
+        Config.desde_entorno(entorno_valido)
+    assert "BUZON_ALERTA_AUTH_HORAS" in str(excinfo.value)

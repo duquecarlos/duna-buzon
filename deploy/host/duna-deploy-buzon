@@ -18,6 +18,16 @@
 #   sudo -n /usr/local/sbin/duna-deploy-buzon reglas <fuente> [--aplicar]
 #   sudo -n /usr/local/sbin/duna-deploy-buzon env-tiene <CLAVE>
 #   sudo -n /usr/local/sbin/duna-deploy-buzon env-set <CLAVE> <VALOR> [--aplicar]
+#   sudo -n /usr/local/sbin/duna-deploy-buzon alertas
+#
+# BUZON-ALERTA-AUTH-1 -- `alertas` is read-only: it just runs `python -m
+# duna_buzon alertas --json`, as `duna`, the same way `status` runs
+# `estado` -- a JSON list of every source whose own credential has been
+# failing to authenticate for more than BUZON_ALERTA_AUTH_HORAS (default
+# 24) hours, `[]` when none. Main's own session-start hub check reads this
+# over `sudo -n` (the sudoers rule below is a bare script path, so this
+# subcommand needs no sudoers change) to relay a dead credential to the
+# desk. Never a token, password or address beyond the source's own id.
 #
 # BUZON-REGLAS-ENTRADA-1 -- `reglas-ver <fuente>` prints a source's own
 # `reglas.json`, read-only (never a secret: `reglas.json` holds only
@@ -183,7 +193,7 @@ usage() {
         "carpetas <id>|fijar-carpetas <id> <carpeta>...|fijar-carpetas <id> --todas|" \
         "registros <unidad> [n]|rebobinar-cursor <id> <fecha> [--aplicar]|" \
         "reglas-ver <fuente>|reglas <fuente> [--aplicar]|" \
-        "env-tiene <clave>|env-set <clave> <valor> [--aplicar]}" >&2
+        "env-tiene <clave>|env-set <clave> <valor> [--aplicar]|alertas}" >&2
     exit 2
 }
 
@@ -217,7 +227,7 @@ parse_args() {
     ENV_SET_VALOR=""
     ENV_SET_APLICAR=0
     case "$SUBCOMMAND" in
-        status | entrar | rollback-script)
+        status | entrar | rollback-script | alertas)
             [[ $# -eq 0 ]] || usage
             ;;
         deploy)
@@ -972,6 +982,17 @@ cmd_env_set() {
     echo "duna-deploy-buzon: $clave updated (backup: $(basename "$respaldo"))"
 }
 
+# Read-only: `alertas` -- `python -m duna_buzon alertas --json`, as `duna`,
+# the same `systemd-run --pipe --quiet --wait` shape `status`'s own health
+# check uses. Prints whatever that JSON list is, `[]` when no source is in
+# alerta; never writes anything (BUZON-ALERTA-AUTH-1).
+cmd_alertas() {
+    systemd-run --pipe --quiet --wait --uid=duna --gid=duna \
+        --property="EnvironmentFile=$ENV_CLIENTE" --property="EnvironmentFile=$ENV_TOKEN" \
+        --property="WorkingDirectory=$REPO" -- \
+        "$REPO/.venv/bin/python" -m duna_buzon alertas --json
+}
+
 # Read-only: `carpetas <id>` (imap or graph, by provider) -- never writes.
 cmd_carpetas() {
     local id="$1"
@@ -1099,6 +1120,7 @@ dispatch() {
         reglas) cmd_reglas "$REGLAS_ID" "$REGLAS_APLICAR" ;;
         env-tiene) cmd_env_tiene "$ENV_TIENE_CLAVE" ;;
         env-set) cmd_env_set "$ENV_SET_CLAVE" "$ENV_SET_VALOR" "$ENV_SET_APLICAR" ;;
+        alertas) cmd_alertas ;;
     esac
 }
 

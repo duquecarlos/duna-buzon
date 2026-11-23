@@ -99,6 +99,7 @@ sudo -n /usr/local/sbin/duna-deploy-buzon reglas-ver <fuente>
 sudo -n /usr/local/sbin/duna-deploy-buzon reglas <fuente> [--aplicar]
 sudo -n /usr/local/sbin/duna-deploy-buzon env-tiene <clave>
 sudo -n /usr/local/sbin/duna-deploy-buzon env-set <clave> <valor> [--aplicar]
+sudo -n /usr/local/sbin/duna-deploy-buzon alertas
 ```
 
 `status` is read-only: the owner's own `git` HEAD, `duna-buzon.timer`'s `systemctl is-active`,
@@ -125,7 +126,8 @@ date (`rebobinar-cursor`)" below. `reglas-ver <fuente>` and `reglas <fuente> [--
 `BUZON-REGLAS-ENTRADA-1`'s operator tooling over an existing source's `reglas.json` -- see "Setting a
 source's own rules (`reglas`)" below. `env-tiene <clave>` and `env-set <clave> <valor> [--aplicar]` are
 the same slice's tooling over `/srv/duna/env/buzon.env` -- see "Setting a non-secret env variable
-(`env-set`)" below.
+(`env-set`)" below. `alertas` is read-only and machine-readable -- see "A dead credential becomes
+visible (`alertas`)" below.
 
 ## Operator steps (first deploy, by Carlos)
 
@@ -365,6 +367,34 @@ show, since only an allowlisted, denylist-cleared key ever reaches this point). 
 key was not set before) atomically, and logs one line via `logger -t duna-deploy-buzon` naming the key
 and the backup -- never the value. No restart is needed: the timer's next scheduled pass reads the file
 fresh.
+
+## A dead credential becomes visible (`alertas`)
+
+As of `BUZON-ALERTA-AUTH-1`, an app password that gets revoked or an OAuth refresh token that expires or
+is revoked no longer just prints `parada=auth error=...` to the journal forever with nobody told:
+
+```
+sudo -n /usr/local/sbin/duna-deploy-buzon alertas
+```
+
+Read-only: runs `python -m duna_buzon alertas --json` as `duna`, the same `systemd-run` shape `status`
+uses for its own health check. Prints a JSON list, one entry per source whose own unbroken run of auth
+failures has passed `BUZON_ALERTA_AUTH_HORAS` (default 24, set in `/srv/duna/env/buzon.env` -- not a
+secret, so no piped-generation step needed), `[]` when none, exit 0 either way:
+
+```
+[{"fuente": "hotmail-carlos", "tipo": "auth", "desde": "2026-11-19T08:00:00Z", "horas": 30,
+  "remedio": "ejecute 'entrar --fuente hotmail-carlos' para firmar"}]
+```
+
+`remedio` is specific to the source: `entrar --fuente <id>` for a `local`-origen microsoft source, a new
+app password followed by the same `entrar` for `local`-origen imap, and reconnecting in Cuenta Duna for a
+`origen="cuenta"` source (this connector never holds that credential itself). `status`'s own health
+check does not run this -- `alertas` is its own call, meant for Main's session-start hub check to relay a
+dead credential to Carlos's own desk. A console line surfacing the same thing in the admin UI needs a
+Buzón-to-console read that does not exist yet (a named follow-up, not built by this slice). `estado` also
+prints the same ALERTA per affected source, and `sincronizar`'s own journal line for a pass that stops on
+auth gains `alerta=si` once past the threshold.
 
 ## Trust boundary
 

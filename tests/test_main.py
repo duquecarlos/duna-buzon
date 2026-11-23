@@ -569,3 +569,42 @@ def test_validar_reglas_se_despacha_antes_de_construir_config(
     monkeypatch.setattr(Config, "desde_entorno", staticmethod(_config_falsa))
     monkeypatch.setattr("sys.stdin", io.StringIO("esto no es json"))
     assert main(["validar-reglas"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# `alertas [--json]` (BUZON-ALERTA-AUTH-1)
+# ---------------------------------------------------------------------------
+
+
+def test_alertas_se_despacha_con_la_config_del_entorno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    recibido: list[Config] = []
+    monkeypatch.setattr(cli, "comando_alertas", lambda config: (recibido.append(config), 0)[1])
+    assert main(["alertas"]) == 0
+    assert recibido[0].directorio_datos == str(tmp_path)
+
+
+def test_alertas_acepta_la_bandera_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BUZON_GRAPH_CLIENT_ID", "cliente")
+    monkeypatch.setenv("BUZON_CLAVE_CIFRADO", CLAVE_VALIDA_BASE64)
+    monkeypatch.setenv("FINANZAS_BUZON_TOKEN", "token")
+    monkeypatch.setenv("BUZON_DATOS", str(tmp_path))
+
+    monkeypatch.setattr(cli, "comando_alertas", lambda config: 0)
+    assert main(["alertas", "--json"]) == 0
+
+
+def test_alertas_con_argumento_desconocido_es_uso_incorrecto(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["alertas", "--algo"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+    assert main(["alertas", "--json", "algo-mas"]) == 2
+    assert "usage" in capsys.readouterr().err.lower()

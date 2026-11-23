@@ -15,9 +15,11 @@ then 500/502/504 joined that retried class and a persistently failing page degra
 same `carpetas` narrowing IMAP already had, extended to this provider) by BUZON-GRAPH-502-1; gained a CLI for
 reading and setting that field on a microsoft source (`carpetas-graph`, `fijar-carpetas`) by
 BUZON-CARPETAS-MICROSOFT-CLI-1; `estado` gained a bounded per-source pass history, so a pass that forwarded
-nothing, or failed, no longer hides what the ones before it did, by BUZON-ESTADO-HISTORIAL-PASADAS-1. See
-`CLAUDE.md` for the gate and the invariants, `DECISIONS.md` for the ledger, and `deploy/host/README.md` for
-the operator steps.
+nothing, or failed, no longer hides what the ones before it did, by BUZON-ESTADO-HISTORIAL-PASADAS-1; a source
+whose credential has died (app password revoked, OAuth refresh token expired or revoked) becomes VISIBLE --
+an ALERTA in `estado`, in the journal, and in a machine-readable `alertas` subcommand -- by
+BUZON-ALERTA-AUTH-1. See `CLAUDE.md` for the gate and the invariants, `DECISIONS.md` for the ledger, and
+`deploy/host/README.md` for the operator steps.
 
 ## Shape
 
@@ -52,6 +54,10 @@ fuentes/<id>/historial.jsonl        -- this source's own last 20 pass summaries 
                                        oldest first), so `estado` can still show a pass before the latest one
                                        even after a pass that forwarded nothing or failed overwrote
                                        estado.json -- see `historial.py` and BUZON-ESTADO-HISTORIAL-PASADAS-1
+fuentes/<id>/alerta.json            -- ABSENT unless this source's own auth is currently failing: the UTC
+                                       instant the FIRST failure of the current unbroken run happened. Set on
+                                       that first failure, kept while auth keeps failing, cleared the moment a
+                                       pass authenticates again -- see `alerta.py` and BUZON-ALERTA-AUTH-1
 ```
 
 `host`/`port` are only set for `proveedor == "imap"` (`None` otherwise).
@@ -128,7 +134,9 @@ The commands:
   A corrupt history line is skipped and noted once, by count, never raised. A source with no cursor yet also
   gets the next command to run: `entrar --fuente <id>` when a `local`-origen source never even signed in, or
   `sincronizar` when it has (or is `origen="cuenta"`, which has no `entrar` step at all) but has never
-  completed a pass (`BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1`).
+  completed a pass (`BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1`). A source whose own credential has been failing to
+  authenticate for more than `BUZON_ALERTA_AUTH_HORAS` (default 24) also gets an `ALERTA` line naming when
+  the failing run started, how many hours ago, and how to reconnect it (`BUZON-ALERTA-AUTH-1`, see below).
 - `fuentes` -- lists every configured source (id, provider, address, label, active/inactive). No secrets. One
   source whose own `fuente.json` is broken is reported by id and reason (never its contents) on its own line,
   without stopping the rest of the list from printing (`BUZON-FUENTES-LISTAR-RESILIENTE-1`); every other command
@@ -160,6 +168,33 @@ The commands:
   (`BUZON-REGLAS-ENTRADA-1`). The ONE command that never builds `Config`, so it needs no environment
   variable at all -- the host entry script's `reglas`/`reglas-ver` subcommands run it, as `duna`, with
   no env file sourced (see `deploy/host/README.md`).
+- `alertas [--json]` -- read-only, machine-readable: every source currently past its own auth-failure
+  threshold, as a JSON list, `[]` when none, exit 0 either way (`BUZON-ALERTA-AUTH-1`). Each entry is
+  `{"fuente": <id>, "tipo": "auth", "desde": <ts>, "horas": <n>, "remedio": <how>}` -- never a token,
+  password or address beyond the source's own id. The host entry script's own `alertas` subcommand runs
+  this, as `duna`, the same way `status` runs `estado`; Main's own session-start hub check reads it over
+  `sudo -n` to relay a dead credential to the desk (a console line for the admin UI is a named follow-up,
+  not built by this slice).
+
+### A dead credential becomes visible (BUZON-ALERTA-AUTH-1)
+
+An app password that gets revoked, or an OAuth refresh token that expires or is revoked, used to leave
+`sincronizar` printing `parada=auth error=...` (or `parada=graph listar http=401`) to the journal on every
+pass, forever, with nobody told. Now each source's own run of consecutive auth failures is tracked
+(`fuentes/<id>/alerta.json` above): the first failure's own UTC timestamp is kept, across passes, until one
+authenticates again, and the run becomes an ALERTA the moment it passes `BUZON_ALERTA_AUTH_HORAS` (default
+24) hours. A transient failure (a timeout, a 5xx) never sets or clears it -- only an actual authentication
+failure does, whether caught before a provider is even built (`SinCuentaError`/`SinCredencialError`/
+`ClaveInvalidaError`) or mid-pass (`ProveedorAutenticacionError`, or Finanzas answering `unauthorized`).
+
+Once in alerta, it surfaces three ways: `estado` prints a line per affected source; `sincronizar`'s own
+journal line for a pass that stops on auth gains `alerta=si` once past the threshold, so it greps; and
+`alertas --json` (above) lists it for a script to read. The remedy named is specific to the source: `entrar
+--fuente <id>` for a `local`-origen microsoft source, a new app password followed by the same `entrar` for
+`local`-origen imap, and "reconnect in Cuenta Duna" for a `origen="cuenta"` source -- Cuenta Duna owns that
+reconnect, never this connector. Main relays an `alertas --json` result to Carlos's own desk at session
+start; a console line surfacing the same thing in the admin UI needs a Buzón-to-console read that does not
+exist yet, named as a follow-up rather than built here.
 
 ### Narrowing an IMAP source to specific folders (BUZON-IMAP-CARPETAS-INCLUIDAS-1)
 
@@ -231,6 +266,11 @@ Cuenta Duna is a separate service, not this connector's own loopback peer like F
 product `buzon`), `BUZON_CUENTA_SUB` (the person's own Cuenta Duna `sub`). The moment ANY one of these four is set,
 all four are required -- a half-configured group is refused by name at startup, never silently treated as "not
 configured".
+
+One more, `BUZON_ALERTA_AUTH_HORAS` (`BUZON-ALERTA-AUTH-1`, default `24`) -- how many hours a source's own
+unbroken run of auth failures must last before `estado`/`alertas`/the journal call it an ALERTA. Must be a
+positive integer; anything else is refused by name, the variable never its value. See "A dead credential
+becomes visible" above.
 
 One more, `BUZON_ENVIAR_ORIGEN` (`BUZON-ORIGEN-WIRE-1`) -- **turn on only after Finanzas Release 37 is live.** Off
 unless set to exactly `1` or `true`. On, every entry's `meta` carries an `origen` field: the source's own identity
