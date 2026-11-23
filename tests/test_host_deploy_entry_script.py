@@ -8,6 +8,7 @@ duna-cuenta-api's own `tests/test_host_deploy_entry_script.py` does.
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 import shutil
@@ -1011,3 +1012,338 @@ def test_status_reporta_drift_user_y_datos_dir() -> None:
     assert "$DATOS_DIR: owner=" in bloque_real
     assert '"$valor" == "failed"' in bloque_real
     assert "_mostrar_registros" in bloque_real
+
+
+# ---------------------------------------------------------------------------
+# `reglas-ver <fuente>` / `reglas <fuente> [--aplicar]` (BUZON-REGLAS-ENTRADA-1)
+# ---------------------------------------------------------------------------
+
+
+def test_reglas_subcomandos_reconocidos() -> None:
+    contenido = _contenido()
+    assert "reglas-ver)" in contenido
+    assert "reglas)" in contenido
+    assert "cmd_reglas_ver" in contenido
+    assert "cmd_reglas" in contenido
+    assert "LIMITE_REGLAS_BYTES" in contenido
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("reglas-ver",),
+        ("reglas-ver", "legal-duna", "algo-mas"),
+        ("reglas-ver", "Mayusculas-No-Validas"),
+        ("reglas-ver", "con espacio"),
+        ("reglas-ver", "../etc/passwd"),
+        ("reglas-ver", "con;punto-y-coma"),
+    ],
+)
+def test_reglas_ver_formas_invalidas_se_rechazan_con_uso(argumentos: tuple[str, ...]) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 2
+    assert "usage" in resultado.stderr.lower()
+
+
+def test_reglas_ver_forma_valida_pasa_el_chequeo_de_forma_y_solo_falla_por_euid() -> None:
+    resultado = _run("reglas-ver", "legal-duna")
+    assert resultado.returncode == 1
+    assert "root" in resultado.stderr.lower()
+    assert "usage" not in resultado.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("reglas",),
+        ("reglas", "legal-duna", "--aplicar", "algo-mas"),
+        ("reglas", "Mayusculas-No-Validas"),
+        ("reglas", "legal-duna", "--algo"),
+        ("reglas", "legal-duna;rm -rf /"),
+    ],
+)
+def test_reglas_formas_invalidas_se_rechazan_con_uso(argumentos: tuple[str, ...]) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 2
+    assert "usage" in resultado.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("reglas", "legal-duna"),
+        ("reglas", "legal-duna", "--aplicar"),
+    ],
+)
+def test_reglas_forma_valida_pasa_el_chequeo_de_forma_y_solo_falla_por_euid(
+    argumentos: tuple[str, ...],
+) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 1
+    assert "root" in resultado.stderr.lower()
+    assert "usage" not in resultado.stderr.lower()
+
+
+def test_cmd_reglas_nunca_usa_eval_ni_cat() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("cmd_reglas() {") : contenido.index("_clave_es_secreta() {")]
+    assert "eval" not in bloque
+    assert not _CAT_REAL.search(bloque)
+
+
+def test_requiere_reglas_existentes_rechaza_fuente_desconocida(tmp_path: Path) -> None:
+    resultado = _source_and_echo("_requiere_reglas_existentes", "no-existe")
+    # Runs with $DATOS_DIR pointed at the real fixed constant (no source
+    # directory of that name exists in this test environment either), so
+    # this only proves the refusal path -- not a real filesystem check.
+    assert resultado.returncode != 0
+    assert "no such source" in resultado.stderr.lower()
+
+
+def test_excede_limite_bytes_mide_bytes_no_caracteres() -> None:
+    resultado = _source_and_call("_excede_limite_bytes", "0123456789", "10")
+    assert "__FALSE__" in resultado.stdout, resultado.stderr  # exactly at the limit
+
+    resultado = _source_and_call("_excede_limite_bytes", "01234567890", "10")
+    assert "__TRUE__" in resultado.stdout, resultado.stderr  # one byte over
+
+    # A multi-byte UTF-8 character ("ó", 2 bytes in UTF-8) must count as 2
+    # bytes, never 1 -- "nómina" is 6 code points but 7 bytes.
+    resultado = _source_and_call("_excede_limite_bytes", "nómina", "6")
+    assert "__TRUE__" in resultado.stdout, resultado.stderr
+
+
+# ---------------------------------------------------------------------------
+# `env-tiene <clave>` / `env-set <clave> <valor> [--aplicar]` (same slice)
+# ---------------------------------------------------------------------------
+
+
+def test_env_subcomandos_reconocidos() -> None:
+    contenido = _contenido()
+    assert "env-tiene)" in contenido
+    assert "env-set)" in contenido
+    assert "cmd_env_tiene" in contenido
+    assert "cmd_env_set" in contenido
+    assert "DENYLIST_SECRETO_RE" in contenido
+    assert "ENV_PERMITIDAS_INSTALADO" in contenido
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("env-tiene",),
+        ("env-tiene", "BUZON_ENVIAR_ORIGEN", "algo-mas"),
+        ("env-tiene", "clave-minuscula"),
+        ("env-tiene", "CLAVE CON ESPACIO"),
+        ("env-tiene", "CLAVE;rm -rf /"),
+        ("env-tiene", "1_EMPIEZA_CON_NUMERO"),
+    ],
+)
+def test_env_tiene_formas_invalidas_se_rechazan_con_uso(argumentos: tuple[str, ...]) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 2
+    assert "usage" in resultado.stderr.lower()
+
+
+@pytest.mark.parametrize("clave", ["BUZON_ENVIAR_ORIGEN", "FINANZAS_BUZON_TOKEN", "X"])
+def test_env_tiene_forma_valida_pasa_el_chequeo_de_forma_y_solo_falla_por_euid(clave: str) -> None:
+    # Shape-valid for ANY key, including a secret's own name -- env-tiene
+    # itself never prints the value, so this is safe; proven here only by
+    # the fact that it passes the argument-shape check and fails on EUID,
+    # never on usage.
+    resultado = _run("env-tiene", clave)
+    assert resultado.returncode == 1
+    assert "root" in resultado.stderr.lower()
+    assert "usage" not in resultado.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("env-set",),
+        ("env-set", "BUZON_ENVIAR_ORIGEN"),
+        ("env-set", "clave-minuscula", "1"),
+        ("env-set", "BUZON_ENVIAR_ORIGEN", "1", "--algo"),
+        ("env-set", "BUZON_ENVIAR_ORIGEN", "1", "--aplicar", "algo-mas"),
+    ],
+)
+def test_env_set_formas_invalidas_se_rechazan_con_uso(argumentos: tuple[str, ...]) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 2
+    assert "usage" in resultado.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        ("env-set", "BUZON_ENVIAR_ORIGEN", "1"),
+        ("env-set", "BUZON_ENVIAR_ORIGEN", "1", "--aplicar"),
+        # Shape-valid even for a denylisted key -- the denylist is cmd_env_set's
+        # own refusal, checked after this purely-syntactic shape check, same
+        # convention as every other subcommand (argument shape before EUID,
+        # EUID before any business-logic refusal).
+        ("env-set", "FINANZAS_BUZON_TOKEN", "x"),
+    ],
+)
+def test_env_set_forma_valida_pasa_el_chequeo_de_forma_y_solo_falla_por_euid(
+    argumentos: tuple[str, ...],
+) -> None:
+    resultado = _run(*argumentos)
+    assert resultado.returncode == 1
+    assert "root" in resultado.stderr.lower()
+    assert "usage" not in resultado.stderr.lower()
+
+
+def test_env_set_valor_con_salto_de_linea_se_rechaza_con_uso() -> None:
+    # A literal newline in the value would let it inject a second,
+    # unrelated line into the env file -- refused at the shape check,
+    # before anything else runs.
+    resultado = _run("env-set", "BUZON_ENVIAR_ORIGEN", "1\n0")
+    assert resultado.returncode == 2
+    assert "usage" in resultado.stderr.lower()
+
+
+def test_cmd_env_set_nunca_usa_eval_ni_cat() -> None:
+    contenido = _contenido()
+    bloque = contenido[
+        contenido.index("cmd_env_set() {") : contenido.index("dispatch() {")
+    ]
+    assert "eval" not in bloque
+    assert not _CAT_REAL.search(bloque)
+
+
+def test_cmd_env_set_revisa_la_lista_negra_antes_que_la_lista_blanca() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("cmd_env_set() {") : contenido.index("dispatch() {")]
+    indice_denylist = bloque.index("_clave_es_secreta")
+    indice_allowlist = bloque.index("_patron_permitido")
+    assert indice_denylist < indice_allowlist
+
+
+@pytest.mark.parametrize(
+    "clave,esperado",
+    [
+        ("FINANZAS_BUZON_TOKEN", True),
+        ("BUZON_CLAVE_CIFRADO", True),
+        ("BUZON_GRAPH_CLIENT_ID", True),
+        ("ALGO_CON_PASSWORD", True),
+        ("ALGUNA_API_KEY", True),
+        ("DATABASE_DSN", True),
+        ("APP_PRIVATE", True),
+        ("BUZON_ENVIAR_ORIGEN", False),
+        ("BUZON_DATOS", False),
+    ],
+)
+def test_clave_es_secreta_detecta_el_patron_fijo(clave: str, esperado: bool) -> None:
+    resultado = _source_and_call("_clave_es_secreta", clave)
+    if esperado:
+        assert "__TRUE__" in resultado.stdout, resultado.stderr
+    else:
+        assert "__FALSE__" in resultado.stdout, resultado.stderr
+
+
+def test_patron_permitido_lee_el_patron_de_una_clave_permitida(tmp_path: Path) -> None:
+    archivo = tmp_path / "env-permitidas.json"
+    archivo.write_text('{"BUZON_ENVIAR_ORIGEN": "^(0|1)$"}\n', encoding="utf-8")
+
+    resultado = _source_and_echo("_patron_permitido", str(archivo), "BUZON_ENVIAR_ORIGEN")
+    assert resultado.returncode == 0, resultado.stderr
+    assert resultado.stdout.strip() == "^(0|1)$"
+
+
+def test_patron_permitido_rechaza_clave_no_listada_o_archivo_ausente(tmp_path: Path) -> None:
+    archivo = tmp_path / "env-permitidas.json"
+    archivo.write_text('{"BUZON_ENVIAR_ORIGEN": "^(0|1)$"}\n', encoding="utf-8")
+
+    resultado = _source_and_echo("_patron_permitido", str(archivo), "OTRA_CLAVE")
+    assert resultado.returncode != 0
+    assert "not in the allowlist" in resultado.stderr.lower()
+
+    faltante = tmp_path / "no-existe.json"
+    resultado = _source_and_echo("_patron_permitido", str(faltante), "BUZON_ENVIAR_ORIGEN")
+    assert resultado.returncode != 0
+    assert "no such allowlist file" in resultado.stderr.lower()
+
+
+def test_valor_env_actual_y_env_tiene_clave(tmp_path: Path) -> None:
+    archivo = tmp_path / "buzon.env"
+    archivo.write_text(
+        "# comentario BUZON_ENVIAR_ORIGEN=0\nBUZON_ENVIAR_ORIGEN=1\nOTRA=valor\n", encoding="utf-8"
+    )
+
+    resultado = _source_and_echo("_valor_env_actual", str(archivo), "BUZON_ENVIAR_ORIGEN")
+    assert resultado.stdout.strip() == "1", resultado.stderr
+
+    resultado = _source_and_call("_env_tiene_clave", str(archivo), "BUZON_ENVIAR_ORIGEN")
+    assert "__TRUE__" in resultado.stdout, resultado.stderr
+
+    resultado = _source_and_call("_env_tiene_clave", str(archivo), "NO_DEFINIDA")
+    assert "__FALSE__" in resultado.stdout, resultado.stderr
+
+    faltante = tmp_path / "no-existe.env"
+    resultado = _source_and_call("_env_tiene_clave", str(faltante), "BUZON_ENVIAR_ORIGEN")
+    assert "__FALSE__" in resultado.stdout, resultado.stderr
+
+
+def test_escribir_env_con_clave_reemplaza_una_sola_linea(tmp_path: Path) -> None:
+    archivo = tmp_path / "buzon.env"
+    archivo.write_text(
+        "BUZON_GRAPH_CLIENT_ID=abc\nBUZON_ENVIAR_ORIGEN=0\n# BUZON_ENVIAR_ORIGEN=viejo-comentario\n",
+        encoding="utf-8",
+    )
+
+    resultado = _source_and_echo("_escribir_env_con_clave", str(archivo), "BUZON_ENVIAR_ORIGEN", "1")
+    assert resultado.returncode == 0, resultado.stderr
+    lineas = resultado.stdout.splitlines()
+    assert lineas == [
+        "BUZON_GRAPH_CLIENT_ID=abc",
+        "BUZON_ENVIAR_ORIGEN=1",
+        "# BUZON_ENVIAR_ORIGEN=viejo-comentario",
+    ]
+
+
+def test_escribir_env_con_clave_agrega_la_linea_si_falta(tmp_path: Path) -> None:
+    archivo = tmp_path / "buzon.env"
+    archivo.write_text("BUZON_GRAPH_CLIENT_ID=abc\n", encoding="utf-8")
+
+    resultado = _source_and_echo("_escribir_env_con_clave", str(archivo), "BUZON_ENVIAR_ORIGEN", "1")
+    assert resultado.returncode == 0, resultado.stderr
+    assert resultado.stdout.splitlines() == ["BUZON_GRAPH_CLIENT_ID=abc", "BUZON_ENVIAR_ORIGEN=1"]
+
+
+# ---------------------------------------------------------------------------
+# autoactualizar also installs `env-permitidas.json` (same slice)
+# ---------------------------------------------------------------------------
+
+
+def test_autoactualizar_tambien_compara_env_permitidas() -> None:
+    contenido = _contenido()
+    bloque = contenido[contenido.index("autoactualizar() {") : contenido.index("_desc_estado_health() {")]
+    assert "cambio_permitidas" in bloque
+    assert 'install -o root -g root -m 0644' in bloque
+    assert "env-permitidas.json" in bloque
+
+
+def test_env_permitidas_instalado_es_fijo_y_nunca_viene_de_argv() -> None:
+    contenido = _contenido()
+    assert (
+        'ENV_PERMITIDAS_INSTALADO="/usr/local/sbin/duna-deploy-buzon-env-permitidas.json"' in contenido
+    )
+    assert not re.search(r'ENV_PERMITIDAS_INSTALADO="?\$[12@]', contenido)
+
+
+def test_archivo_env_permitidas_existe_y_es_json_valido() -> None:
+    archivo = REPO_ROOT / "deploy" / "host" / "env-permitidas.json"
+    assert archivo.is_file()
+    datos = json.loads(archivo.read_text(encoding="utf-8"))
+    assert datos["BUZON_ENVIAR_ORIGEN"] == "^(0|1)$"
+
+
+def test_readme_documenta_reglas_y_env_set() -> None:
+    contenido = HOST_README.read_text(encoding="utf-8")
+    assert "reglas-ver" in contenido
+    assert "env-set" in contenido
+    assert "env-permitidas.json" in contenido
+    assert (
+        "sudo -n /usr/local/sbin/duna-deploy-buzon reglas duna-zoho --aplicar < reglas.json" in contenido
+    )

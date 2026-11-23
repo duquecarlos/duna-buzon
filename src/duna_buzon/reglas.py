@@ -61,25 +61,28 @@ class MensajeCandidato:
     nombres_adjuntos: Sequence[str]
 
 
-def cargar_reglas(ruta: Path) -> Reglas:
-    if not ruta.is_file():
-        raise ReglasInvalidasError(f"rules file not found: {ruta}")
+def parsear_reglas(texto: str) -> Reglas:
+    """The same validation `cargar_reglas` runs on a file's content, but on
+    an in-memory string -- so a candidate `reglas.json` can be validated
+    from stdin (BUZON-REGLAS-ENTRADA-1's `validar-reglas`, and the entry
+    script's `reglas`/`reglas-ver` subcommands behind it) without ever
+    writing it to disk or touching `Config`/any secret."""
     try:
-        datos = json.loads(ruta.read_text(encoding="utf-8"))
+        datos = json.loads(texto)
     except json.JSONDecodeError as exc:
-        raise ReglasInvalidasError(f"rules file is not valid JSON: {ruta}") from exc
+        raise ReglasInvalidasError("rules text is not valid JSON") from exc
 
     try:
         desde_str = datos["desde"]
         remitentes = datos["remitentes"]
         palabras = datos["palabras"]
     except KeyError as exc:
-        raise ReglasInvalidasError(f"rules file is missing required field: {exc.args[0]}") from exc
+        raise ReglasInvalidasError(f"rules text is missing required field: {exc.args[0]}") from exc
 
     try:
         desde = datetime.datetime.fromisoformat(desde_str)
     except ValueError as exc:
-        raise ReglasInvalidasError("rules file field 'desde' is not a valid ISO date") from exc
+        raise ReglasInvalidasError("rules text field 'desde' is not a valid ISO date") from exc
     if desde.tzinfo is None:
         desde = desde.replace(tzinfo=datetime.UTC)
 
@@ -88,6 +91,12 @@ def cargar_reglas(ruta: Path) -> Reglas:
         remitentes=tuple(str(r) for r in remitentes),
         palabras=tuple(str(p) for p in palabras),
     )
+
+
+def cargar_reglas(ruta: Path) -> Reglas:
+    if not ruta.is_file():
+        raise ReglasInvalidasError(f"rules file not found: {ruta}")
+    return parsear_reglas(ruta.read_text(encoding="utf-8"))
 
 
 def _remitente_coincide(remitente: str, remitentes_regla: tuple[str, ...]) -> bool:

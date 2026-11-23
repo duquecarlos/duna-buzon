@@ -1,0 +1,3 @@
+{
+  "BUZON_ENVIAR_ORIGEN": "^(0|1)$"
+}

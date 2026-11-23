@@ -1768,3 +1768,60 @@ def test_rebobinar_cursor_fecha_sin_zona_se_asume_utc(
     _pinned_now(tmp_path, monkeypatch)
     assert cli.comando_rebobinar_cursor(config, "hotmail-carlos", "2026-11-01T08:00:00", aplicar=False) == 0
     assert "cursor despues=2026-11-01T08:00:00+00:00" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# `validar-reglas` (BUZON-REGLAS-ENTRADA-1) -- reads stdin, builds no Config.
+# ---------------------------------------------------------------------------
+
+
+def test_validar_reglas_acepta_json_valido(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO('{"desde": "2026-01-01T00:00:00+00:00", "remitentes": ["a@b.com"], "palabras": []}'),
+    )
+    assert cli.comando_validar_reglas() == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_validar_reglas_rechaza_json_invalido(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("esto no es json"))
+    assert cli.comando_validar_reglas() == 1
+    assert "error:" in capsys.readouterr().err.lower()
+
+
+def test_validar_reglas_rechaza_campo_faltante(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO('{"desde": "2026-01-01T00:00:00+00:00", "remitentes": []}')
+    )
+    assert cli.comando_validar_reglas() == 1
+    assert "error:" in capsys.readouterr().err.lower()
+
+
+def test_validar_reglas_nunca_imprime_nada_en_exito(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(
+            '{"desde": "2026-01-01T00:00:00+00:00", "remitentes": ["a@b.com"], "palabras": ["factura"]}'
+        ),
+    )
+    assert cli.comando_validar_reglas() == 0
+    salida = capsys.readouterr()
+    assert salida.out == ""
+    assert salida.err == ""

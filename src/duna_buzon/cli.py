@@ -33,7 +33,7 @@ from duna_buzon.fuentes import FuenteConfig, FuenteInvalidaError
 from duna_buzon.graph import GraphClient, GraphError
 from duna_buzon.limites import LIMITE_ORIGEN
 from duna_buzon.proveedor import construir_proveedor
-from duna_buzon.reglas import ReglasInvalidasError, cargar_reglas
+from duna_buzon.reglas import ReglasInvalidasError, cargar_reglas, parsear_reglas
 from duna_buzon.sincronizar import Contadores, ejecutar_pasada
 
 NOMBRE_ARCHIVO_REGLAS = "reglas.json"
@@ -72,6 +72,23 @@ def _tiene_credencial(directorio_fuente: str) -> bool:
     same file (`BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1`)."""
     ruta = Path(directorio_fuente) / modulo_fuentes.NOMBRE_ARCHIVO_CREDENCIAL
     return ruta.is_file() and ruta.stat().st_size > 0
+
+
+def comando_validar_reglas() -> int:
+    """Validates a `reglas.json` candidate from stdin against this
+    program's own loader (`reglas.parsear_reglas`) -- never touches
+    `Config` or any secret, by design: BUZON-REGLAS-ENTRADA-1's entry-script
+    subcommands (`reglas`, `reglas-ver`) run this, as `duna`, to validate a
+    new source's rules without the host script ever sourcing an env file.
+    Prints the loader's own error and returns 1 on anything it refuses;
+    prints nothing and returns 0 on a valid candidate."""
+    texto = sys.stdin.read()
+    try:
+        parsear_reglas(texto)
+    except ReglasInvalidasError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def comando_entrar(config: Config, id_fuente: str | None) -> int:

@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from duna_buzon.reglas import MensajeCandidato, Reglas, ReglasInvalidasError, cargar_reglas, coincide
+from duna_buzon.reglas import (
+    MensajeCandidato,
+    Reglas,
+    ReglasInvalidasError,
+    cargar_reglas,
+    coincide,
+    parsear_reglas,
+)
 
 import datetime
 
@@ -197,6 +204,38 @@ def test_cargar_reglas_campo_faltante(tmp_path: Path) -> None:
     ruta.write_text('{"desde": "2026-01-01T00:00:00+00:00", "remitentes": []}', encoding="utf-8")
     with pytest.raises(ReglasInvalidasError):
         cargar_reglas(ruta)
+
+
+def test_parsear_reglas_desde_texto() -> None:
+    reglas = parsear_reglas(
+        '{"desde": "2026-01-01T00:00:00+00:00", "remitentes": ["a@b.com"], "palabras": ["factura"]}'
+    )
+    assert reglas.remitentes == ("a@b.com",)
+    assert reglas.palabras == ("factura",)
+
+
+def test_parsear_reglas_json_invalido() -> None:
+    with pytest.raises(ReglasInvalidasError):
+        parsear_reglas("esto no es json")
+
+
+def test_parsear_reglas_campo_faltante() -> None:
+    with pytest.raises(ReglasInvalidasError):
+        parsear_reglas('{"desde": "2026-01-01T00:00:00+00:00", "remitentes": []}')
+
+
+def test_parsear_reglas_fecha_invalida() -> None:
+    with pytest.raises(ReglasInvalidasError):
+        parsear_reglas('{"desde": "no-es-fecha", "remitentes": [], "palabras": []}')
+
+
+def test_cargar_reglas_usa_parsear_reglas(tmp_path: Path) -> None:
+    ruta = tmp_path / "reglas.json"
+    ruta.write_text(
+        '{"desde": "2026-01-01T00:00:00+00:00", "remitentes": ["a@b.com"], "palabras": ["factura"]}',
+        encoding="utf-8",
+    )
+    assert cargar_reglas(ruta) == parsear_reglas(ruta.read_text(encoding="utf-8"))
 
 
 def test_ejemplo_enviado_no_contiene_remitentes_reales() -> None:

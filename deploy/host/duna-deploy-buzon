@@ -14,6 +14,44 @@
 #   sudo -n /usr/local/sbin/duna-deploy-buzon fijar-carpetas <id> --todas
 #   sudo -n /usr/local/sbin/duna-deploy-buzon registros <unidad> [n]
 #   sudo -n /usr/local/sbin/duna-deploy-buzon rebobinar-cursor <id> <fecha> [--aplicar]
+#   sudo -n /usr/local/sbin/duna-deploy-buzon reglas-ver <fuente>
+#   sudo -n /usr/local/sbin/duna-deploy-buzon reglas <fuente> [--aplicar]
+#   sudo -n /usr/local/sbin/duna-deploy-buzon env-tiene <CLAVE>
+#   sudo -n /usr/local/sbin/duna-deploy-buzon env-set <CLAVE> <VALOR> [--aplicar]
+#
+# BUZON-REGLAS-ENTRADA-1 -- `reglas-ver <fuente>` prints a source's own
+# `reglas.json`, read-only (never a secret: `reglas.json` holds only
+# senders, domains and keywords). `reglas <fuente> [--aplicar]` reads a
+# candidate `reglas.json` from stdin (at most 64 KiB), validates it with
+# the PROGRAM's OWN loader -- `runuser -u duna -- .venv/bin/python -m
+# duna_buzon validar-reglas`, the one python subcommand that builds no
+# `Config` and touches no env file -- refuses whatever that loader
+# refuses, prints a unified diff of the existing file against the
+# candidate, and stops there unless `--aplicar` is given. `--aplicar`
+# backs up the existing file to `reglas.json.<UTC stamp>.bak` beside it,
+# writes the new one atomically (temp file in the same directory, then
+# `mv`) as duna:duna mode 0600, and logs one count-only line (source id,
+# old and new sha256, the backup's name -- never the rules' own content)
+# via `logger -t duna-deploy-buzon`. Neither subcommand ever reads
+# `credencial.bin`, the cursor, or either env file.
+#
+# `env-tiene <CLAVE>` works for ANY key shaped like an environment
+# variable name and prints only `definida`/`no definida` against
+# `$ENV_CLIENTE` -- never the value, so it is safe to run for a secret's
+# own name too. `env-set <CLAVE> <VALOR> [--aplicar]` writes `$ENV_CLIENTE`
+# but ONLY for a key listed in the allowlist this repo ships
+# (`deploy/host/env-permitidas.json`, installed by autoactualizar below as
+# `$ENV_PERMITIDAS_INSTALADO`, each key mapped to the one regex its value
+# must match) -- and a hard, in-script denylist on the key's own NAME
+# (`DENYLIST_SECRETO_RE`) is checked first and wins even over an
+# allowlisted key, so a future allowlist entry that looks like a secret's
+# name can never be used to write one. Dry-run by default, prints the
+# current and the proposed value (safe: only an allowlisted, denylist-
+# cleared key ever reaches this point), and `--aplicar` backs up
+# `$ENV_CLIENTE`, changes EXACTLY the one matching line (or appends it)
+# atomically, and logs one line via `logger -t duna-deploy-buzon` naming
+# the key and the backup -- never the value. Neither subcommand ever
+# restarts anything: the timer's next scheduled pass reads the file fresh.
 #
 # BUZON-CURSOR-REBOBINAR-CLI-1 -- `rebobinar-cursor <id> <fecha ISO>
 # [--aplicar]` forwards straight to `python -m duna_buzon rebobinar-cursor`,
@@ -120,11 +158,32 @@ ENTRY_PREV="/usr/local/sbin/duna-deploy-buzon.prev"
 # Leading dot: outside /etc/sudoers.d's own #includedir pattern, which skips
 # any file beginning with "." -- this backup is never itself read as a rule.
 SUDOERS_PREV="/etc/sudoers.d/.duna-deploy-buzon.prev"
+# BUZON-REGLAS-ENTRADA-1 -- `env-set`'s own allowlist, installed beside the
+# entry script itself by autoactualizar, same as ENTRY_INSTALADO above.
+ENV_PERMITIDAS_INSTALADO="/usr/local/sbin/duna-deploy-buzon-env-permitidas.json"
+
+# BUZON-REGLAS-ENTRADA-1 -- the one shape `reglas`/`reglas-ver`'s own stdin
+# cap and `env-tiene`/`env-set`'s own key name ever accept. A key is a
+# plain uppercase environment-variable name; never taken loosely, same
+# convention as every other *_RE constant above.
+CLAVE_ENV_RE='^[A-Z][A-Z0-9_]*$'
+
+# A hard, in-script denylist on an env-set key's own NAME -- checked even
+# for a key the allowlist file names, so a future allowlist entry that
+# merely LOOKS like a secret's name can never be used to write one
+# through this passwordless path.
+DENYLIST_SECRETO_RE='(TOKEN|SECRET|PASSWORD|CLAVE|_KEY|CIFRADO|CLIENT_ID|DSN|PRIVATE)'
+
+# `reglas <fuente> [--aplicar]` never reads more than this many bytes from
+# stdin -- a named constant, never a magic number (64 KiB).
+LIMITE_REGLAS_BYTES=65536
 
 usage() {
     echo "usage: duna-deploy-buzon {status|deploy [--dry-run]|entrar|rollback-script|" \
         "carpetas <id>|fijar-carpetas <id> <carpeta>...|fijar-carpetas <id> --todas|" \
-        "registros <unidad> [n]|rebobinar-cursor <id> <fecha> [--aplicar]}" >&2
+        "registros <unidad> [n]|rebobinar-cursor <id> <fecha> [--aplicar]|" \
+        "reglas-ver <fuente>|reglas <fuente> [--aplicar]|" \
+        "env-tiene <clave>|env-set <clave> <valor> [--aplicar]}" >&2
     exit 2
 }
 
@@ -150,6 +209,13 @@ parse_args() {
     REBOBINAR_ID=""
     REBOBINAR_FECHA=""
     REBOBINAR_APLICAR=0
+    REGLAS_VER_ID=""
+    REGLAS_ID=""
+    REGLAS_APLICAR=0
+    ENV_TIENE_CLAVE=""
+    ENV_SET_CLAVE=""
+    ENV_SET_VALOR=""
+    ENV_SET_APLICAR=0
     case "$SUBCOMMAND" in
         status | entrar | rollback-script)
             [[ $# -eq 0 ]] || usage
@@ -209,6 +275,39 @@ parse_args() {
             if [[ $# -eq 3 ]]; then
                 [[ "$3" == "--aplicar" ]] || usage
                 REBOBINAR_APLICAR=1
+            fi
+            ;;
+        reglas-ver)
+            [[ $# -eq 1 ]] || usage
+            REGLAS_VER_ID="$1"
+            [[ "$REGLAS_VER_ID" =~ $ID_FUENTE_RE ]] || usage
+            ;;
+        reglas)
+            [[ $# -eq 1 || $# -eq 2 ]] || usage
+            REGLAS_ID="$1"
+            [[ "$REGLAS_ID" =~ $ID_FUENTE_RE ]] || usage
+            if [[ $# -eq 2 ]]; then
+                [[ "$2" == "--aplicar" ]] || usage
+                REGLAS_APLICAR=1
+            fi
+            ;;
+        env-tiene)
+            [[ $# -eq 1 ]] || usage
+            ENV_TIENE_CLAVE="$1"
+            [[ "$ENV_TIENE_CLAVE" =~ $CLAVE_ENV_RE ]] || usage
+            ;;
+        env-set)
+            [[ $# -eq 2 || $# -eq 3 ]] || usage
+            ENV_SET_CLAVE="$1"
+            [[ "$ENV_SET_CLAVE" =~ $CLAVE_ENV_RE ]] || usage
+            ENV_SET_VALOR="$2"
+            # No literal newline -- this value becomes one line of a
+            # `CLAVE=VALOR` env file; a newline in it would let it inject a
+            # second, unrelated line.
+            [[ "$ENV_SET_VALOR" != *$'\n'* ]] || usage
+            if [[ $# -eq 3 ]]; then
+                [[ "$3" == "--aplicar" ]] || usage
+                ENV_SET_APLICAR=1
             fi
             ;;
         *)
@@ -358,12 +457,14 @@ autoactualizar() {
     local antes="$1"
     local entry_pulled="$REPO/deploy/host/duna-deploy-buzon"
     local sudoers_pulled="$REPO/deploy/host/duna-deploy-buzon.sudoers"
+    local permitidas_pulled="$REPO/deploy/host/env-permitidas.json"
 
-    local cambio_entry=0 cambio_sudoers=0
+    local cambio_entry=0 cambio_sudoers=0 cambio_permitidas=0
     _archivo_cambio "$ENTRY_INSTALADO" "$entry_pulled" && cambio_entry=1
     _archivo_cambio "$SUDOERS_INSTALADO" "$sudoers_pulled" && cambio_sudoers=1
+    _archivo_cambio "$ENV_PERMITIDAS_INSTALADO" "$permitidas_pulled" && cambio_permitidas=1
 
-    if [[ "$cambio_entry" -eq 0 && "$cambio_sudoers" -eq 0 ]]; then
+    if [[ "$cambio_entry" -eq 0 && "$cambio_sudoers" -eq 0 && "$cambio_permitidas" -eq 0 ]]; then
         echo "entry script: up to date"
         return 0
     fi
@@ -387,6 +488,10 @@ autoactualizar() {
         echo "duna-deploy-buzon: sudoers fragment changed:"
         diff -u "$SUDOERS_INSTALADO" "$sudoers_pulled" || true
     fi
+    if [[ "$cambio_permitidas" -eq 1 ]]; then
+        echo "duna-deploy-buzon: env-set allowlist changed:"
+        diff -u "$ENV_PERMITIDAS_INSTALADO" "$permitidas_pulled" || true
+    fi
 
     if [[ "$cambio_entry" -eq 1 && -f "$ENTRY_INSTALADO" ]]; then
         install -o root -g root -m 0755 "$ENTRY_INSTALADO" "$ENTRY_PREV"
@@ -400,6 +505,9 @@ autoactualizar() {
     fi
     if [[ "$cambio_sudoers" -eq 1 ]]; then
         install -o root -g root -m 0440 "$sudoers_pulled" "$SUDOERS_INSTALADO"
+    fi
+    if [[ "$cambio_permitidas" -eq 1 ]]; then
+        install -o root -g root -m 0644 "$permitidas_pulled" "$ENV_PERMITIDAS_INSTALADO"
     fi
 
     echo "duna-deploy-buzon: entry script updated; re-executing under the new copy"
@@ -529,10 +637,12 @@ cmd_deploy() {
         echo "+ diff -u $ENTRY_INSTALADO $REPO/deploy/host/duna-deploy-buzon (only if the script changed)"
         echo "+ diff -u $SUDOERS_INSTALADO $REPO/deploy/host/duna-deploy-buzon.sudoers (only if the sudoers fragment changed)"
         echo "+ visudo -cf $REPO/deploy/host/duna-deploy-buzon.sudoers (only if the sudoers fragment changed)"
+        echo "+ diff -u $ENV_PERMITIDAS_INSTALADO $REPO/deploy/host/env-permitidas.json (only if the allowlist changed)"
         echo "+ install -o root -g root -m 0755 $ENTRY_INSTALADO $ENTRY_PREV (only if the script changed)"
         echo "+ install -o root -g root -m 0440 $SUDOERS_INSTALADO $SUDOERS_PREV (only if the sudoers fragment changed)"
         echo "+ install -o root -g root -m 0755 $REPO/deploy/host/duna-deploy-buzon $ENTRY_INSTALADO (only if the script changed)"
         echo "+ install -o root -g root -m 0440 $REPO/deploy/host/duna-deploy-buzon.sudoers $SUDOERS_INSTALADO (only if the sudoers fragment changed)"
+        echo "+ install -o root -g root -m 0644 $REPO/deploy/host/env-permitidas.json $ENV_PERMITIDAS_INSTALADO (only if the allowlist changed)"
         echo "+ exec $ENTRY_INSTALADO deploy --internal-reexec (only if anything changed, so the rest of the deploy runs under the new code)"
         echo "+ runuser -u \"\$(stat -c %U $REPO)\" -- uv sync --frozen (cwd $REPO)"
         echo "+ install -d -o duna -g duna -m 0700 $DATOS_DIR"
@@ -626,6 +736,240 @@ _proveedor_de_fuente() {
         exit 1
     fi
     _proveedor_desde_archivo "$archivo" || exit 1
+}
+
+# BUZON-REGLAS-ENTRADA-1 -- true (exit 0) only when $1 (a string, never
+# stdin itself: the caller already capped the READ) is strictly more than
+# $2 bytes. Measures BYTES, not characters -- `wc -c` on `printf`'s own
+# output, so a multi-byte UTF-8 character (accented Spanish text in a
+# `palabras` entry) is never undercounted. Pure, no root required.
+_excede_limite_bytes() {
+    local contenido="$1" limite="$2" tam
+    tam="$(printf '%s' "$contenido" | wc -c)"
+    [[ "$tam" -gt "$limite" ]]
+}
+
+# Reads `fuentes/<id>/` directly under $DATOS_DIR and refuses by name if
+# the source directory, or its own `reglas.json`, does not exist -- the
+# one check `reglas-ver` and `reglas` share before doing anything else.
+_requiere_reglas_existentes() {
+    local id="$1"
+    local directorio="$DATOS_DIR/fuentes/$id"
+    if [[ ! -d "$directorio" ]]; then
+        echo "duna-deploy-buzon: refusing: no such source: $id" >&2
+        exit 1
+    fi
+    if [[ ! -f "$directorio/reglas.json" ]]; then
+        echo "duna-deploy-buzon: refusing: no reglas.json for source: $id" >&2
+        exit 1
+    fi
+    echo "$directorio/reglas.json"
+}
+
+# Read-only: prints a source's own `reglas.json` as-is -- never a secret
+# (BUZON-REGLAS-ENTRADA-1's own invariant: `reglas.json` holds only
+# senders, domains and keywords). `$(<"$archivo")` is bash's own builtin
+# file-read, deliberately never the external coreutils concatenation
+# command -- this script is checked elsewhere to never call that command
+# at all, the same guard that keeps either env file from ever being read
+# that way.
+cmd_reglas_ver() {
+    local id="$1"
+    local archivo
+    archivo="$(_requiere_reglas_existentes "$id")"
+    printf '%s\n' "$(<"$archivo")"
+}
+
+# `reglas <fuente> [--aplicar]` -- reads at most LIMITE_REGLAS_BYTES bytes
+# of a candidate `reglas.json` from stdin, validates it with the PROGRAM's
+# own loader (never a shell re-implementation), prints a unified diff
+# against the existing file, and only WRITES anything with --aplicar:
+# backs up the old file, writes the new one atomically as duna:duna mode
+# 0600, and logs one count-only line.
+cmd_reglas() {
+    local id="$1" aplicar="$2"
+    local archivo
+    archivo="$(_requiere_reglas_existentes "$id")"
+
+    if [[ ! -x "$REPO/.venv/bin/python" ]]; then
+        echo "duna-deploy-buzon: refusing: run \`duna-deploy-buzon deploy\` first" >&2
+        exit 1
+    fi
+
+    # The sentinel-and-strip trick below (append "x", strip it after
+    # capture) is what lets `nuevo` keep a trailing newline that bash's own
+    # "$(...)" would otherwise silently drop -- without it, the byte count
+    # below could undercount stdin's own real size.
+    local nuevo
+    nuevo="$(head -c "$((LIMITE_REGLAS_BYTES + 1))"; printf 'x')"
+    nuevo="${nuevo%x}"
+    if _excede_limite_bytes "$nuevo" "$LIMITE_REGLAS_BYTES"; then
+        echo "duna-deploy-buzon: refusing: stdin exceeds $LIMITE_REGLAS_BYTES bytes" >&2
+        exit 1
+    fi
+
+    local validacion
+    if ! validacion="$(printf '%s' "$nuevo" | runuser -u duna -- "$REPO/.venv/bin/python" -m duna_buzon validar-reglas 2>&1)"; then
+        echo "duna-deploy-buzon: refusing: invalid reglas.json" >&2
+        printf '%s\n' "$validacion" >&2
+        exit 1
+    fi
+
+    echo "duna-deploy-buzon: reglas diff for $id (old vs new):"
+    diff -u "$archivo" <(printf '%s' "$nuevo") || true
+
+    if [[ "$aplicar" != "1" ]]; then
+        echo "duna-deploy-buzon: dry-run: nothing written (pass --aplicar to write)"
+        return 0
+    fi
+
+    local estampa respaldo tmp sha_antes sha_despues
+    estampa="$(date -u +%Y%m%dT%H%M%SZ)"
+    respaldo="$(dirname "$archivo")/reglas.json.$estampa.bak"
+    sha_antes="$(sha256sum "$archivo" | cut -d' ' -f1)"
+    install -o duna -g duna -m 0600 "$archivo" "$respaldo"
+
+    tmp="$(mktemp "$(dirname "$archivo")/.reglas.json.tmp.XXXXXX")"
+    printf '%s' "$nuevo" > "$tmp"
+    chown duna:duna "$tmp"
+    chmod 0600 "$tmp"
+    sha_despues="$(sha256sum "$tmp" | cut -d' ' -f1)"
+    mv -f "$tmp" "$archivo"
+
+    logger -t duna-deploy-buzon "reglas fuente=$id old_sha256=$sha_antes new_sha256=$sha_despues respaldo=$(basename "$respaldo")"
+    echo "duna-deploy-buzon: reglas updated for $id (backup: $(basename "$respaldo"))"
+}
+
+# True (exit 0) only when $1 (an already CLAVE_ENV_RE-shaped key) matches
+# the hard secret-name denylist -- checked even for a key the allowlist
+# file names, so a future allowlist entry that merely LOOKS like a
+# secret's name can never be used to write one. Pure, no root required.
+_clave_es_secreta() {
+    local clave="$1"
+    [[ "$clave" =~ $DENYLIST_SECRETO_RE ]]
+}
+
+# Echoes the one regex $2 must match to be written for key $1, read from
+# the allowlist file $archivo -- a flat `{"CLAVE": "patron", ...}` JSON
+# object, parsed the same text-extraction way `_proveedor_desde_archivo`
+# already reads a `"proveedor"` field, never a shell `eval` of the JSON.
+# Refuses (exit 1, nothing echoed but the message) when the file or the
+# key is missing.
+_patron_permitido() {
+    local archivo="$1" clave="$2"
+    if [[ ! -f "$archivo" ]]; then
+        echo "duna-deploy-buzon: refusing: no such allowlist file: $archivo" >&2
+        return 1
+    fi
+    local linea
+    linea="$(grep -o "\"$clave\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$archivo" | head -n1 || true)"
+    if [[ -z "$linea" ]]; then
+        echo "duna-deploy-buzon: refusing: $clave is not in the allowlist" >&2
+        return 1
+    fi
+    echo "$linea" | sed -E 's/.*:[[:space:]]*"([^"]*)"$/\1/'
+}
+
+# Echoes $clave's own current value in $archivo (never printed labelled as
+# a secret by any caller of this function; env-set only ever reaches it
+# for an allowlisted, denylist-cleared key), or nothing if the file or the
+# line does not exist. Pure, read-only, no root required.
+_valor_env_actual() {
+    local archivo="$1" clave="$2"
+    [[ -f "$archivo" ]] || return 0
+    grep -m1 -E "^${clave}=" "$archivo" 2>/dev/null | cut -d= -f2- || true
+}
+
+# True (exit 0) only when $archivo has an uncommented `$clave=...` line.
+# Shares `_valor_env_actual` so `env-tiene` and `env-set`'s own "before"
+# report agree byte-for-byte on what "defined" means.
+_env_tiene_clave() {
+    local archivo="$1" clave="$2"
+    [[ -n "$(_valor_env_actual "$archivo" "$clave")" ]]
+}
+
+# Echoes $archivo's own lines to stdout, with the first `$clave=...` line
+# replaced by `$clave=$valor` -- or, if no such line exists, with
+# `$clave=$valor` appended at the end. The caller redirects this into a
+# temp file and renames it over $archivo, so the real file is never
+# written line-by-line in place. A comment line (`# CLAVE=...`) never
+# matches, by construction (`==` here is a prefix glob on the RAW line,
+# never on a stripped/trimmed one).
+_escribir_env_con_clave() {
+    local archivo="$1" clave="$2" valor="$3"
+    local encontrada=0
+    local linea
+    if [[ -f "$archivo" ]]; then
+        while IFS= read -r linea || [[ -n "$linea" ]]; do
+            if [[ "$linea" == "$clave="* ]]; then
+                printf '%s=%s\n' "$clave" "$valor"
+                encontrada=1
+            else
+                printf '%s\n' "$linea"
+            fi
+        done < "$archivo"
+    fi
+    if [[ "$encontrada" -eq 0 ]]; then
+        printf '%s=%s\n' "$clave" "$valor"
+    fi
+}
+
+# Read-only: `env-tiene <clave>` -- works for ANY CLAVE_ENV_RE-shaped key,
+# including a secret's own name, and prints only whether it is defined.
+# Never the value, by construction: `_valor_env_actual`'s own result is
+# used only for a length check here, never echoed.
+cmd_env_tiene() {
+    local clave="$1"
+    if _env_tiene_clave "$ENV_CLIENTE" "$clave"; then
+        echo "duna-deploy-buzon: $clave definida"
+    else
+        echo "duna-deploy-buzon: $clave no definida"
+    fi
+}
+
+# `env-set <clave> <valor> [--aplicar]` -- writes $ENV_CLIENTE, but ONLY
+# for a key the allowlist names and whose value matches that key's own
+# pattern; the hard denylist on the key's NAME is checked first and wins
+# even over the allowlist. Dry-run by default; `--aplicar` backs up the
+# file, changes exactly the one matching line (or appends it) atomically,
+# and logs one line -- never the value.
+cmd_env_set() {
+    local clave="$1" valor="$2" aplicar="$3"
+    if _clave_es_secreta "$clave"; then
+        echo "duna-deploy-buzon: refusing: $clave looks like a secret's own name; env-set never touches it" >&2
+        exit 1
+    fi
+
+    local patron
+    patron="$(_patron_permitido "$ENV_PERMITIDAS_INSTALADO" "$clave")" || exit 1
+    if ! [[ "$valor" =~ $patron ]]; then
+        echo "duna-deploy-buzon: refusing: value for $clave does not match its allowed pattern" >&2
+        exit 1
+    fi
+
+    local actual
+    actual="$(_valor_env_actual "$ENV_CLIENTE" "$clave")"
+    echo "duna-deploy-buzon: $clave actual=${actual:-<no definida>}"
+    echo "duna-deploy-buzon: $clave nuevo=$valor"
+
+    if [[ "$aplicar" != "1" ]]; then
+        echo "duna-deploy-buzon: dry-run: nothing written (pass --aplicar to write)"
+        return 0
+    fi
+
+    local estampa respaldo tmp
+    estampa="$(date -u +%Y%m%dT%H%M%SZ)"
+    respaldo="$ENV_CLIENTE.$estampa.bak"
+    install -o duna -g duna -m 0600 "$ENV_CLIENTE" "$respaldo"
+
+    tmp="$(mktemp "$(dirname "$ENV_CLIENTE")/.buzon.env.tmp.XXXXXX")"
+    _escribir_env_con_clave "$ENV_CLIENTE" "$clave" "$valor" > "$tmp"
+    chown duna:duna "$tmp"
+    chmod 0600 "$tmp"
+    mv -f "$tmp" "$ENV_CLIENTE"
+
+    logger -t duna-deploy-buzon "env-set clave=$clave respaldo=$(basename "$respaldo")"
+    echo "duna-deploy-buzon: $clave updated (backup: $(basename "$respaldo"))"
 }
 
 # Read-only: `carpetas <id>` (imap or graph, by provider) -- never writes.
@@ -751,6 +1095,10 @@ dispatch() {
         fijar-carpetas) cmd_fijar_carpetas "$FIJAR_ID" "$FIJAR_TODAS" "${FIJAR_CARPETAS[@]+"${FIJAR_CARPETAS[@]}"}" ;;
         registros) cmd_registros "$REGISTROS_UNIDAD" "$REGISTROS_N" ;;
         rebobinar-cursor) cmd_rebobinar_cursor "$REBOBINAR_ID" "$REBOBINAR_FECHA" "$REBOBINAR_APLICAR" ;;
+        reglas-ver) cmd_reglas_ver "$REGLAS_VER_ID" ;;
+        reglas) cmd_reglas "$REGLAS_ID" "$REGLAS_APLICAR" ;;
+        env-tiene) cmd_env_tiene "$ENV_TIENE_CLAVE" ;;
+        env-set) cmd_env_set "$ENV_SET_CLAVE" "$ENV_SET_VALOR" "$ENV_SET_APLICAR" ;;
     esac
 }
 
