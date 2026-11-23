@@ -2235,4 +2235,3 @@ def test_parada_no_auth_nunca_lleva_alerta_si_aunque_haya_alerta_vieja(
     assert cli.comando_sincronizar(config) == 1
     salida = capsys.readouterr()
     assert salida.err.strip() == "fuente=hotmail-carlos parada: finanzas enviar http=503"
-    assert salida.err == ""
