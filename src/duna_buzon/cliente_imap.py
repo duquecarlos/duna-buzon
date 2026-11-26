@@ -113,6 +113,20 @@ advances past it, so nothing can wedge on this path again.
 BUZON-IMAP-CARPETAS-CASEFOLD-1: `_carpeta_en_lista` now casefolds both
 sides, the same as `_carpeta_excluida` already does -- an operator-entered
 `carpetas` entry must match a server folder name regardless of case.
+
+BUZON-IMAP-CONEXION-ROTA-1: a genuine connection-level failure
+(`OSError`/`imaplib.IMAP4.abort`) at `_listar_carpetas_crudo`/
+`_examinar_carpeta`/`_buscar_uids`/`_fetch_uno` is now translated into this
+module's own `ClienteImapConexionError` (via `_invocar_conexion`) rather
+than propagating as imaplib's raw exception -- the same reason
+`_conexion_activa` already translates it for `conectar`/`login`: imaplib's
+own exception text can carry the server's own unparsed response bytes,
+which invariant 2 forbids printing or logging. The translation changes
+nothing about WHICH failures stop the whole pass: `ClienteImapConexionError`
+is a `ProveedorErrorTransitorio`, same as before, and is deliberately NOT
+one of `_ERRORES_DE_CONTENIDO_AISLABLES` and not a `ClienteImapErrorTransitorio`
+either, so neither the per-folder nor the per-message catch below can ever
+mistake a broken connection for a problem with just one folder or message.
 """
 
 from __future__ import annotations
@@ -122,6 +136,7 @@ import email
 import email.errors
 import email.header
 import email.utils
+import imaplib
 import json
 import quopri
 import re
@@ -208,20 +223,36 @@ class ClienteImapAutenticacionError(ClienteImapError, ProveedorAutenticacionErro
 
 
 class ClienteImapErrorTransitorio(ClienteImapError, ProveedorErrorTransitorio):
-    """Any other failure talking to the server: a connection problem, or a
-    command the server did not answer `OK` to. Treated as transient."""
+    """A command the server did not answer `OK` to, or answered with a
+    response this client could not make sense of -- the connection itself
+    is still up. Treated as transient."""
+
+
+class ClienteImapConexionError(ClienteImapError, ProveedorErrorTransitorio):
+    """A genuine connection-level failure: a broken socket (`OSError`) or
+    imaplib's own `abort` (the server closed the connection, or sent
+    something imaplib's own parser could not make sense of). A sibling of
+    `ClienteImapErrorTransitorio`, never a subclass of it and never one of
+    `_ERRORES_DE_CONTENIDO_AISLABLES`: every later folder and message in
+    this pass would fail identically, so this must propagate and stop the
+    whole pass (invariant 5), exactly as the raw `OSError`/`imaplib.IMAP4.
+    abort` it replaces already did -- only the exception TYPE changes, so
+    nothing outside this module ever prints or logs the server's own raw,
+    unparsed response text."""
 
 
 # Raised by this module's own hand-written IMAP grammar (`_parsear_valor`
 # and everything built on it) or by the stdlib `email` parser against one
 # folder's `EXAMINE` response or one message's own FETCH/headers/
-# BODYSTRUCTURE -- never a connection-level failure (a broken socket raises
-# `OSError`/`imaplib.IMAP4.abort`, neither of which is in this tuple, so
-# those still propagate and stop the whole pass, exactly as before this
-# slice). `listar_mensajes` catches exactly this tuple to skip ONE folder or
-# ONE message rather than let it kill every other one in the same pass
-# (BUZON-IMAP-MENSAJE-AISLADO-1) -- the same "one odd entry must never stop
-# every other one from being read" principle `_listar_carpetas_crudo`
+# BODYSTRUCTURE -- never a connection-level failure. A broken socket or
+# imaplib's own `abort` is translated by `_invocar_conexion` into
+# `ClienteImapConexionError` (BUZON-IMAP-CONEXION-ROTA-1), a SIBLING of
+# `ClienteImapErrorTransitorio` deliberately left out of this tuple, so it
+# still propagates and stops the whole pass exactly as the raw exception it
+# replaces already did. `listar_mensajes` catches exactly this tuple to skip
+# ONE folder or ONE message rather than let it kill every other one in the
+# same pass (BUZON-IMAP-MENSAJE-AISLADO-1) -- the same "one odd entry must
+# never stop every other one from being read" principle `_listar_carpetas_crudo`
 # already applies to a single unparseable `LIST` line.
 _ERRORES_DE_CONTENIDO_AISLABLES = (
     ClienteImapErrorTransitorio,
@@ -252,8 +283,6 @@ class ConexionImapProtocolo(Protocol):
 
 
 def _construir_conexion_ssl_real(host: str, puerto: int) -> ConexionImapProtocolo:
-    import imaplib
-
     # BUZON-GRAPH-TIMEOUT-1 -- explicit, never imaplib's own default (no
     # timeout at all, i.e. a socket that can block forever).
     return imaplib.IMAP4_SSL(host, puerto, timeout=temporizadores.TIMEOUT_IMAP_SEGUNDOS)
@@ -399,6 +428,21 @@ def _entrecomillar_imap(nombre: str) -> str:
     valid and this provider never needs to tell the two cases apart."""
     escapado = nombre.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escapado}"'
+
+
+def _invocar_conexion(paso: str, llamada: Callable[[], tuple[str, list]]) -> tuple[str, list]:
+    """Runs one `ConexionImapProtocolo` call, translating a genuine
+    connection-level failure (`OSError`, or imaplib's own `abort`) into this
+    module's own `ClienteImapConexionError` -- never imaplib's raw
+    exception, which for `abort` can carry the server's own unparsed
+    response bytes (content invariant 2 forbids printing or logging).
+    `ClienteImapConexionError` still propagates and stops the whole pass
+    exactly like the raw exception it replaces (BUZON-IMAP-CONEXION-ROTA-1,
+    see this module's own docstring) -- only the exception TYPE changes."""
+    try:
+        return llamada()
+    except (OSError, imaplib.IMAP4.abort) as exc:
+        raise ClienteImapConexionError(paso, detalle=type(exc).__name__) from exc
 
 
 def _parsear_bodystructure(texto: str) -> list:
@@ -655,7 +699,7 @@ class ClienteImap:
         skipped, not fatal, since one odd entry from a server must never
         stop every other folder from being read."""
         conexion = self._conexion_activa()
-        typ, dat = conexion.list()
+        typ, dat = _invocar_conexion("list", conexion.list)
         if typ != "OK":
             raise ClienteImapErrorTransitorio("list", detalle=typ)
         resultado: list[tuple[list[str], str | None, str]] = []
@@ -705,7 +749,9 @@ class ClienteImap:
 
     def _examinar_carpeta(self, nombre: str) -> tuple[int, int | None]:
         conexion = self._conexion_activa()
-        typ, _ = conexion.select(_entrecomillar_imap(nombre), readonly=True)
+        typ, _ = _invocar_conexion(
+            "examinar", lambda: conexion.select(_entrecomillar_imap(nombre), readonly=True)
+        )
         if typ != "OK":
             raise ClienteImapErrorTransitorio("examinar", detalle=typ)
 
@@ -730,7 +776,7 @@ class ClienteImap:
     def _fetch_uno(self, uid: int, items: str) -> tuple[str, bytes | None]:
         self._asegurar_carpeta_seleccionada()
         conexion = self._conexion_activa()
-        typ, dat = conexion.uid("FETCH", str(uid), f"({items})")
+        typ, dat = _invocar_conexion("fetch", lambda: conexion.uid("FETCH", str(uid), f"({items})"))
         if typ != "OK" or not dat or dat[0] is None:
             raise ClienteImapErrorTransitorio("fetch", detalle=typ)
         return _unir_respuesta_fetch(dat)
@@ -760,7 +806,7 @@ class ClienteImap:
             # the pass's own date cursor, never from UID zero.
             criterio = ("SINCE", _formato_fecha_imap(desde))
 
-        typ, dat = conexion.uid("SEARCH", *criterio)
+        typ, dat = _invocar_conexion("buscar", lambda: conexion.uid("SEARCH", *criterio))
         if typ != "OK":
             raise ClienteImapErrorTransitorio("buscar", detalle=typ)
         cadena = dat[0].decode("ascii", errors="replace") if dat and dat[0] else ""

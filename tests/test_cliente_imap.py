@@ -10,6 +10,7 @@ against every folder the fake server advertises, not only `INBOX`
 from __future__ import annotations
 
 import datetime
+import imaplib
 import json
 import re
 import socket
@@ -21,9 +22,11 @@ import pytest
 from duna_buzon.cliente_imap import (
     ClienteImap,
     ClienteImapAutenticacionError,
+    ClienteImapConexionError,
     ClienteImapErrorTransitorio,
 )
 from duna_buzon.graph import AdjuntoMetadata
+from duna_buzon.proveedor_errores import ProveedorErrorTransitorio
 
 _MESES_INDICE = {
     mes: i + 1
@@ -1199,43 +1202,79 @@ def test_examine_fallido_en_una_carpeta_no_bloquea_las_demas() -> None:
     assert cliente.omitidos_por_error_proveedor == 1
 
 
-def test_conexion_rota_durante_fetch_sigue_deteniendo_toda_la_pasada() -> None:
+class _ConexionQueRompe:
+    """A fake `ConexionImapProtocolo` whose own commands answer fine except
+    for ONE, which raises either a raw `OSError` or `imaplib.IMAP4.abort` --
+    the two genuine connection-level failures `_invocar_conexion` translates
+    (BUZON-IMAP-CONEXION-ROTA-1)."""
+
+    def __init__(self, falla_en: str, excepcion: type[Exception] = OSError) -> None:
+        self._falla_en = falla_en
+        self._excepcion = excepcion
+
+    def _romper_si_corresponde(self, paso: str) -> None:
+        if paso == self._falla_en:
+            raise self._excepcion("connection reset")
+
+    def list(self, *a: object, **k: object) -> tuple[str, list[object]]:
+        self._romper_si_corresponde("list")
+        return "OK", [b'() "/" "INBOX"']
+
+    def select(self, *a: object, **k: object) -> tuple[str, list[object]]:
+        self._romper_si_corresponde("select")
+        return "OK", [b"1"]
+
+    def response(self, nombre: str) -> tuple[str, list[object]]:
+        if nombre == "UIDVALIDITY":
+            return "UIDVALIDITY", [b"1000"]
+        return "UIDNEXT", [b"5"]
+
+    def uid(self, comando: str, *a: object, **k: object) -> tuple[str, list[object]]:
+        if comando == "SEARCH":
+            self._romper_si_corresponde("search")
+            return "OK", [b"2"]
+        self._romper_si_corresponde("fetch")
+        return "OK", [b"1"]
+
+    def login(self, *a: object, **k: object) -> tuple[str, list[object]]:
+        return "OK", [b""]
+
+    def logout(self) -> tuple[str, list[object]]:
+        return "OK", [b""]
+
+
+@pytest.mark.parametrize("excepcion", [OSError, imaplib.IMAP4.abort])
+@pytest.mark.parametrize(
+    "falla_en,paso_esperado",
+    [("list", "list"), ("select", "examinar"), ("search", "buscar"), ("fetch", "fetch")],
+)
+def test_fallo_de_conexion_se_traduce_y_sigue_deteniendo_toda_la_pasada(
+    falla_en: str, paso_esperado: str, excepcion: type[Exception]
+) -> None:
     # A genuine transport failure (never a clean NO/BAD response) must
     # still propagate and stop the whole pass -- this slice only isolates
     # a protocol- or content-level problem with ONE folder or message,
-    # never a broken connection.
-    class _ConexionQueRompe:
-        def list(self, *a: object, **k: object) -> tuple[str, list[object]]:
-            return "OK", [b'() "/" "INBOX"']
-
-        def select(self, *a: object, **k: object) -> tuple[str, list[object]]:
-            return "OK", [b"1"]
-
-        def response(self, nombre: str) -> tuple[str, list[object]]:
-            if nombre == "UIDVALIDITY":
-                return "UIDVALIDITY", [b"1000"]
-            return "UIDNEXT", [b"5"]
-
-        def uid(self, comando: str, *a: object, **k: object) -> tuple[str, list[object]]:
-            if comando == "SEARCH":
-                return "OK", [b"2"]
-            raise OSError("connection reset")  # FETCH -- a genuine transport break
-
-        def login(self, *a: object, **k: object) -> tuple[str, list[object]]:
-            return "OK", [b""]
-
-        def logout(self) -> tuple[str, list[object]]:
-            return "OK", [b""]
-
+    # never a broken connection. The TYPE it propagates as is now this
+    # module's own, never imaplib's raw exception, so nothing outside this
+    # module ever has to print or log the server's own raw response text.
     cliente = ClienteImap(
         host="127.0.0.1",
         puerto=1,
         usuario="legal@duna.solutions",
         password="app-password",
         cursor_proveedor_inicial="1000:1",
-        construir_conexion=lambda h, p: _ConexionQueRompe(),
+        construir_conexion=lambda h, p: _ConexionQueRompe(falla_en, excepcion),
     )
 
-    with pytest.raises(OSError):
+    with pytest.raises(ClienteImapConexionError) as info:
         list(cliente.listar_mensajes(_DESDE))
+
+    assert isinstance(info.value, ProveedorErrorTransitorio)
+    assert info.value.paso == paso_esperado
+    assert info.value.detalle == excepcion.__name__
+    # Never the raw exception's own text, never a traceback-worthy surprise:
+    # exactly the class-name-only shape every other failure path produces.
+    assert str(info.value) == f"imap {paso_esperado} detalle={excepcion.__name__}"
+    assert cliente.omitidos_por_error_proveedor == 0
+    assert cliente.omitidos_por_fecha_proveedor == 0
     cliente.cerrar()
