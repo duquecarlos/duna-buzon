@@ -3189,3 +3189,132 @@ needed the opposite (unconditional, move-forward) behavior, rather than reusing 
    already held, which could already be well past the threshold, surfacing immediately rather than needing
    a fresh 24h. This is the CORRECT behavior (the silence is real and has been ongoing), named here only so
    a future reader does not mistake it for a bug.
+
+---
+
+## BUZON-IMAP-CONEXION-ROTA-1 -- a genuine IMAP connection break gets its own exception type (2026-11-26)
+
+### Why
+
+Carlos's own overnight direction (via the desk, `ORCH-CARLOS-DELEGATES-TIER-1-1`), relayed through the
+dispatch `BUZON-SIGUIENTE-SEGUIMIENTO-2026-11-26-B`: pick the most valuable OPEN follow-up this
+repository's own ledger names, preferring a real defect in mail delivery over hygiene.
+`BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1`'s own ranked list (above) named three: `BUZON-ALERTA-CONSOLE-LINE-1`
+(cross-repo, needs a Buzón-to-console wire that does not exist, outside this repository's own `touches:`
+and this slice's approval -- set aside, matching `BUZON-IMAP-MENSAJE-AISLADO-1`'s own earlier reasoning for
+the same item); item 3 (the silence-after-auth-recovery ordering), which that same entry already recorded
+as CORRECT behavior, not a bug -- nothing to fix. Item 2, first named by `BUZON-IMAP-MENSAJE-AISLADO-1`,
+was the one buildable, reversible defect left: verified still open against the code (`cliente_imap.py`'s
+`_examinar_carpeta`/`_buscar_uids`/`_fetch_uno` had no translation around their own `conexion.select`/
+`conexion.uid` calls) before building anything.
+
+### The gap, verified against the code
+
+`_conexion_activa` already translates a connection-level `OSError` from `_construir_conexion` into
+`ClienteImapErrorTransitorio("conectar", ...)`. Every OTHER call into `ConexionImapProtocolo` --
+`_listar_carpetas_crudo`'s `conexion.list()`, `_examinar_carpeta`'s `conexion.select(...)`, `_buscar_uids`'s
+`conexion.uid("SEARCH", ...)`, `_fetch_uno`'s `conexion.uid("FETCH", ...)` -- had no such translation: a
+broken socket (`OSError`) or imaplib's own `abort` (the server closed the connection, or sent something
+imaplib's own parser could not make sense of) propagated as imaplib's RAW exception, all the way out of
+`listar_mensajes`, past `sincronizar.ejecutar_pasada`'s own `except ProveedorErrorTransitorio` (which an
+`OSError`/`imaplib.IMAP4.abort` is not), as an UNHANDLED exception -- a traceback Python itself would print
+to the journal, risking the server's own unparsed response bytes reaching stdout/stderr, which invariant 2
+forbids ("no ... Graph message id is ever printed or logged anywhere in this codebase" -- the same
+principle this provider's own docstring already states for `OSError`/`abort`, just never enforced at these
+four sites). `_listar_carpetas_crudo` was not named by `BUZON-IMAP-MENSAJE-AISLADO-1`'s own follow-up text
+(which named only `_examinar_carpeta`/`_buscar_uids`/`_fetch_uno`), but reading it found the identical gap,
+so it is fixed here too rather than left as a fourth, now-visible instance of the same bug.
+
+### Fix, and the design question it had to answer
+
+The follow-up's own text asked for "the exception TYPE it propagates as should still be this module's own,
+not imaplib's raw one ... no behavior change beyond the exception's own class." Reusing the EXISTING
+`ClienteImapErrorTransitorio` for this would have been wrong: that class is exactly what `listar_mensajes`'s
+own per-folder catch (`except ClienteImapErrorTransitorio:`, skip one folder) and the per-message catch
+(`_ERRORES_DE_CONTENIDO_AISLABLES`, skip one message) are built to swallow as an ISOLATABLE problem
+(`BUZON-IMAP-MENSAJE-AISLADO-1`) -- translating a genuine connection break into that same type would have
+let a broken connection be silently retried as "just this one folder" or "just this one message," instead
+of stopping the whole pass as invariant 5 and that slice's own design require. A new SIBLING class,
+`ClienteImapConexionError(ClienteImapError, ProveedorErrorTransitorio)`, is a `ProveedorErrorTransitorio`
+(so `sincronizar.py`'s existing top-level catch still stops the whole pass with a clean, class-name-only
+motivo, exactly the `GraphErrorTransitorio`/`ClienteImapErrorTransitorio` shape already produces) but is
+NEVER a `ClienteImapErrorTransitorio` and never one of `_ERRORES_DE_CONTENIDO_AISLABLES`, so neither catch
+can mistake it for either kind of isolatable failure. A new helper, `_invocar_conexion(paso, llamada)`,
+wraps each of the four call sites, catching exactly `(OSError, imaplib.IMAP4.abort)` and re-raising
+`ClienteImapConexionError(paso, detalle=type(exc).__name__)` -- the same `paso` name each site's own
+existing protocol-failure raise already uses (`"list"`/`"examinar"`/`"buscar"`/`"fetch"`), so nothing about
+the stop reason's own vocabulary changes. The now-redundant local `import imaplib` inside
+`_construir_conexion_ssl_real` was removed in favour of the one new module-level import this helper needs.
+
+### Tests, measured
+
+`tests/test_cliente_imap.py`: a fake `_ConexionQueRompe` whose one named call raises either `OSError` or
+`imaplib.IMAP4.abort`, parametrized over both exception types and all four call sites
+(`test_fallo_de_conexion_se_traduce_y_sigue_deteniendo_toda_la_pasada`, 8 cases) -- asserts
+`ClienteImapConexionError` is raised (never the raw exception), is a `ProveedorErrorTransitorio`, carries
+the expected `paso` and the exception's own class name as `detalle`, that `str(...)` is exactly
+`"imap <paso> detalle=<ClaseExcepcion>"` (never the raw exception's own text), and that
+`omitidos_por_error_proveedor` stays `0` (never counted as an isolatable skip). The one pre-existing test
+this replaces (`test_conexion_rota_durante_fetch_sigue_deteniendo_toda_la_pasada`, which asserted the OLD,
+now-superseded `pytest.raises(OSError)`) was rewritten into this parametrized form rather than left
+alongside it, since it tested exactly the one case (`fetch`, `OSError`) this new test already covers.
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest --junit-xml=.gate-out/gate.xml -q` on this slice's own final tree
+(commit `8133671e100e71407e6120ee67baac96ee147011`, tree `c08f14bcb48c69477879c909eec123630ccf0072`), run in
+the background past the 600s foreground cap and read back from the artifact rather than inferred from an
+exit code:
+
+    testsuite tests="735" failures="0" errors="0" skipped="9"
+
+735 - 9 = 726 passed. Reconciled against this slice's own base (`main` at
+`8c2afc15329591e230ddb8d11e24fcf25dd020cb`, 728 total per `BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1`'s own
+recorded figure): 735 - 728 = 7 new collected items, matching the diff exactly -- the new parametrized test
+collects 8 items (2 exception types x 4 call sites) and the one replaced test removes 1, net +7, no drift.
+The `.gate-out/gate.xml` path itself was found already populated with a STALE file from an earlier slice's
+own run before this one started (mtime predating this run); this entry's own figures are read from the
+file only AFTER confirming its mtime moved past this run's own start, never from the stale copy.
+
+Tree identity proven before writing this entry, so the gate above was not re-run for the merge: merge
+commit (recorded below) has tree `c08f14bcb48c69477879c909eec123630ccf0072`, IDENTICAL to the slice branch
+`feat/buzon-siguiente-seguimiento-2026-11-26-b`'s own tree at commit
+`8133671e100e71407e6120ee67baac96ee147011`, and `git diff HEAD feat/buzon-siguiente-seguimiento-2026-11-26-b
+--stat` against the merge commit was empty. The 9 skips are the same pre-existing Windows file-mode skips
+every earlier slice in this ledger has recorded; none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, and no on-disk file layout changed (the new
+exception class and the new helper are in-memory only; nothing new is persisted). No cross-repo contract or
+DTO change -- nothing here touches the Finanzas or Cuenta Duna wire; this diff is entirely internal to
+`cliente_imap.py`'s own exception handling. No customer-facing bytes: unlike `BUZON-ALERTA-AUTH-1` or
+`BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1`, which each added a NEW printed surface (an alert line, an alert
+type), this slice reuses the EXISTING `"imap <paso> detalle=<X>"` string shape every other `ClienteImapError`
+subclass already produces and the existing `"parada: ..."` line format `BUZON-MOTIVO-DE-PARADA-1` already
+built -- the only change is that this shape is now reachable for a connection break that used to crash
+uncaught instead, never a new kind of line an operator did not already see from a sibling failure. All
+three conditions clear, so this slice merges on green without stopping for approval.
+
+### Attribution
+
+Carlos's own overnight direction (via the desk, `ORCH-CARLOS-DELEGATES-TIER-1-1`) asked for the most
+valuable open follow-up. This slice re-verified `BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1`'s own ranked list
+against the code, set aside the cross-repo item and the already-correct-behavior item, and built the one
+remaining buildable defect first named by `BUZON-IMAP-MENSAJE-AISLADO-1`: the new `ClienteImapConexionError`
+type, the `_invocar_conexion` helper, its wiring into all four unwrapped call sites (including
+`_listar_carpetas_crudo`, found while reading the other three), and the parametrized regression test.
+
+### Open follow-ups, ranked
+
+1. **`BUZON-ALERTA-CONSOLE-LINE-1`** (named by `BUZON-ALERTA-AUTH-1`, still open, covering both the `"auth"`
+   and `"silencio"` alert types): a console line surfacing a source's own alert in the admin UI, needing a
+   Buzón-to-console wire that does not exist yet -- cross-repo, outside this repository's own `touches:`.
+   Still the only follow-up with a clear owner (the console/admin-ui repository) yet to build its half.
+2. **A source already in a silence alert that THEN also starts failing auth** reports only `"tipo": "auth"`
+   until auth clears, at which point the silence alert can surface immediately rather than needing a fresh
+   24h -- recorded by `BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1` as CORRECT behavior, not a bug; kept here only so
+   a future reader does not have to re-derive that.
+3. Every other follow-up this ledger ever named before this entry is closed by a later slice, re-verified
+   against the code while compiling this list (`_listar_carpetas_crudo`'s own matching gap, found while
+   building this slice, is fixed by this same entry, not left open).

@@ -25,7 +25,9 @@ watermark, never a message's date, is now the truth about "new in this folder" -
 counted (`omitidos_por_fecha_proveedor`) and still advances the watermark instead of silently wedging it
 forever, `carpetas` narrowing matches a folder name regardless of case, and a source that used to see mail
 and has gone quiet becomes an ALERTA too (`"silencio"`, alongside `"auth"`) -- all three by
-BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1. See `CLAUDE.md` for the gate and the invariants, `DECISIONS.md` for the
+BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1. A genuine IMAP connection break (a broken socket, or imaplib's own
+`abort`) now stops a pass as this provider's own `ClienteImapConexionError`, never imaplib's raw exception,
+by BUZON-IMAP-CONEXION-ROTA-1. See `CLAUDE.md` for the gate and the invariants, `DECISIONS.md` for the
 ledger, and `deploy/host/README.md` for the operator steps.
 
 ## Shape
