@@ -283,6 +283,20 @@ deploys gets every entry refused with a `422` -- hence off by default. A manual 
 (only possible for a Cuenta-pulled source, never one this connector adds itself) is logged and sent without
 `origen`, rather than losing the entry.
 
+One more, `BUZON_ENVIAR_ESTADO_CUENTA` (`BUZON-ESTADO-A-CUENTA-1`) -- **turn on only after Cuenta Duna's own
+receiver (`CUENTA-API-BUZON-ESTADO-RECEPTOR-1`) is live.** Off unless set to exactly `1` or `true`. On, and only
+when Cuenta Duna is configured (the four `BUZON_CUENTA_*` variables above), `sincronizar` ends every pass with one
+heartbeat, `POST {BUZON_CUENTA_URL}/servicio/buzon/estado/{BUZON_CUENTA_SUB}`, carrying the FULL current set of
+this connector's own sources -- local and Cuenta-sourced alike, per `../dev-protocol/contracts/buzon-estado-a-
+cuenta-v1.md`: each source's own id, provider, a MASKED address (`c***@hotmail.com`, never the real one), its
+label, who holds the connection (`"buzon"` for a `local`-origen source, `"cuenta"` for one Cuenta Duna connected),
+the latest recorded pass's own finish time and vistos/reenviados, and `"reingreso_requerido"` when that source
+needs reconnecting (an `origen="cuenta"` source Cuenta Duna no longer returns, or a `local` one past its own
+`BUZON_ALERTA_AUTH_HORAS` threshold) -- never a subject, a sender, a token, or the unmasked address. A source
+that has never completed a single pass yet is left out of that pass's heartbeat; it joins the next one the
+moment its first pass finishes. A failed or unconfigured push is never an error for the pass: logged as one
+count-only line (`cuenta: cuenta estado http=...` / `error=...`) and the pass's own exit code is unaffected.
+
 ## Gate
 
 ```

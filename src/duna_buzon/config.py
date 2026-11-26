@@ -42,6 +42,13 @@ _VARS_CUENTA = (_VAR_CUENTA_URL, _VAR_CUENTA_CLIENT_ID, _VAR_CUENTA_CLIENT_SECRE
 _VAR_ALERTA_AUTH_HORAS = "BUZON_ALERTA_AUTH_HORAS"
 _ALERTA_AUTH_HORAS_PREDETERMINADO = 24
 
+# BUZON-ESTADO-A-CUENTA-1 -- OFF unless set to exactly "1" or "true": the
+# push side of `../dev-protocol/contracts/buzon-estado-a-cuenta-v1.md`
+# stays off until Cuenta Duna's own receiver (`CUENTA-API-BUZON-ESTADO-
+# RECEPTOR-1`) is live, same shape as `_VAR_ENVIAR_ORIGEN` above.
+_VAR_ENVIAR_ESTADO_CUENTA = "BUZON_ENVIAR_ESTADO_CUENTA"
+_VALORES_ENVIAR_ESTADO_CUENTA_VERDADEROS = frozenset({"1", "true"})
+
 _DATOS_PREDETERMINADO = "/srv/duna/data/buzon"
 _FINANZAS_URL_PREDETERMINADA = "http://127.0.0.1:8010"
 
@@ -166,6 +173,10 @@ class Config:
     # BUZON-ALERTA-AUTH-1 -- see `_VAR_ALERTA_AUTH_HORAS` above. 24 for every
     # deployment that never set the variable.
     alerta_auth_horas: int = _ALERTA_AUTH_HORAS_PREDETERMINADO
+    # BUZON-ESTADO-A-CUENTA-1 -- see `_VAR_ENVIAR_ESTADO_CUENTA` above. False
+    # for every deployment that never set the variable, which is every
+    # deployment before this slice.
+    enviar_estado_cuenta: bool = False
 
     @property
     def cuenta_configurada(self) -> bool:
@@ -183,6 +194,9 @@ class Config:
         cuenta_url, cuenta_client_id, cuenta_client_secret, cuenta_sub = _cuenta_desde_entorno(entorno)
         enviar_origen = entorno.get(_VAR_ENVIAR_ORIGEN) in _VALORES_ENVIAR_ORIGEN_VERDADEROS
         alerta_auth_horas = _alerta_auth_horas_desde_entorno(entorno)
+        enviar_estado_cuenta = (
+            entorno.get(_VAR_ENVIAR_ESTADO_CUENTA) in _VALORES_ENVIAR_ESTADO_CUENTA_VERDADEROS
+        )
         return cls(
             graph_client_id=graph_client_id,
             clave_cifrado=clave_cifrado,
@@ -195,4 +209,5 @@ class Config:
             cuenta_sub=cuenta_sub,
             enviar_origen=enviar_origen,
             alerta_auth_horas=alerta_auth_horas,
+            enviar_estado_cuenta=enviar_estado_cuenta,
         )

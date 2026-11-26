@@ -1605,6 +1605,346 @@ def test_fuente_de_cuenta_reconectada_reanuda_el_cursor_existente(
 
 
 # ---------------------------------------------------------------------------
+# Estado heartbeat push to Cuenta Duna (BUZON-ESTADO-A-CUENTA-1)
+# ---------------------------------------------------------------------------
+
+
+def _config_con_cuenta_y_estado(tmp_path: Path) -> Config:
+    return Config.desde_entorno(
+        {
+            "BUZON_GRAPH_CLIENT_ID": "cliente",
+            "BUZON_CLAVE_CIFRADO": CLAVE_VALIDA_BASE64,
+            "FINANZAS_BUZON_TOKEN": "token",
+            "BUZON_DATOS": str(tmp_path),
+            "BUZON_FINANZAS_URL": "http://127.0.0.1:8010",
+            "BUZON_CUENTA_URL": "https://cuenta.duna.internal",
+            "BUZON_CUENTA_CLIENT_ID": "buzon",
+            "BUZON_CUENTA_CLIENT_SECRET": "secreto-cuenta",
+            "BUZON_CUENTA_SUB": "sub-carlos",
+            "BUZON_ENVIAR_ESTADO_CUENTA": "1",
+        }
+    )
+
+
+class _CuentaClienteEstadoFalso:
+    """Replaces `cli.CuentaClient` for the heartbeat tests below -- fakes
+    BOTH `listar_fuentes` (the existing pull, which `_pull_fuentes_cuenta`
+    always attempts the moment Cuenta is configured) and `enviar_estado`
+    (this slice's own push), never touching the network."""
+
+    def __init__(
+        self,
+        *,
+        pull_resultado: list[FuenteCuenta] | CuentaPullError | None = None,
+        estado_resultado: CuentaPullError | None = None,
+        **kwargs: object,
+    ) -> None:
+        self._pull_resultado = pull_resultado if pull_resultado is not None else []
+        self._estado_resultado = estado_resultado
+        self.cerrado = False
+        self.estado_llamado = False
+        self.fuentes_enviadas: list | None = None
+        self.enviado_en: datetime.datetime | None = None
+
+    def listar_fuentes(self) -> list[FuenteCuenta]:
+        if isinstance(self._pull_resultado, CuentaPullError):
+            raise self._pull_resultado
+        return self._pull_resultado
+
+    def enviar_estado(self, fuentes: list, *, enviado_en: datetime.datetime) -> None:
+        self.estado_llamado = True
+        self.fuentes_enviadas = fuentes
+        self.enviado_en = enviado_en
+        if self._estado_resultado is not None:
+            raise self._estado_resultado
+
+    def cerrar(self) -> None:
+        self.cerrado = True
+
+
+def test_estado_cuenta_apagado_nunca_llama_a_enviar_estado(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The switch defaults OFF: even with Cuenta fully configured (so the
+    EXISTING pull still runs), this slice's own push is never attempted."""
+    config = _config_con_cuenta(tmp_path)  # BUZON_ENVIAR_ESTADO_CUENTA not set
+    assert config.enviar_estado_cuenta is False
+    _escribir_fuente_y_reglas(tmp_path)
+
+    instancias: list[_CuentaClienteEstadoFalso] = []
+
+    def fabrica(**kw: object) -> _CuentaClienteEstadoFalso:
+        instancia = _CuentaClienteEstadoFalso()
+        instancias.append(instancia)
+        return instancia
+
+    monkeypatch.setattr(cli, "CuentaClient", fabrica)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    assert not any(i.estado_llamado for i in instancias)
+
+
+def _correr_pasada_local_con_estado(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, vistos: int = 12, reenviados: int = 3
+) -> list:
+    """Runs one clean `sincronizar` pass over the usual LOCAL
+    `hotmail-carlos` source, with the estado push switched on and a fake
+    `CuentaClient` that records exactly what `enviar_estado` was called
+    with. Returns that call's own `fuentes` list."""
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta_y_estado(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+
+    instancias: list[_CuentaClienteEstadoFalso] = []
+
+    def fabrica(**kw: object) -> _CuentaClienteEstadoFalso:
+        instancia = _CuentaClienteEstadoFalso()
+        instancias.append(instancia)
+        return instancia
+
+    monkeypatch.setattr(cli, "CuentaClient", fabrica)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli,
+        "ejecutar_pasada",
+        lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=vistos, reenviados=reenviados)),
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+
+    llamadas_estado = [i for i in instancias if i.estado_llamado]
+    assert len(llamadas_estado) == 1
+    assert llamadas_estado[0].fuentes_enviadas is not None
+    return llamadas_estado[0].fuentes_enviadas
+
+
+def test_estado_cuenta_prendido_envia_la_fuente_local_con_el_cuerpo_del_contrato(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fuentes_enviadas = _correr_pasada_local_con_estado(tmp_path, monkeypatch, vistos=12, reenviados=3)
+
+    assert len(fuentes_enviadas) == 1
+    fila = fuentes_enviadas[0]
+    assert fila.fuente_id == "hotmail-carlos"
+    assert fila.proveedor == "microsoft"
+    assert fila.direccion == "carlos@hotmail.com"  # unmasked here -- `CuentaClient.enviar_estado` masks it
+    assert fila.etiqueta == "Hotmail"
+    assert fila.origen == "buzon"
+    assert fila.vistos == 12
+    assert fila.reenviados == 3
+    assert fila.alerta is None
+
+
+def test_estado_cuenta_nunca_manda_mas_que_los_campos_enumerados(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing but what `FuenteEstadoWire` itself carries ever reaches
+    `enviar_estado` -- no subject, sender, token, or address beyond this
+    one field, which `cuenta.py`'s own wire builder then masks."""
+    import dataclasses
+
+    from duna_buzon.cuenta import FuenteEstadoWire
+
+    fuentes_enviadas = _correr_pasada_local_con_estado(tmp_path, monkeypatch)
+    campos = {f.name for f in dataclasses.fields(FuenteEstadoWire)}
+    assert campos == {
+        "fuente_id",
+        "proveedor",
+        "direccion",
+        "etiqueta",
+        "origen",
+        "ultimo_paso_en",
+        "vistos",
+        "reenviados",
+        "alerta",
+    }
+
+
+def test_estado_cuenta_incluye_fuente_de_cuenta_pulled_con_origen_cuenta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta_y_estado(tmp_path)
+    _escribir_reglas_vacias_en(tmp_path / "fuentes" / "cuenta-abc123")
+
+    fuente_cuenta = FuenteCuenta(
+        id="abc123",
+        proveedor="google",
+        direccion="carlos@gmail.com",
+        access_token="token-cuenta-secreto",
+        expira_en_segundos=3600,
+    )
+
+    instancias: list[_CuentaClienteEstadoFalso] = []
+
+    def fabrica(**kw: object) -> _CuentaClienteEstadoFalso:
+        instancia = _CuentaClienteEstadoFalso(pull_resultado=[fuente_cuenta])
+        instancias.append(instancia)
+        return instancia
+
+    monkeypatch.setattr(cli, "CuentaClient", fabrica)
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=2))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+
+    llamadas_estado = [i for i in instancias if i.estado_llamado]
+    assert len(llamadas_estado) == 1
+    fuentes_enviadas = llamadas_estado[0].fuentes_enviadas
+    assert len(fuentes_enviadas) == 1
+    assert fuentes_enviadas[0].fuente_id == "cuenta-abc123"
+    assert fuentes_enviadas[0].origen == "cuenta"
+    assert fuentes_enviadas[0].direccion == "carlos@gmail.com"
+
+
+def test_estado_cuenta_fuente_de_cuenta_revocada_se_marca_reingreso_requerido(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta_y_estado(tmp_path)
+    _escribir_reglas_vacias_en(tmp_path / "fuentes" / "cuenta-abc123")
+
+    fuente_cuenta = FuenteCuenta(
+        id="abc123",
+        proveedor="google",
+        direccion="carlos@gmail.com",
+        access_token="token-1",
+        expira_en_segundos=3600,
+    )
+    instancias: list[_CuentaClienteEstadoFalso] = []
+
+    def fabrica_primera_pasada(**kw: object) -> _CuentaClienteEstadoFalso:
+        instancia = _CuentaClienteEstadoFalso(pull_resultado=[fuente_cuenta])
+        instancias.append(instancia)
+        return instancia
+
+    monkeypatch.setattr(cli, "CuentaClient", fabrica_primera_pasada)
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0  # first pass: source connects and runs
+
+    # Second pass: Cuenta Duna no longer returns this source (revoked) --
+    # no OTHER active source exists, so the pass itself reports "no active
+    # sources" (exit 1) and never reaches the push; what matters here is
+    # that the revoked, still-on-disk source is reachable for a LATER push
+    # once some other source is active again. Add a local source so the
+    # pass (and the push) still runs.
+    _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+
+    instancias.clear()
+
+    def fabrica_segunda_pasada(**kw: object) -> _CuentaClienteEstadoFalso:
+        instancia = _CuentaClienteEstadoFalso(pull_resultado=[])
+        instancias.append(instancia)
+        return instancia
+
+    monkeypatch.setattr(cli, "CuentaClient", fabrica_segunda_pasada)
+
+    assert cli.comando_sincronizar(config) == 0
+
+    llamadas_estado = [i for i in instancias if i.estado_llamado]
+    assert len(llamadas_estado) == 1
+    fuentes_enviadas = {f.fuente_id: f for f in llamadas_estado[0].fuentes_enviadas}
+    assert fuentes_enviadas["cuenta-abc123"].alerta == "reingreso_requerido"
+    assert fuentes_enviadas["hotmail-carlos"].alerta is None
+
+
+def test_estado_cuenta_fuente_nunca_sincronizada_se_omite_del_envio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source that was just added but never completed a single pass has
+    no `historial.jsonl` yet -- nothing true to report, so it is left out
+    of the heartbeat rather than sent with a fabricated 0/0. An INACTIVE
+    source is the only way to have one on disk that the main loop never
+    even attempts (every active source gets a pass attempt, successful or
+    not, the moment `sincronizar` runs)."""
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta_y_estado(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+
+    # A second source, inactive and never run -- no historial.jsonl exists
+    # for it at all.
+    _escribir_fuente(
+        tmp_path, id="legal-duna", proveedor="imap", direccion="legal@duna.solutions", activa=False
+    )
+
+    instancias: list[_CuentaClienteEstadoFalso] = []
+
+    def fabrica(**kw: object) -> _CuentaClienteEstadoFalso:
+        instancia = _CuentaClienteEstadoFalso()
+        instancias.append(instancia)
+        return instancia
+
+    monkeypatch.setattr(cli, "CuentaClient", fabrica)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+
+    llamadas_estado = [i for i in instancias if i.estado_llamado]
+    assert len(llamadas_estado) == 1
+    ids_enviados = {f.fuente_id for f in llamadas_estado[0].fuentes_enviadas}
+    assert ids_enviados == {"hotmail-carlos"}
+    assert not (tmp_path / "fuentes" / "legal-duna" / "historial.jsonl").exists()
+
+
+def test_estado_cuenta_falla_nunca_falla_la_pasada(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta_y_estado(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+
+    def fabrica(**kw: object) -> _CuentaClienteEstadoFalso:
+        return _CuentaClienteEstadoFalso(estado_resultado=CuentaPullError(paso="estado", http_status=500))
+
+    monkeypatch.setattr(cli, "CuentaClient", fabrica)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0  # the push's own failure never fails the pass
+    salida = capsys.readouterr()
+    assert "cuenta: cuenta estado http=500" in salida.err
+
+
+# ---------------------------------------------------------------------------
 # `rebobinar-cursor <fuente> <fecha> [--aplicar]` (BUZON-CURSOR-REBOBINAR-CLI-1)
 # ---------------------------------------------------------------------------
 

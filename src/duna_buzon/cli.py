@@ -10,6 +10,15 @@ Cuenta sources have none on disk) and marking any Cuenta-origin source no
 longer returned as inactive. A failed or unconfigured pull is not an
 error: it is logged in one count-only line and every LOCAL source still
 runs exactly as before this slice.
+
+`sincronizar` ALSO pushes, at the very END of the pass, one heartbeat per
+owner sub to Cuenta Duna (`_enviar_estado_a_cuenta`, `BUZON-ESTADO-A-
+CUENTA-1`): `POST /servicio/buzon/estado/{sub}` carrying the FULL current
+set of this person's own sources, so Cuenta can show every mailbox that
+reaches the person's books, with where it is connected. Off by default
+(`Config.enviar_estado_cuenta`, `BUZON_ENVIAR_ESTADO_CUENTA`) until
+Cuenta's own receiver is live; a failed or unconfigured push is, like the
+pull above, never an error for the pass.
 """
 
 from __future__ import annotations
@@ -28,7 +37,7 @@ from duna_buzon import historial as modulo_historial
 from duna_buzon import registro
 from duna_buzon.cliente_imap import ClienteImap, ClienteImapError
 from duna_buzon.config import Config
-from duna_buzon.cuenta import CuentaClient, CuentaPullError
+from duna_buzon.cuenta import CuentaClient, CuentaPullError, FuenteEstadoWire
 from duna_buzon.finanzas import FinanzasClient
 from duna_buzon.fuentes import FuenteConfig, FuenteInvalidaError
 from duna_buzon.graph import GraphClient, GraphError
@@ -383,6 +392,98 @@ def _pull_fuentes_cuenta(config: Config) -> dict[str, str] | None:
     return tokens
 
 
+def _estado_wire_para(
+    config: Config, fuente: FuenteConfig, ahora: datetime.datetime
+) -> FuenteEstadoWire | None:
+    """This source's own heartbeat row for `enviar_estado`, or `None` when
+    it has never completed a single pass yet (no `historial.jsonl` to read
+    `ultimo_paso_en`/`vistos`/`reenviados` from -- there is nothing true to
+    report yet, so it is simply left out of THIS heartbeat; it joins the
+    next one, the moment its first pass finishes).
+
+    `vistos`/`reenviados` come from the LATEST recorded pass -- this run's
+    own fresh numbers for a source that just ran (`_agregar_historial`
+    already wrote them, earlier in this same pass), or the previous run's
+    for one that did not run this time (inactive, or a Cuenta pull that
+    came back without it) -- never fabricated as zero, which would read as
+    "checked, found nothing" rather than "did not run".
+
+    `alerta="reingreso_requerido"` for exactly the two reconnect-needed
+    cases this connector already tracks: an `origen="cuenta"` source Cuenta
+    Duna no longer returns (`activa=False`), or a `local` source whose own
+    auth has been failing past `BUZON_ALERTA_AUTH_HORAS` (the same
+    `_estado_alerta` threshold `estado`/`alertas` already use). `None`
+    otherwise -- this connector has no other failure it can attribute to a
+    single source today, so `"error"` is named by the contract but never
+    sent here."""
+    directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
+    registros, _ = modulo_historial.leer_historial(directorio)
+    if not registros:
+        return None
+    ultimo = registros[-1]
+
+    alerta: str | None = None
+    if fuente.origen == "cuenta" and not fuente.activa:
+        alerta = "reingreso_requerido"
+    elif _estado_alerta(config, fuente, ahora) is not None:
+        alerta = "reingreso_requerido"
+
+    return FuenteEstadoWire(
+        fuente_id=fuente.id,
+        proveedor=fuente.proveedor,
+        direccion=fuente.direccion,
+        etiqueta=fuente.etiqueta or None,
+        origen="cuenta" if fuente.origen == "cuenta" else "buzon",
+        ultimo_paso_en=ultimo.finalizado_en,
+        vistos=ultimo.vistos,
+        reenviados=ultimo.reenviados,
+        alerta=alerta,
+    )
+
+
+def _enviar_estado_a_cuenta(config: Config) -> None:
+    """`BUZON-ESTADO-A-CUENTA-1` -- the push side of
+    `../dev-protocol/contracts/buzon-estado-a-cuenta-v1.md`. A no-op unless
+    BOTH `config.enviar_estado_cuenta` (the off-by-default switch) and
+    `config.cuenta_configurada` (there is a `sub` and a credential to push
+    with) hold -- today's connector serves exactly one person, so that one
+    configured `sub` is the "owner sub" for every source, local or
+    Cuenta-sourced alike; a deployment with no Cuenta Duna configured at
+    all has no sub to push under, same as the contract's own "a fuente
+    with no sub is not sent" read at the whole-deployment level.
+
+    Never fails the pass: a `CuentaPullError` (bad credential, Cuenta Duna
+    down, an unknown `sub`) is caught here and logged as one count-only
+    line, exactly like `_pull_fuentes_cuenta`'s own failure path."""
+    if not config.enviar_estado_cuenta or not config.cuenta_configurada:
+        return
+
+    assert config.cuenta_url is not None
+    assert config.cuenta_client_id is not None
+    assert config.cuenta_client_secret is not None
+    assert config.cuenta_sub is not None
+
+    ahora = _ahora()
+    fuentes_wire = [
+        wire
+        for fuente in modulo_fuentes.listar_fuentes(config.directorio_datos)
+        if (wire := _estado_wire_para(config, fuente, ahora)) is not None
+    ]
+
+    cliente = CuentaClient(
+        url_base=config.cuenta_url,
+        client_id=config.cuenta_client_id,
+        client_secret=config.cuenta_client_secret,
+        sub=config.cuenta_sub,
+    )
+    try:
+        cliente.enviar_estado(fuentes_wire, enviado_en=ahora)
+    except CuentaPullError as exc:
+        print(f"cuenta: {exc.motivo}", file=sys.stderr)
+    finally:
+        cliente.cerrar()
+
+
 def comando_sincronizar(config: Config) -> int:
     _migrar_si_necesario(config)
     tokens_cuenta = _pull_fuentes_cuenta(config)
@@ -419,6 +520,7 @@ def comando_sincronizar(config: Config) -> int:
     finally:
         cliente_finanzas.cerrar()
 
+    _enviar_estado_a_cuenta(config)
     return 1 if algun_fallo else 0
 
 
