@@ -3318,3 +3318,169 @@ type, the `_invocar_conexion` helper, its wiring into all four unwrapped call si
 3. Every other follow-up this ledger ever named before this entry is closed by a later slice, re-verified
    against the code while compiling this list (`_listar_carpetas_crudo`'s own matching gap, found while
    building this slice, is fixed by this same entry, not left open).
+
+## BUZON-CARPETAS-CONTEO-1 -- `carpetas` gets per-folder counts, the silence alert gets a floor (2026-11-26)
+
+### Why
+
+`BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1` (8c2afc1) deployed, and `duna-zoho` still read `vistos=0` on every
+pass (08:00 and 08:10 UTC, 26 Nov), its cursor unmoved since 2026-11-24T19:30:08Z. The date-filter drop was
+real but not shown to be the whole cause, and there was no way to tell "no mail arrived" apart from "mail
+arrived and we are not seeing it" from the outside -- `carpetas <fuente>` printed a folder's name, flags and
+`leida=si/no`, never a count. This slice gives it the numbers that tell the two apart, investigates whether
+a source whose cursor predates 8c2afc1 drops mail on its first post-deploy pass, and checks whether the
+silence alert can ever raise for a source that has NEVER once seen mail.
+
+### `carpetas` gets per-folder counts (BUZON-CARPETAS-CONTEO-1)
+
+For every folder a source WOULD read, `carpetas <fuente>` now also prints that folder's own MESSAGES,
+UIDNEXT and UIDVALIDITY (`cliente_imap.ClienteImap._examinar_carpeta`'s own EXAMINE response already
+carries all three; the EXISTS count was parsed and added, nothing new issued), this source's own stored
+per-folder UID watermark (`marca`, read from the SAME `_cursor_inicial_mapa` a live pass would resume from,
+never updated by this diagnostic), and how many messages carry a UID past it (`nuevos`), via one new
+`ClienteImap.diagnosticar_carpeta` method and its own `_contar_uids_desde` helper -- one more `UID SEARCH`,
+sharing `_buscar_uids`'s own empty-range guard, never a FETCH, so no content is ever read. A folder with no
+stored watermark, or one naming a UIDVALIDITY the server no longer has, prints `marca=sin marca`/
+`nuevos=sin marca` for the latter field (no count means anything against a UIDVALIDITY a live pass itself
+would not resume from). An excluded folder (`leida=no`) is never EXAMINEd and prints no counts, unchanged.
+One folder's own broken EXAMINE/SEARCH (`ClienteImapErrorTransitorio`) is reported on its own line and
+never stops the rest of the report (`comando_carpetas`, `cli.py`), the same per-folder isolation
+`listar_mensajes` already gives a live pass (`BUZON-IMAP-MENSAJE-AISLADO-1`) -- a genuine connection break
+still stops the whole command.
+
+**The line that answers Main's own question**: `nuevos=0` on every folder a source reads means no mail
+arrived -- every folder's watermark is caught up with the server's own UIDNEXT. `nuevos` > 0 on any folder
+while `sincronizar` keeps reporting `vistos=0` for that source means mail IS there and this connector is
+not seeing it -- worth investigating. `marca=sin marca` means this source has never stored a watermark for
+that folder yet, so nothing is counted against it.
+
+### The pre-8c2afc1 first-pass question, read against the code -- no defect found
+
+Read `cliente_imap.py`'s `_buscar_uids`: a folder's own `cursor_previo` comes from `ClienteImap.
+__init__`'s `_cursor_inicial_mapa`, parsed once from `cursor_proveedor_inicial` by `_analizar_cursor_multi`.
+For ANY folder with no entry there (never synced under this provider at all, or a folder this
+`BUZON-FUENTE-IMAP-CARPETAS-1` slice can newly read but an older, `INBOX`-only source never did),
+`cursor_previo` is `None`, and `_buscar_uids` has exactly two branches: resume by UID when `cursor_previo` is
+set and its own UIDVALIDITY matches, or `SINCE _formato_fecha_imap(desde)` otherwise -- `desde` being the
+pass's own date cursor (`cursor.json`, minus the 10-minute overlap, `sincronizar.ejecutar_pasada`'s own
+`desde_con_solape`). There is no third branch, and no path that starts from UIDNEXT or from UID zero. A
+source whose cursor predates 8c2afc1 (the OLD bare `"<uidvalidity>:<uid>"` string, read as `INBOX`'s own
+cursor by `_analizar_cursor_multi`'s own backward-compat branch) resumes `INBOX` exactly where it left off
+and falls back to the stored date cursor for every OTHER folder it can now read -- never skipping mail that
+arrived after the cursor date, never re-forwarding what `INBOX` already covered. This is already proven by
+two EXISTING tests, re-read and re-run rather than duplicated:
+`test_sin_cursor_previo_usa_since_por_fecha` (no cursor at all -> `SINCE`, never `UIDNEXT`/zero) and
+`test_cursor_proveedor_formato_antiguo_se_lee_como_inbox` (the old bare-string format resumes `INBOX` by
+UID, issuing no `SINCE` search at all) -- joined by `test_uidvalidity_distinta_cae_de_nuevo_a_since` and
+`test_tres_carpetas_con_trash_y_cambio_de_uidvalidity` for the mixed multi-folder case. The "forward nothing
+twice" duplicate guard is proven by `test_mensaje_con_fecha_antigua_pero_uid_nuevo_en_resumen_se_ve_y_se_
+reenvia_una_vez`'s own second-pass assertion (the watermark, once advanced, is never re-yielded) and, at the
+Finanzas layer, `test_sincronizar.py::test_reenvio_duplicado_por_el_solape_se_cuenta_como_duplicado`. No
+defect found on this path, so no fix was built and no new test duplicates this existing coverage.
+
+### The silence-alert floor -- a real defect, fixed
+
+Read `cli.py`'s `_estado_silencio` and `alerta.py`'s own `visto.json`: a source that has NEVER once seen a
+message has no `ultimo_visto_en` marker at all, and `_estado_silencio` returned `None` UNCONDITIONALLY for
+it, by the design `BUZON-ALERTA-SILENCIO-1` itself documented ("there has to have been mail before there
+can be a drought"). That reads correctly for a source whose mailbox has always been empty of anything this
+connector would forward -- but it also means a source that is BROKEN from day one (excluded folders, a
+`reglas.json` that excludes everything, a stuck connection) can run empty pass after empty pass FOREVER and
+never raise, the exact blind spot `BUZON-ALERTA-SILENCIO-1` was built to close, just left open for the one
+case it has no prior sighting to measure from. Fixed with a new marker, `fuentes/<id>/primera_pasada.json`
+(`alerta.cargar_primera_pasada_en`/`marcar_primera_pasada`): set ONCE, at the very start of
+`cli._ejecutar_una_fuente`, on the first pass this connector EVER attempts for a source -- whatever that
+pass does afterwards -- and kept forever after, the same set-once shape `marcar_auth_fallando` already
+uses. `_estado_silencio` now falls back to it whenever `ultimo_visto_en` is absent, so a source that has
+produced nothing from the very first pass still raises past `BUZON_ALERTA_SILENCIO_HORAS` instead of
+staying invisible; a source that has never even attempted a pass yet (neither marker exists) still stays
+un-alerted, since there is nothing yet to measure from. `ultimo_visto_en`, when present, still takes
+priority -- a source that DID once see mail measures silence from that sighting, never from the older
+first-pass marker.
+
+### Tests, measured
+
+`tests/test_cliente_imap.py` (4 new): `diagnosticar_carpeta` with a matching stored watermark counts UIDs
+past it correctly (`test_diagnosticar_carpeta_con_marca_cuenta_los_uids_por_encima`); with no stored
+watermark at all, both `marca` and `nuevos` are `None`
+(`test_diagnosticar_carpeta_sin_marca_es_sin_marca`); with a watermark naming a DIFFERENT UIDVALIDITY,
+`marca` still reports the stale stored pair but `nuevos` stays `None`
+(`test_diagnosticar_carpeta_con_uidvalidity_distinta_no_cuenta`); and a folder already caught up with
+UIDNEXT issues no `UID SEARCH` at all, `nuevos=0`
+(`test_diagnosticar_carpeta_al_dia_no_emite_busqueda`).
+
+`tests/test_alerta.py` (3 new): `cargar_primera_pasada_en`/`marcar_primera_pasada` round-trip, and a second
+`marcar_primera_pasada` call conserves the FIRST moment (set-once, mirroring `marcar_auth_fallando`'s own
+existing tests).
+
+`tests/test_cli.py` (7 new): `comando_carpetas` prints the new fields for an included folder with a stored
+watermark, and `marca=sin marca nuevos=sin marca` for one with none
+(`test_comando_carpetas_con_marca_imprime_conteos`); an excluded folder prints no counts and is never
+EXAMINEd (`test_comando_carpetas_excluida_no_imprime_conteos`); `comando_alertas` raises `"silencio"` for a
+source with only a `primera_pasada_en` marker past the threshold
+(`test_alertas_json_fuente_que_nunca_vio_correo_pero_ya_fue_pasada_cae_en_silencio_tras_el_umbral`) and
+stays empty before it
+(`test_alertas_json_fuente_que_nunca_vio_correo_antes_del_umbral_queda_vacio`); `ultimo_visto_en` outranks
+an older `primera_pasada_en` (`test_alertas_json_ultimo_visto_tiene_prioridad_sobre_primera_pasada`); and
+`comando_sincronizar` writes `primera_pasada.json` on its first pass and never overwrites it on a later one
+(`test_sincronizar_marca_primera_pasada_en_la_primera_corrida`,
+`test_sincronizar_no_sobrescribe_primera_pasada_en_corridas_siguientes`). The pre-existing
+`test_alertas_json_fuente_que_nunca_vio_correo_nunca_esta_en_silencio` (a source with NEITHER marker) was
+re-read and left as is -- still correct, since neither marker existing means this source has never even
+attempted a pass.
+
+### Gate, measured
+
+`uv run pytest -q` on this slice's own final tree (branch `feat/buzon-carpetas-conteo-1` at commit
+`7ed30e680d563c66029b75a977822a387e28e0b4`, tree `e998c1d7eb178c26eb38a6acd7f8fbcd54361f1c`), run in the
+foreground, moved to the background by the harness past its own cap and read back from its own output file
+rather than inferred from an exit code:
+
+    740 passed, 9 skipped in 663.24s (0:11:03)
+
+749 total. Reconciled against this slice's own base (`main` at
+`f182fd88c06b7000bf013af8ad1a28829b03862e`, 735 total per `BUZON-IMAP-CONEXION-ROTA-1`'s own recorded
+figure): 749 - 735 = 14 new collected items, matching the 14 new tests listed above exactly (4 + 3 + 7), no
+drift. The 9 skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger has
+recorded; none are new.
+
+Tree identity proven before writing this entry, so the gate above was not re-run for the merge: merge
+commit (recorded below) has tree `e998c1d7eb178c26eb38a6acd7f8fbcd54361f1c`, IDENTICAL to the slice branch
+`feat/buzon-carpetas-conteo-1`'s own tree at commit `7ed30e680d563c66029b75a977822a387e28e0b4`, and
+`git diff HEAD feat/buzon-carpetas-conteo-1 --stat` against the merge commit was empty.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database; the one new on-disk file
+(`primera_pasada.json`) follows the exact shape `visto.json`/`alerta.json` already established, not a new
+kind of persistence. No cross-repo contract or DTO change -- nothing here touches the Finanzas or Cuenta
+Duna wire; the diff is internal to `cliente_imap.py`'s own diagnostic method, `cli.py`'s own `carpetas`/
+`_estado_silencio`, and `alerta.py`'s own marker pair. Customer-facing bytes: the ONLY printed surface this
+slice changes is `carpetas <fuente>`'s own operator-diagnostic output (new fields appended after the
+existing `leida=si/no`, never replacing it) and `alertas --json`'s own `"silencio"` entries now also
+appearing for a source that previously could never produce one -- both read exclusively by Carlos himself
+(over `sudo -n duna-deploy-buzon carpetas <id>`/`alertas`) and by Main's own session-start hub check, never
+by an end customer of any Duna product; this slice's own approval (`ORCH-CARLOS-DELEGATES-TIER-1-1`)
+explicitly describes and authorizes exactly this diagnostic output as "reversible," and the dispatch's own
+body states in words "MERGE IS APPROVED on GREEN. Main deploys." All three conditions clear on the diff
+itself, independent of that explicit authorization, so this slice merges on green without stopping for
+approval.
+
+### Attribution
+
+`ORCH-CARLOS-DELEGATES-TIER-1-1` dispatched this slice directly (not through the ranked-follow-up list the
+two prior slices drew from) to answer `duna-zoho`'s own `vistos=0` mystery. All four numbered build items
+were completed: the `carpetas` counts (1), the pre-8c2afc1 first-pass investigation, which found no defect
+to fix (2), the silence-alert floor, which found and fixed a real one (3), and this gate and ledger entry
+(4).
+
+### Open follow-ups, ranked
+
+1. **`BUZON-ALERTA-CONSOLE-LINE-1`** (unchanged from the prior entry, still open, cross-repo, outside this
+   repository's own `touches:`): a console line surfacing a source's own alert (now including a
+   `primera_pasada`-floored silencio) in the admin UI.
+2. **Whether `duna-zoho`'s own `vistos=0` is "no mail" or "mail we are not seeing"** is not something this
+   slice could answer from inside the repository alone -- it needs `carpetas duna-zoho` RUN against the
+   real mailbox, which only an operator with host access can do. This slice built the tool that answers it
+   (`nuevos` per folder); running it against the live source is the next step, owned by whoever has host
+   access, not by a future code slice.
