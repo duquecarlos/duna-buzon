@@ -27,8 +27,12 @@ forever, `carpetas` narrowing matches a folder name regardless of case, and a so
 and has gone quiet becomes an ALERTA too (`"silencio"`, alongside `"auth"`) -- all three by
 BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1. A genuine IMAP connection break (a broken socket, or imaplib's own
 `abort`) now stops a pass as this provider's own `ClienteImapConexionError`, never imaplib's raw exception,
-by BUZON-IMAP-CONEXION-ROTA-1. See `CLAUDE.md` for the gate and the invariants, `DECISIONS.md` for the
-ledger, and `deploy/host/README.md` for the operator steps.
+by BUZON-IMAP-CONEXION-ROTA-1. `carpetas <id>` now prints each read folder's own MESSAGES/UIDNEXT/
+UIDVALIDITY, this source's own stored UID watermark and how many messages sit past it, telling "no mail
+arrived" apart from "mail is there and we are not seeing it"; the silence alert's own marker now has a
+fallback (`primera_pasada.json`) so a source that has NEVER once seen mail can still raise it, instead of
+staying invisible forever -- both by BUZON-CARPETAS-CONTEO-1. See `CLAUDE.md` for the gate and the
+invariants, `DECISIONS.md` for the ledger, and `deploy/host/README.md` for the operator steps.
 
 ## Shape
 
@@ -70,6 +74,11 @@ fuentes/<id>/alerta.json            -- ABSENT unless this source's own auth is c
 fuentes/<id>/visto.json             -- ABSENT if this source has never once seen a message: the UTC instant
                                        of the MOST RECENT pass that saw at least one (`vistos > 0`). Moves
                                        forward on every such pass -- see `alerta.py` and BUZON-ALERTA-SILENCIO-1
+fuentes/<id>/primera_pasada.json    -- the UTC instant of the FIRST pass this connector ever attempted for
+                                       this source, set once and kept forever after -- the silence alert's own
+                                       fallback for a source that has NEVER once seen mail, so it still raises
+                                       past the threshold instead of staying invisible forever -- see
+                                       `alerta.py` and BUZON-CARPETAS-CONTEO-1
 ```
 
 `host`/`port` are only set for `proveedor == "imap"` (`None` otherwise).
@@ -159,8 +168,12 @@ The commands:
   without stopping the rest of the list from printing (`BUZON-FUENTES-LISTAR-RESILIENTE-1`); every other command
   that enumerates sources skips a broken one the same way, so a healthy, named source keeps working.
 - `carpetas <id>` -- read-only, for ONE imap source: signs in with its already-stored app password and prints
-  every folder the server's `LIST` returns, with its flags and whether this source would read it today. Never
-  prints message content or the credential itself -- see "Narrowing an IMAP source to specific folders" below.
+  every folder the server's `LIST` returns, with its flags and whether this source would read it today. For
+  every folder it would read, also prints that folder's own MESSAGES, UIDNEXT and UIDVALIDITY, this source's
+  own stored UID watermark (`marca`, or "sin marca" when none is stored yet), and how many messages carry a
+  UID past it (`nuevos`) -- counts and UIDs only, via one more `UID SEARCH`, never a FETCH
+  (`BUZON-CARPETAS-CONTEO-1`; see "Telling apart no mail from mail we are not seeing" below). Never prints
+  message content or the credential itself -- see "Narrowing an IMAP source to specific folders" below.
 - `carpetas-graph <id>` -- read-only, for ONE microsoft source (`BUZON-CARPETAS-MICROSOFT-CLI-1`): the
   imap `carpetas <id>`'s own twin, listing every top-level Graph mail folder's display name, id, and
   well-known name (`inbox`, `archive`, ...) where one applies. Never prints message content.
@@ -227,15 +240,22 @@ that ever looked at a RUN of empty passes and called it worth a flag.
 Now each source keeps its own `ultimo_visto_en` marker (`fuentes/<id>/visto.json` above): the UTC instant of
 the most recent pass that saw at least one message, moved forward every time one does, REGARDLESS of
 whether that pass went on to forward it, skip it by rule, or stop partway through on a transient error --
-the mailbox had mail, so it is not silent, whatever happened to that mail afterwards. A source that has
-never once seen a message has no marker at all, and is never called silent -- there has to have been mail
-before there can be a drought. Once a source's own marker is older than `BUZON_ALERTA_SILENCIO_HORAS`
-(default 24 -- see below) hours, `alertas --json` lists it with `"tipo": "silencio"`, the marker's own
-timestamp as `desde`, and a remedy that names only the source id, never a credential (check the mailbox is
-still receiving mail, check `reglas.json` is not excluding everything). A source already in an auth alert
-never also gets a redundant silencio entry for the same pass -- the auth alert already explains it. The
-alert clears the instant a pass sees mail again, since the marker simply moves forward past the threshold;
-there is no separate "clear" step to call.
+the mailbox had mail, so it is not silent, whatever happened to that mail afterwards. Once a source's own
+marker is older than `BUZON_ALERTA_SILENCIO_HORAS` (default 24 -- see below) hours, `alertas --json` lists
+it with `"tipo": "silencio"`, the marker's own timestamp as `desde`, and a remedy that names only the
+source id, never a credential (check the mailbox is still receiving mail, check `reglas.json` is not
+excluding everything). A source already in an auth alert never also gets a redundant silencio entry for the
+same pass -- the auth alert already explains it. The alert clears the instant a pass sees mail again, since
+the marker simply moves forward past the threshold; there is no separate "clear" step to call.
+
+A source that has NEVER once seen a message has no `visto.json` marker at all. Before
+BUZON-CARPETAS-CONTEO-1, that meant it could never be called silent either, however many empty passes it
+ran -- there has to have been mail before there can be a drought, so a mailbox that produced nothing from
+the very first pass stayed invisible forever, exactly the blind spot this alert was meant to close. Now
+`_estado_silencio` falls back to `fuentes/<id>/primera_pasada.json` (above): the UTC instant of the FIRST
+pass this connector ever attempted for this source, set once and kept forever after. A source with neither
+marker has never even attempted a pass yet, and stays un-alerted -- there is nothing to measure silence
+from.
 
 ### Narrowing an IMAP source to specific folders (BUZON-IMAP-CARPETAS-INCLUIDAS-1)
 
@@ -268,14 +288,28 @@ under what name, without touching the cursor or sending anything to Finanzas:
 ```
 $ uv run python -m duna_buzon carpetas legal-duna
 carpeta='INBOX' banderas=- leida=no
-carpeta='Legal' banderas=- leida=si
-carpeta='Legal/Facturas' banderas=- leida=si
+carpeta='Legal' banderas=- leida=si mensajes=42 uidnext=1500 uidvalidity=1000 marca=1000:1480 nuevos=12
+carpeta='Legal/Facturas' banderas=- leida=si mensajes=7 uidnext=9 uidvalidity=1000 marca=sin marca nuevos=sin marca
 carpeta='Sent' banderas=\Sent leida=no
 ```
 
 Changing `carpetas` on an existing source takes effect the next `sincronizar` pass: a folder's own stored cursor
 (`cursor_proveedor.json`) is kept exactly where it was while that folder stays included, and dropped the moment it
 is not -- never carried forward silently for a folder this source no longer reads.
+
+### Telling apart no mail from mail we are not seeing (BUZON-CARPETAS-CONTEO-1)
+
+`sincronizar` reporting `vistos=0` is ambiguous on its own: it means either "this mailbox genuinely had
+nothing new" or "something is stopping this connector from seeing mail that is actually there" (a stuck
+watermark, folders excluded by mistake, `carpetas` narrowed wrong). `carpetas <id>` (above) now answers
+that directly, per folder, without touching the cursor or sending anything to Finanzas: `nuevos` is the
+one field to read. `nuevos=0` on every included folder means no mail arrived -- the watermark is caught up
+with the server's own UIDNEXT, so there is nothing left to see. `nuevos` > 0 on any included folder, while
+`sincronizar`'s own `vistos` keeps reading `0`, means mail IS there and this connector is not seeing it --
+worth investigating (an excluded folder that should be included, a `carpetas` entry that no longer matches,
+a stuck connection). `marca=sin marca` on a folder means this source has never stored a watermark for it
+yet -- its next pass falls back to the date cursor (`cursor.json`), never to `nuevos`, so that field reads
+"sin marca" too: there is nothing stored to count against.
 
 ### One broken folder or message never blocks the rest (BUZON-IMAP-MENSAJE-AISLADO-1)
 

@@ -127,6 +127,21 @@ is a `ProveedorErrorTransitorio`, same as before, and is deliberately NOT
 one of `_ERRORES_DE_CONTENIDO_AISLABLES` and not a `ClienteImapErrorTransitorio`
 either, so neither the per-folder nor the per-message catch below can ever
 mistake a broken connection for a problem with just one folder or message.
+
+BUZON-CARPETAS-CONTEO-1: `diagnosticar_carpeta`, for the `carpetas` operator
+command only -- never called from `listar_mensajes`. `_examinar_carpeta`'s
+own EXAMINE already carries a folder's MESSAGES (EXISTS) count alongside
+UIDVALIDITY/UIDNEXT, so this reads it straight off that same response. The
+folder's own watermark comes from THIS client's own `_cursor_inicial_mapa`
+-- the INITIAL cursor only, exactly what the live pass would have resumed
+from, never updated by this diagnostic itself. How many messages carry a UID
+past that watermark is counted with one more `UID SEARCH`, the same
+"N:*" shape `_buscar_uids` already issues, with the same empty-range guard
+-- never a FETCH, so no content is ever read. `nuevos` is `None` whenever
+`marca` is `None` (never synced under BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1 or
+later) or names a UIDVALIDITY the server no longer has: in both cases a
+count against today's UID sequence would mean nothing, since the live pass
+itself would fall back to the date cursor rather than compare UIDs.
 """
 
 from __future__ import annotations
@@ -626,6 +641,25 @@ def _formato_cursor_multi(mapa: dict[str, tuple[int, int]]) -> str:
     return json.dumps({carpeta: _formato_par(*par) for carpeta, par in mapa.items()}, sort_keys=True)
 
 
+@dataclass(frozen=True)
+class DiagnosticoCarpeta:
+    """One folder's own numbers for the `carpetas` operator command
+    (BUZON-CARPETAS-CONTEO-1) -- counts and UIDs only, never a subject, a
+    sender, a date or any message content. `marca` is this client's own
+    INITIAL stored watermark for this folder (`None` for a source that has
+    never stored one here -- a source synced entirely before
+    BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1 introduced it). `nuevos` is how many
+    messages carry a UID past that watermark, or `None` whenever `marca`
+    is `None` or names a UIDVALIDITY the server no longer has -- in both
+    cases there is nothing to count against."""
+
+    mensajes: int
+    uidnext: int | None
+    uidvalidity: int
+    marca: tuple[int, int] | None
+    nuevos: int | None
+
+
 class ClienteImap:
     def __init__(
         self,
@@ -747,7 +781,40 @@ class ClienteImap:
             key=lambda fila: fila[0],
         )
 
-    def _examinar_carpeta(self, nombre: str) -> tuple[int, int | None]:
+    def diagnosticar_carpeta(self, nombre: str) -> DiagnosticoCarpeta:
+        """For the `carpetas` operator command (BUZON-CARPETAS-CONTEO-1):
+        EXAMINEs `nombre` (same as a live pass would) and reports its own
+        MESSAGES/UIDNEXT/UIDVALIDITY, this client's stored watermark for it,
+        and how many messages carry a UID past that watermark -- counted
+        with one `UID SEARCH`, never a FETCH, so no content is ever read.
+        Read-only: never advances any cursor, since it is diagnostic, not a
+        pass."""
+        uidvalidity, uidnext, mensajes = self._examinar_carpeta(nombre)
+        marca = self._cursor_inicial_mapa.get(nombre)
+        nuevos: int | None = None
+        if marca is not None and marca[0] == uidvalidity:
+            nuevos = self._contar_uids_desde(marca[1] + 1, uidnext)
+        return DiagnosticoCarpeta(
+            mensajes=mensajes, uidnext=uidnext, uidvalidity=uidvalidity, marca=marca, nuevos=nuevos
+        )
+
+    def _contar_uids_desde(self, uid_resumir: int, uidnext: int | None) -> int:
+        """How many UIDs the currently-EXAMINEd folder holds at or past
+        `uid_resumir` -- counts only, via `UID SEARCH`, never a FETCH.
+        Shares `_buscar_uids`'s own empty-range guard: issuing "N:*" with N
+        at or past UIDNEXT is the well-known IMAP quirk where some servers
+        normalize an empty range by returning the LAST message instead of
+        none -- never issued here either."""
+        if uidnext is not None and uid_resumir >= uidnext:
+            return 0
+        conexion = self._conexion_activa()
+        typ, dat = _invocar_conexion("buscar", lambda: conexion.uid("SEARCH", "UID", f"{uid_resumir}:*"))
+        if typ != "OK":
+            raise ClienteImapErrorTransitorio("buscar", detalle=typ)
+        cadena = dat[0].decode("ascii", errors="replace") if dat and dat[0] else ""
+        return len({int(tok) for tok in cadena.split()})
+
+    def _examinar_carpeta(self, nombre: str) -> tuple[int, int | None, int]:
         conexion = self._conexion_activa()
         typ, _ = _invocar_conexion(
             "examinar", lambda: conexion.select(_entrecomillar_imap(nombre), readonly=True)
@@ -760,9 +827,14 @@ class ClienteImap:
             raise ClienteImapErrorTransitorio("uidvalidity-ausente")
         typ_un, dat_un = conexion.response("UIDNEXT")
         uidnext = int(dat_un[0]) if typ_un == "UIDNEXT" and dat_un and dat_un[0] is not None else None
+        # MESSAGES -- the folder's own EXISTS count, already in this same
+        # EXAMINE response (BUZON-CARPETAS-CONTEO-1's `diagnosticar_carpeta`
+        # reads it; the live sync path below never needs it).
+        typ_ex, dat_ex = conexion.response("EXISTS")
+        mensajes = int(dat_ex[0]) if typ_ex == "EXISTS" and dat_ex and dat_ex[0] is not None else 0
 
         self._carpeta_actual = nombre
-        return int(dat_uv[0]), uidnext
+        return int(dat_uv[0]), uidnext, mensajes
 
     def _asegurar_carpeta_seleccionada(self) -> None:
         """`listar_adjuntos_metadata`/`obtener_mensaje_completo` are called
@@ -825,7 +897,7 @@ class ClienteImap:
         for nombre_carpeta in carpetas_incluidas:
             cursor_previo = mapa_cursor.get(nombre_carpeta)
             try:
-                uidvalidity, uidnext = self._examinar_carpeta(nombre_carpeta)
+                uidvalidity, uidnext, _mensajes = self._examinar_carpeta(nombre_carpeta)
                 uids = self._buscar_uids(
                     desde, cursor_previo=cursor_previo, uidvalidity=uidvalidity, uidnext=uidnext
                 )

@@ -20,7 +20,19 @@ entries, which for a source that runs every few minutes can hold as little
 as 3h20 of history -- far too short to notice a mailbox that quietly
 stopped producing anything a day ago. Absent means this source has never
 once seen a message -- not "used to see mail", so `cli.py`'s own
-`_estado_silencio` never calls that silence."""
+`_estado_silencio` never calls that silence FROM `visto.json` alone.
+
+`primera_pasada.json` (BUZON-CARPETAS-CONTEO-1) carries only a timestamp
+too: the UTC instant of the FIRST pass this connector EVER attempted for
+this source, set once and kept forever after -- `visto.json` above is
+`None` for a source that has NEVER once seen a message, and before this
+marker existed that meant `_estado_silencio` could never call such a
+source silent either, however many empty passes it ran: a mailbox that
+never once produced anything from the very start stayed invisible forever,
+which is exactly the failure BUZON-ALERTA-SILENCIO-1 was meant to end.
+`cli.py`'s own `_estado_silencio` falls back to THIS marker only when
+`visto.json` is absent, so a source that used to see mail still measures
+silence from its own last sighting, never from this older marker."""
 
 from __future__ import annotations
 
@@ -32,6 +44,7 @@ from duna_buzon import cripto
 
 NOMBRE_ARCHIVO = "alerta.json"
 NOMBRE_ARCHIVO_VISTO = "visto.json"
+NOMBRE_ARCHIVO_PRIMERA_PASADA = "primera_pasada.json"
 
 
 def _ruta(directorio_fuente: str) -> Path:
@@ -40,6 +53,10 @@ def _ruta(directorio_fuente: str) -> Path:
 
 def _ruta_visto(directorio_fuente: str) -> Path:
     return Path(directorio_fuente) / NOMBRE_ARCHIVO_VISTO
+
+
+def _ruta_primera_pasada(directorio_fuente: str) -> Path:
+    return Path(directorio_fuente) / NOMBRE_ARCHIVO_PRIMERA_PASADA
 
 
 def cargar_auth_fallando_desde(directorio_fuente: str) -> datetime.datetime | None:
@@ -84,3 +101,26 @@ def marcar_ultimo_visto(directorio_fuente: str, momento: datetime.datetime) -> N
     cripto.asegurar_directorio_datos(Path(directorio_fuente))
     contenido = json.dumps({"ultimo_visto_en": momento.isoformat()}).encode("utf-8")
     cripto.escribir_archivo_sensible(_ruta_visto(directorio_fuente), contenido)
+
+
+def cargar_primera_pasada_en(directorio_fuente: str) -> datetime.datetime | None:
+    """The UTC instant of the FIRST pass this connector ever attempted for
+    this source, or `None` when it has never attempted one at all."""
+    ruta = _ruta_primera_pasada(directorio_fuente)
+    if not ruta.is_file():
+        return None
+    datos = json.loads(ruta.read_text(encoding="utf-8"))
+    return datetime.datetime.fromisoformat(datos["primera_pasada_en"])
+
+
+def marcar_primera_pasada(directorio_fuente: str, momento: datetime.datetime) -> None:
+    """Sets `primera_pasada_en` to `momento` ONLY when nothing is stored
+    yet -- the FIRST pass this source ever attempts is the one that
+    sticks, set once and kept forever after (BUZON-CARPETAS-CONTEO-1), so
+    `_estado_silencio`'s own fallback below always names when this
+    connector actually started watching this source, never "now"."""
+    if cargar_primera_pasada_en(directorio_fuente) is not None:
+        return
+    cripto.asegurar_directorio_datos(Path(directorio_fuente))
+    contenido = json.dumps({"primera_pasada_en": momento.isoformat()}).encode("utf-8")
+    cripto.escribir_archivo_sensible(_ruta_primera_pasada(directorio_fuente), contenido)

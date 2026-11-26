@@ -389,10 +389,12 @@ not already an auth alert -- whose own last sighting of mail is older than `BUZO
   "remedio": "ejecute 'entrar --fuente hotmail-carlos' para firmar"}]
 ```
 
-A `"tipo": "silencio"` entry has the same shape, `desde` naming when that source last saw mail and
-`remedio` pointing only at the source id (check the mailbox is still receiving mail, check `reglas.json`
-is not excluding everything) -- never a credential, since a quiet source is not necessarily an auth
-problem. `remedio` for a `"tipo": "auth"` entry is specific to the source: `entrar --fuente <id>` for a
+A `"tipo": "silencio"` entry has the same shape, `desde` naming when that source last saw mail -- or, for a
+source that has NEVER once seen mail, when this connector first started watching it
+(`BUZON-CARPETAS-CONTEO-1`, so such a source can still raise this alert instead of staying invisible
+forever) -- and `remedio` pointing only at the source id (check the mailbox is still receiving mail, check
+`reglas.json` is not excluding everything) -- never a credential, since a quiet source is not necessarily
+an auth problem. `remedio` for a `"tipo": "auth"` entry is specific to the source: `entrar --fuente <id>` for a
 `local`-origen microsoft source, a new app password followed by the same `entrar` for `local`-origen
 imap, and reconnecting in Cuenta Duna for a `origen="cuenta"` source (this connector never holds that
 credential itself). `status`'s own health check does not run this -- `alertas` is its own call, meant for
