@@ -1337,6 +1337,41 @@ def test_archivo_env_permitidas_existe_y_es_json_valido() -> None:
     assert archivo.is_file()
     datos = json.loads(archivo.read_text(encoding="utf-8"))
     assert datos["BUZON_ENVIAR_ORIGEN"] == "^(0|1)$"
+    assert datos["BUZON_ENVIAR_ESTADO_CUENTA"] == "^(0|1)$"
+
+
+# ---------------------------------------------------------------------------
+# `BUZON_ENVIAR_ESTADO_CUENTA` allowlisted for `env-set` (BUZON-ESTADO-
+# INTERRUPTOR-PERMITIDO-1) -- same pattern as `BUZON_ENVIAR_ORIGEN`, matching
+# exactly what `Config` accepts as "on" at the shell-allowlist layer: `0`/`1`
+# only, never the wider `"1"`/`"true"` `Config.enviar_estado_cuenta` itself
+# tolerates.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("valor", "coincide"),
+    [
+        ("0", True),
+        ("1", True),
+        ("2", False),
+        ("true", False),
+        ("01", False),
+        ("", False),
+        ("1 ", False),
+    ],
+)
+def test_env_set_estado_cuenta_acepta_0_y_1_y_rechaza_el_resto(valor: str, coincide: bool) -> None:
+    archivo = REPO_ROOT / "deploy" / "host" / "env-permitidas.json"
+    comando = "source {script}; patron=$({funcion} {archivo} {clave}); [[ {valor} =~ $patron ]]".format(
+        script=shlex.quote(str(ENTRY_SCRIPT)),
+        funcion="_patron_permitido",
+        archivo=shlex.quote(str(archivo)),
+        clave=shlex.quote("BUZON_ENVIAR_ESTADO_CUENTA"),
+        valor=shlex.quote(valor),
+    )
+    resultado = subprocess.run([_BASH, "-c", comando], check=False, capture_output=True, text=True)
+    assert resultado.returncode == (0 if coincide else 1), resultado.stderr
 
 
 def test_readme_documenta_reglas_y_env_set() -> None:

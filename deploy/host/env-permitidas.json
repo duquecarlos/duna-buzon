@@ -1,3 +1,4 @@
 {
-  "BUZON_ENVIAR_ORIGEN": "^(0|1)$"
+  "BUZON_ENVIAR_ORIGEN": "^(0|1)$",
+  "BUZON_ENVIAR_ESTADO_CUENTA": "^(0|1)$"
 }
