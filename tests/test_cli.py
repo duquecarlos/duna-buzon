@@ -671,6 +671,73 @@ def test_sincronizar_sin_top_de_graph_no_lo_imprime(
     assert "top=" not in salida.out
 
 
+def test_sincronizar_registra_omitidos_por_error_proveedor_en_estado_y_en_historial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """BUZON-IMAP-MENSAJE-AISLADO-1: a provider that skipped a folder or a
+    message of its own (`ClienteImap.omitidos_por_error_proveedor`, read
+    the same way `top_lista_usado` already is) gets it printed in
+    `estado`'s own line and folded into `historial.jsonl`'s `omitidos`
+    total -- a provider with no such concept (Microsoft, Gmail,
+    `_ProveedorFalso`) reports 0 and prints nothing, exactly like today."""
+    from duna_buzon import historial
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+
+    class _ProveedorConOmitidos:
+        omitidos_por_error_proveedor = 3
+
+        def cerrar(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        cli,
+        "construir_proveedor",
+        lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorConOmitidos(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "ejecutar_pasada",
+        lambda **kwargs: ResultadoPasada(
+            contadores=Contadores(vistos=4, reenviados=1, omitidos_por_reglas=0, omitidos_por_413_422=0)
+        ),
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    salida = capsys.readouterr()
+    assert "omitidos_por_error_proveedor=3" in salida.out
+
+    registros, descartadas = historial.leer_historial(directorio)
+    assert descartadas == 0
+    assert registros[-1].omitidos == 3
+
+
+def test_sincronizar_sin_omitidos_de_proveedor_no_lo_imprime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A provider with no `omitidos_por_error_proveedor` at all (the plain
+    `_ProveedorFalso` test fake, and every Microsoft/Gmail pass) never gets
+    a guessed `omitidos_por_error_proveedor=` in the status line."""
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1, reenviados=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    salida = capsys.readouterr()
+    assert "omitidos_por_error_proveedor=" not in salida.out
+
+
 def test_sincronizar_sin_enviar_origen_no_pasa_etiqueta_ni_imprime_nada(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

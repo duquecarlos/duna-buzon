@@ -65,12 +65,33 @@ whose `httpx.Client` does not connect until the first request) --
 `construir_proveedor` can build this client without risking an exception
 outside `sincronizar.py`'s own try/except, so one source's bad credential
 never stops another source's pass.
+
+BUZON-IMAP-MENSAJE-AISLADO-1: one folder's own `EXAMINE`/`SEARCH`, or one
+message's own FETCH or content (a header, BODYSTRUCTURE or INTERNALDATE
+this module's own hand-written parser cannot make sense of), no longer
+kills `listar_mensajes` outright. Before this slice, EITHER raised straight
+out of this generator, UNCAUGHT, which `sincronizar.py`'s own single
+try/except turns into a whole-pass stop -- and since the per-folder cursor
+can never advance past a message a pass could not finish (invariant 5), the
+SAME folder or message would be hit again, identically, on every future
+pass: a source could see its own folders list fine (`carpetas <id>` never
+goes through this code path) while forwarding nothing at all, forever, from
+one bad folder or one malformed message it happened to reach first. Now
+each is caught, skipped and counted (`omitidos_por_error_proveedor`, read by
+`cli.py` the same way `GraphClient.reintentos_usados`/`top_lista_usado`
+already are) -- every OTHER folder, and every OTHER message, still gets
+processed and forwarded in the SAME pass. Never a connection-level failure:
+`OSError`/`imaplib.IMAP4.abort` are not in the caught tuple, so those still
+propagate and stop the whole pass exactly as before -- only a clean,
+protocol- or content-level problem with ONE specific folder or message is
+treated as skippable.
 """
 
 from __future__ import annotations
 
 import datetime
 import email
+import email.errors
 import email.header
 import email.utils
 import json
@@ -161,6 +182,27 @@ class ClienteImapAutenticacionError(ClienteImapError, ProveedorAutenticacionErro
 class ClienteImapErrorTransitorio(ClienteImapError, ProveedorErrorTransitorio):
     """Any other failure talking to the server: a connection problem, or a
     command the server did not answer `OK` to. Treated as transient."""
+
+
+# Raised by this module's own hand-written IMAP grammar (`_parsear_valor`
+# and everything built on it) or by the stdlib `email` parser against one
+# folder's `EXAMINE` response or one message's own FETCH/headers/
+# BODYSTRUCTURE -- never a connection-level failure (a broken socket raises
+# `OSError`/`imaplib.IMAP4.abort`, neither of which is in this tuple, so
+# those still propagate and stop the whole pass, exactly as before this
+# slice). `listar_mensajes` catches exactly this tuple to skip ONE folder or
+# ONE message rather than let it kill every other one in the same pass
+# (BUZON-IMAP-MENSAJE-AISLADO-1) -- the same "one odd entry must never stop
+# every other one from being read" principle `_listar_carpetas_crudo`
+# already applies to a single unparseable `LIST` line.
+_ERRORES_DE_CONTENIDO_AISLABLES = (
+    ClienteImapErrorTransitorio,
+    ValueError,
+    IndexError,
+    LookupError,
+    UnicodeError,
+    email.errors.MessageError,
+)
 
 
 class ConexionImapProtocolo(Protocol):
@@ -527,6 +569,13 @@ class ClienteImap:
         self._cursor_inicial = cursor_proveedor_inicial
         self._cursor_inicial_mapa = _analizar_cursor_multi(cursor_proveedor_inicial)
         self._carpetas = tuple(carpetas) if carpetas is not None else None
+        # Public, read the same way `GraphClient.reintentos_usados`/
+        # `top_lista_usado` are (`cli.py`'s own `getattr(proveedor, ...,
+        # 0)`): one folder's own `EXAMINE`, or one message's own FETCH or
+        # parse, that this client could not make sense of and skipped
+        # rather than let block every other folder or message this pass
+        # (BUZON-IMAP-MENSAJE-AISLADO-1).
+        self.omitidos_por_error_proveedor: int = 0
         self._construir_conexion = construir_conexion
         self._conexion: ConexionImapProtocolo | None = None
         self._carpeta_actual: str | None = None
@@ -689,16 +738,48 @@ class ClienteImap:
         }
 
         for nombre_carpeta in carpetas_incluidas:
-            uidvalidity, uidnext = self._examinar_carpeta(nombre_carpeta)
             cursor_previo = mapa_cursor.get(nombre_carpeta)
-
-            for uid in self._buscar_uids(
-                desde, cursor_previo=cursor_previo, uidvalidity=uidvalidity, uidnext=uidnext
-            ):
-                texto, literal = self._fetch_uno(
-                    uid, "UID INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT MESSAGE-ID)] BODYSTRUCTURE"
+            try:
+                uidvalidity, uidnext = self._examinar_carpeta(nombre_carpeta)
+                uids = self._buscar_uids(
+                    desde, cursor_previo=cursor_previo, uidvalidity=uidvalidity, uidnext=uidnext
                 )
-                recibido_en = _parsear_internaldate(texto)
+            except ClienteImapErrorTransitorio:
+                # This ONE folder's own `EXAMINE`/`SEARCH` failed -- a
+                # server-side problem with this specific folder, never a
+                # connection failure (that raises `OSError`/`imaplib.
+                # IMAP4.abort` instead, uncaught here, so it still stops
+                # the whole pass exactly as before this slice). Every
+                # OTHER folder must still get its own chance
+                # (BUZON-IMAP-MENSAJE-AISLADO-1); this folder's own stored
+                # cursor is left untouched, so it is retried, not lost,
+                # the next time this folder's own problem clears.
+                self.omitidos_por_error_proveedor += 1
+                continue
+
+            for uid in uids:
+                try:
+                    texto, literal = self._fetch_uno(
+                        uid, "UID INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT MESSAGE-ID)] BODYSTRUCTURE"
+                    )
+                    recibido_en = _parsear_internaldate(texto)
+                    remitente, asunto, message_id = _parsear_cabeceras(literal or b"")
+                    hojas = _particionar_bodystructure(_parsear_bodystructure(texto))
+                except _ERRORES_DE_CONTENIDO_AISLABLES:
+                    # This ONE message's own FETCH, or its own content,
+                    # could not be made sense of -- deterministic, and
+                    # would otherwise repeat forever on every future pass
+                    # since the cursor can never advance past a message
+                    # that keeps failing. Skipped and counted instead of
+                    # killing the rest of this folder and every folder
+                    # after it (BUZON-IMAP-MENSAJE-AISLADO-1): the next
+                    # pass's own `UID <n>:*` search still names this UID
+                    # again (never advanced past on its own), so it is
+                    # retried, and re-skipped, harmlessly -- it never
+                    # blocks a genuinely newer message in the same result.
+                    self.omitidos_por_error_proveedor += 1
+                    continue
+
                 if recibido_en < desde:
                     # Only the SINCE-date fallback (day granularity) can ever
                     # return something earlier than `desde` -- the UID-resume
@@ -706,8 +787,6 @@ class ClienteImap:
                     # strictly newer than the last one processed.
                     continue
 
-                remitente, asunto, message_id = _parsear_cabeceras(literal or b"")
-                hojas = _particionar_bodystructure(_parsear_bodystructure(texto))
                 tiene_adjuntos = any(hoja.es_adjunto for hoja in hojas)
 
                 mapa_cursor[nombre_carpeta] = (uidvalidity, uid)

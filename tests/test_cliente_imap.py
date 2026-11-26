@@ -169,8 +169,17 @@ class _ServidorImapFalso:
         fallar_login: bool = False,
         carpetas: list[_CarpetaFalsa] | None = None,
         delimitador: str = "/",
+        carpetas_examine_falla: frozenset[str] = frozenset(),
+        uids_fetch_falla: frozenset[int] = frozenset(),
     ) -> None:
         self._delimitador = delimitador
+        # BUZON-IMAP-MENSAJE-AISLADO-1: a named folder whose `EXAMINE`
+        # always answers NO (a server-side problem with THAT folder, not a
+        # connection failure), or a UID whose FETCH always answers NO --
+        # proving one broken folder or message never blocks every other
+        # one in the same pass.
+        self._carpetas_examine_falla = carpetas_examine_falla
+        self._uids_fetch_falla = uids_fetch_falla
         if carpetas is None:
             carpetas = [
                 _CarpetaFalsa(
@@ -248,7 +257,9 @@ class _ServidorImapFalso:
                 elif comando in ("EXAMINE", "SELECT"):
                     nombre_carpeta = _desentrecomillar(resto2)
                     carpeta = self.carpetas.get(nombre_carpeta)
-                    if carpeta is None:
+                    if nombre_carpeta in self._carpetas_examine_falla:
+                        enviar_texto(f"{tag} NO [SERVERFAILURE] cannot examine this mailbox")
+                    elif carpeta is None:
                         enviar_texto(f"{tag} NO [NONEXISTENT] no such mailbox")
                     else:
                         self._carpeta_seleccionada = carpeta
@@ -312,6 +323,9 @@ class _ServidorImapFalso:
         return cls._parsear_fecha(internaldate.split(" ")[0])
 
     def _fetch(self, tag: str, uid: int, items: str, enviar_texto, enviar_bytes) -> None:
+        if uid in self._uids_fetch_falla:
+            enviar_texto(f"{tag} NO [SERVERFAILURE] cannot fetch this message")
+            return
         mensaje = self._mensajes_carpeta_actual.get(uid)
         if mensaje is None:
             enviar_texto(f"{tag} OK UID FETCH completed")
@@ -988,3 +1002,131 @@ def test_conexion_ssl_real_usa_el_timeout_explicito(monkeypatch: pytest.MonkeyPa
         "puerto": 993,
         "timeout": temporizadores.TIMEOUT_IMAP_SEGUNDOS,
     }
+
+
+# ---------------------------------------------------------------------------
+# BUZON-IMAP-MENSAJE-AISLADO-1: one broken folder or one unparseable
+# message is skipped and counted, never kills the rest of the pass.
+# ---------------------------------------------------------------------------
+
+
+def test_mensaje_con_internaldate_invalida_se_omite_y_no_bloquea_el_resto() -> None:
+    # UID 2's own INTERNALDATE names a month this provider cannot parse --
+    # before this slice, `_parsear_internaldate` raised straight out of the
+    # generator, so UID 3 (newer, perfectly fine) would never even be
+    # attempted. A cursor is given so `_buscar_uids` resumes BY UID, never
+    # touching the fake server's own date comparisons.
+    mensajes = [
+        _mensaje_simple(1, internaldate="01-Mar-2026 10:00:00 +0000"),
+        _mensaje_simple(2, internaldate="01-Xyz-2026 10:00:00 +0000", asunto="rota"),
+        _mensaje_simple(3, internaldate="03-Mar-2026 10:00:00 +0000", asunto="buena"),
+    ]
+    with _ServidorImapFalso(mensajes, uidvalidity=1000, uidnext=4) as servidor:
+        cliente = _cliente(servidor, cursor_proveedor_inicial="1000:1")
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.id for m in resultado} == {"3"}
+    assert resultado[0].asunto == "buena"
+    assert cliente.omitidos_por_error_proveedor == 1
+
+
+def test_fallo_de_fetch_en_un_mensaje_no_bloquea_los_siguientes() -> None:
+    # The server answers NO to UID 2's own FETCH -- a message-specific
+    # problem, never a connection failure -- while UID 3 fetches fine.
+    mensajes = [
+        _mensaje_simple(1, internaldate="01-Mar-2026 10:00:00 +0000"),
+        _mensaje_simple(2, internaldate="02-Mar-2026 10:00:00 +0000", asunto="rota"),
+        _mensaje_simple(3, internaldate="03-Mar-2026 10:00:00 +0000", asunto="buena"),
+    ]
+    with _ServidorImapFalso(
+        mensajes, uidvalidity=1000, uidnext=4, uids_fetch_falla=frozenset({2})
+    ) as servidor:
+        cliente = _cliente(servidor, cursor_proveedor_inicial="1000:1")
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.id for m in resultado} == {"3"}
+    assert cliente.omitidos_por_error_proveedor == 1
+
+
+def test_bodystructure_ilegible_se_omite_y_no_bloquea_el_resto() -> None:
+    # A message whose own BODYSTRUCTURE this provider's hand-written parser
+    # cannot walk (an empty parenthesized list -- `valor[0]` raises
+    # `IndexError`) must not take the rest of the folder down with it.
+    roto = _mensaje_simple(2, internaldate="02-Mar-2026 10:00:00 +0000", asunto="rota")
+    roto.partes = []  # `_bodystructure_mensaje` below renders this as `()`.
+    mensajes = [
+        _mensaje_simple(1, internaldate="01-Mar-2026 10:00:00 +0000"),
+        roto,
+        _mensaje_simple(3, internaldate="03-Mar-2026 10:00:00 +0000", asunto="buena"),
+    ]
+    with _ServidorImapFalso(mensajes, uidvalidity=1000, uidnext=4) as servidor:
+        cliente = _cliente(servidor, cursor_proveedor_inicial="1000:1")
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.id for m in resultado} == {"3"}
+    assert cliente.omitidos_por_error_proveedor == 1
+
+
+def test_examine_fallido_en_una_carpeta_no_bloquea_las_demas() -> None:
+    # "Facturas" always answers NO to EXAMINE (a server-side problem with
+    # THAT folder -- the SAME shape `carpetas <id>` would never surface,
+    # since `LIST` never calls `EXAMINE` at all), while INBOX is perfectly
+    # healthy. Before this slice, the one `ClienteImapErrorTransitorio`
+    # this raised killed `listar_mensajes` outright, so INBOX's own mail
+    # never even got a chance -- in whichever order the two folders sort.
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={1: _mensaje_simple(1, asunto="debe aparecer")})
+    facturas = _CarpetaFalsa(nombre="Facturas", mensajes={1: _mensaje_simple(1, asunto="nunca se ve")})
+    with _ServidorImapFalso(
+        carpetas=[inbox, facturas], carpetas_examine_falla=frozenset({"Facturas"})
+    ) as servidor:
+        cliente = _cliente(servidor)
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"debe aparecer"}
+    assert cliente.omitidos_por_error_proveedor == 1
+
+
+def test_conexion_rota_durante_fetch_sigue_deteniendo_toda_la_pasada() -> None:
+    # A genuine transport failure (never a clean NO/BAD response) must
+    # still propagate and stop the whole pass -- this slice only isolates
+    # a protocol- or content-level problem with ONE folder or message,
+    # never a broken connection.
+    class _ConexionQueRompe:
+        def list(self, *a: object, **k: object) -> tuple[str, list[object]]:
+            return "OK", [b'() "/" "INBOX"']
+
+        def select(self, *a: object, **k: object) -> tuple[str, list[object]]:
+            return "OK", [b"1"]
+
+        def response(self, nombre: str) -> tuple[str, list[object]]:
+            if nombre == "UIDVALIDITY":
+                return "UIDVALIDITY", [b"1000"]
+            return "UIDNEXT", [b"5"]
+
+        def uid(self, comando: str, *a: object, **k: object) -> tuple[str, list[object]]:
+            if comando == "SEARCH":
+                return "OK", [b"2"]
+            raise OSError("connection reset")  # FETCH -- a genuine transport break
+
+        def login(self, *a: object, **k: object) -> tuple[str, list[object]]:
+            return "OK", [b""]
+
+        def logout(self) -> tuple[str, list[object]]:
+            return "OK", [b""]
+
+    cliente = ClienteImap(
+        host="127.0.0.1",
+        puerto=1,
+        usuario="legal@duna.solutions",
+        password="app-password",
+        cursor_proveedor_inicial="1000:1",
+        construir_conexion=lambda h, p: _ConexionQueRompe(),
+    )
+
+    with pytest.raises(OSError):
+        list(cliente.listar_mensajes(_DESDE))
+    cliente.cerrar()

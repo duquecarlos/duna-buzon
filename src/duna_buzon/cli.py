@@ -178,15 +178,22 @@ def comando_entrar(config: Config, id_fuente: str | None) -> int:
 
 
 def _agregar_historial(
-    directorio: str, contadores: Contadores, motivo: str | None, finalizado_en: datetime.datetime
+    directorio: str,
+    contadores: Contadores,
+    motivo: str | None,
+    finalizado_en: datetime.datetime,
+    *,
+    omitidos_por_error_proveedor: int = 0,
 ) -> None:
     """Appends this pass's summary to the source's bounded history
     (`historial.py`), right beside the `estado.json` write that already
     carries the same numbers -- `estado.json` itself is untouched by this
     slice, so every existing reader of it keeps working. `omitidos` merges
-    the two skip counters (`omitidos_por_reglas`, `omitidos_por_413_422`):
-    the compact table is a trend view, not the full breakdown `estado.json`
-    and `registro.linea_resumen` still carry for the latest pass."""
+    every skip counter (`omitidos_por_reglas`, `omitidos_por_413_422`, and --
+    for a provider that has one -- `omitidos_por_error_proveedor`,
+    BUZON-IMAP-MENSAJE-AISLADO-1): the compact table is a trend view, not
+    the full breakdown `estado.json` and `registro.linea_resumen` still
+    carry for the latest pass."""
     modulo_historial.agregar_pasada(
         directorio,
         modulo_historial.RegistroPasada(
@@ -194,7 +201,11 @@ def _agregar_historial(
             vistos=contadores.vistos,
             reenviados=contadores.reenviados,
             duplicados=contadores.duplicados,
-            omitidos=contadores.omitidos_por_reglas + contadores.omitidos_por_413_422,
+            omitidos=(
+                contadores.omitidos_por_reglas
+                + contadores.omitidos_por_413_422
+                + omitidos_por_error_proveedor
+            ),
             errors=motivo,
         ),
     )
@@ -312,6 +323,13 @@ def _ejecutar_una_fuente(
     # other provider has no such concept, so this omits it for them rather
     # than guessing a number that means nothing there.
     top_usado = getattr(proveedor, "top_lista_usado", None)
+    # `omitidos_por_error_proveedor` is `ClienteImap`'s own counter
+    # (BUZON-IMAP-MENSAJE-AISLADO-1): one folder's own `EXAMINE`, or one
+    # message's own FETCH/parse, that the provider could not make sense of
+    # and skipped rather than let block every other folder or message in
+    # this source's pass. Microsoft and Gmail have no such concept yet, so
+    # this reports 0 for them -- never a guess.
+    omitidos_proveedor = getattr(proveedor, "omitidos_por_error_proveedor", 0)
     momento = _ahora()
     linea = registro.linea_resumen(
         resultado.contadores,
@@ -319,10 +337,17 @@ def _ejecutar_una_fuente(
         finalizado_en=momento,
         reintentos=reintentos,
         top=top_usado,
+        omitidos_por_error_proveedor=omitidos_proveedor,
     )
     cripto.asegurar_directorio_datos(Path(directorio))
     cripto.escribir_archivo_sensible(Path(directorio) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8"))
-    _agregar_historial(directorio, resultado.contadores, resultado.motivo, momento)
+    _agregar_historial(
+        directorio,
+        resultado.contadores,
+        resultado.motivo,
+        momento,
+        omitidos_por_error_proveedor=omitidos_proveedor,
+    )
     return linea, resultado.motivo, resultado.detenida_por_autenticacion
 
 

@@ -18,8 +18,10 @@ BUZON-CARPETAS-MICROSOFT-CLI-1; `estado` gained a bounded per-source pass histor
 nothing, or failed, no longer hides what the ones before it did, by BUZON-ESTADO-HISTORIAL-PASADAS-1; a source
 whose credential has died (app password revoked, OAuth refresh token expired or revoked) becomes VISIBLE --
 an ALERTA in `estado`, in the journal, and in a machine-readable `alertas` subcommand -- by
-BUZON-ALERTA-AUTH-1. See `CLAUDE.md` for the gate and the invariants, `DECISIONS.md` for the ledger, and
-`deploy/host/README.md` for the operator steps.
+BUZON-ALERTA-AUTH-1; an IMAP source's own `listar_mensajes` no longer lets one broken folder or one
+unparseable message kill the whole pass -- each is skipped and counted
+(`omitidos_por_error_proveedor`) instead, by BUZON-IMAP-MENSAJE-AISLADO-1. See `CLAUDE.md` for the gate
+and the invariants, `DECISIONS.md` for the ledger, and `deploy/host/README.md` for the operator steps.
 
 ## Shape
 
@@ -126,7 +128,10 @@ The commands:
   `$top=1`, before finally giving up -- the same messages, in the same order, just fewer per page; see "When Graph
   can't list the whole mailbox" below.
 - `estado [--pasadas <n>]` -- prints every source's own cursor and last-pass counts, when that pass finished,
-  how many Graph retries it used, and -- for a Microsoft source -- the `$top` it was last using. Nothing
+  how many Graph retries it used, and -- for a Microsoft source -- the `$top` it was last using. For an IMAP
+  source, `omitidos_por_error_proveedor` also appears, but only when it is not zero: how many folders or
+  messages this pass's own provider skipped because it could not make sense of them
+  (`BUZON-IMAP-MENSAJE-AISLADO-1`, see "One broken folder or message never blocks the rest" below). Nothing
   personal. Below that, a compact table of up to 5 PREVIOUS passes (`finalizado_en`, `vistos`, `reenviados`,
   `duplicados`, `omitidos`, `errors`), most recent first, read from that source's own `historial.jsonl`
   (`BUZON-ESTADO-HISTORIAL-PASADAS-1`) -- so a pass that forwarded nothing, or failed, no longer hides what
@@ -231,6 +236,22 @@ carpeta='Sent' banderas=\Sent leida=no
 Changing `carpetas` on an existing source takes effect the next `sincronizar` pass: a folder's own stored cursor
 (`cursor_proveedor.json`) is kept exactly where it was while that folder stays included, and dropped the moment it
 is not -- never carried forward silently for a folder this source no longer reads.
+
+### One broken folder or message never blocks the rest (BUZON-IMAP-MENSAJE-AISLADO-1)
+
+Before this slice, an IMAP source's own `EXAMINE` failing for ONE folder, or one message's own FETCH or
+content (a header, `BODYSTRUCTURE` or `INTERNALDATE` this provider's hand-written parser could not make
+sense of), raised straight out of `listar_mensajes` and stopped the whole pass -- and since the cursor
+never advances past a message a pass could not finish, the SAME folder or message would be hit again,
+identically, on every future pass. A source could see its own folders list fine (`carpetas <id>` never
+goes through this code path at all) while forwarding nothing, from any folder, forever.
+
+Now each is caught, skipped and counted instead -- never a connection-level failure (a broken socket still
+stops the whole pass, exactly as before): every OTHER folder, and every OTHER message, still gets
+processed and forwarded in the SAME pass. The count surfaces as `omitidos_por_error_proveedor` in
+`estado`'s own line (only when it is not zero) and is folded into `historial.jsonl`'s own `omitidos`
+total. The one broken folder or message is retried, and re-skipped, on every future pass too -- harmless,
+since it never blocks a genuinely newer message or folder.
 
 ### When Graph can't list the whole mailbox (BUZON-GRAPH-502-1)
 
