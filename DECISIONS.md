@@ -2699,3 +2699,111 @@ a claim that it did not trip.
 
 Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): a visibility feature over existing
 failure signals, no wire, no schema, directly named by the approval.
+
+## BUZON-ESTADO-A-CUENTA-1 -- a status heartbeat per pass to Cuenta Duna (2026-11-25)
+
+### Why
+
+Carlos, through Main: «Why? I thought we had connected my hotmail, my gmail and the @duna.solutions
+mail» (`ORCH-BUZON-FUENTES-EN-CUENTA-SHAPE-2026-11-25`). A mailbox this connector reads by itself (its
+own `local`-origen credential, or one pulled through Cuenta Duna) is invisible inside Cuenta -- Cuenta
+only ever listed the sources IT connected. Cuenta should show every mailbox that reaches the person's
+books, with where it is connected, so Main decided the shape in
+`../dev-protocol/contracts/buzon-estado-a-cuenta-v1.md` and split it in two: Cuenta's own receiver
+(`CUENTA-API-BUZON-ESTADO-RECEPTOR-1`, not yet built) and this slice, Buzón's own sender, built now
+against that contract and switched off until the receiver is live.
+
+### What changed
+
+`cuenta.py`'s `CuentaClient` gained `enviar_estado(fuentes, *, enviado_en)` -- `POST
+/servicio/buzon/estado/{sub}`, the same HTTP Basic `buzon` client credential `listar_fuentes` already
+uses, restating the contract's own wire verbatim: a body of exactly `{"fuentes": [...], "enviado_en":
+"<UTC>"}`, each row exactly `{"fuente_id", "proveedor", "direccion_enmascarada", "etiqueta", "origen",
+"ultimo_paso_en", "vistos", "reenviados", "alerta"}` -- never a subject, a sender, a token, or the real
+address. `enmascarar_direccion` (public, directly tested) builds `"c***@hotmail.com"` from
+`"carlos@hotmail.com"`, the contract's own example; it is the ONLY place an address is masked, so no
+caller can forget to. A non-204 or a transport failure raises the SAME `CuentaPullError` `listar_fuentes`
+already raises -- widened with a `paso` field (default `"fuentes"`, so every existing call and test keeps
+its exact `motivo` string unchanged) so this new call's own failures read `cuenta estado http=...` /
+`cuenta estado error=...`, distinct from the pull's `cuenta fuentes ...`.
+
+`cli.py`'s `comando_sincronizar` calls this ONCE, at the very end of every pass (after the per-source
+loop, whatever its own outcome), through a new `_enviar_estado_a_cuenta`: a no-op unless BOTH
+`Config.enviar_estado_cuenta` (the new switch) and `Config.cuenta_configurada` hold. This connector
+serves exactly one person today, so that one configured `sub` is the "owner sub" for every source it
+has, local or Cuenta-sourced alike -- the contract's "a fuente with no sub is not sent" read at the whole
+deployment's level: no Cuenta Duna configured at all means no sub to push under, switch or no switch.
+`_estado_wire_para` builds each source's own row from `modulo_fuentes.listar_fuentes` (the FULL set, active
+and inactive, local and `origen="cuenta"` alike) and that source's own `historial.jsonl` (its LATEST
+recorded pass -- this run's own fresh `vistos`/`reenviados` for a source that just ran, since
+`_agregar_historial` already wrote them earlier in this same pass; the previous run's for one that did
+not run this time, never a fabricated 0/0, which would read as "checked, found nothing" rather than "did
+not run"). A source with no `historial.jsonl` at all (never completed a single pass) is left out of THIS
+heartbeat, not sent with made-up numbers -- it joins the next one the moment its first pass finishes.
+`origen` maps `local` -> `"buzon"`, `cuenta` -> `"cuenta"`, per the contract's own two values.
+`alerta="reingreso_requerido"` for exactly the two reconnect-needed cases this connector already tracks --
+an `origen="cuenta"` source Cuenta Duna no longer returns (`activa=False`), or a `local` source past its
+own `BUZON_ALERTA_AUTH_HORAS` threshold (the SAME `cli._estado_alerta` helper `estado`/`alertas` already
+share) -- `None` otherwise; the contract's own `"error"` value is never sent, since this connector has no
+other failure it can attribute to one source today. A failed push is caught here exactly like
+`_pull_fuentes_cuenta`'s own failure path: one `cuenta: <motivo>` line on stderr, the pass's own exit code
+untouched.
+
+A new config setting, `BUZON_ENVIAR_ESTADO_CUENTA` (`config.py`), off unless set to exactly `1` or
+`true`, same shape as `BUZON_ENVIAR_ORIGEN` -- off for every deployment before this slice, and meant to
+stay off until `CUENTA-API-BUZON-ESTADO-RECEPTOR-1` deploys. `README.md` documents the setting, the
+route, every field, the masking, the two `origen`/`alerta` values this connector actually sends, and that
+a never-run source is left out until its first pass.
+
+### Tests, measured
+
+19 new `def test_` functions (`git diff main -- tests/ | grep -c '^+def test_'`), two of them
+parametrized into 7 more collected items (`BUZON_ENVIAR_ESTADO_CUENTA`'s on/off value table, mirroring
+`BUZON_ENVIAR_ORIGEN`'s own in `tests/test_config.py`). In `tests/test_cuenta.py` -- `enmascarar_direccion`
+against the contract's own example and an address with no `@`; `enviar_estado`'s route and `sub`, HTTP
+Basic auth, a 204 raising nothing, a 404 and a transport error each raising `CuentaPullError` with
+`paso="estado"` and the matching `motivo`; the request body carries EXACTLY the nine contract fields and
+nothing else, and never the unmasked address even in the raw bytes on the wire; `listar_fuentes`'s own
+existing `motivo` strings are unchanged (`paso` defaults to `"fuentes"`). In `tests/test_cli.py` -- the
+switch off means `enviar_estado` is never called even though Cuenta is otherwise fully configured (the
+existing pull still runs); switched on, a clean local pass's heartbeat carries that source's own id,
+provider, unmasked-until-the-client address, label, `origen="buzon"`, this pass's `vistos`/`reenviados`,
+and no alert; a Cuenta-pulled source's own row carries `origen="cuenta"`; a revoked Cuenta source still
+appears (from its last pass's own historial) with `alerta="reingreso_requerido"` while an unaffected local
+source in the same heartbeat carries no alert; an inactive, never-run source is left out of the heartbeat
+entirely, with no `historial.jsonl` written for it at all; `enviar_estado` raising leaves the pass GREEN,
+with the one `cuenta: cuenta estado http=500` line on stderr.
+
+`.venv/Scripts/python.exe -m pytest --junit-xml=.gate-out/gate.xml -q` on the slice branch
+(`feat/buzon-estado-a-cuenta-1`), on the final tree (commit `756f0709623a700b16009f76558a70587de51047`):
+
+    682 passed, 9 skipped in 917.56s
+
+691 total (682 + 9) against this slice's own base (`main` at `abdc84b82c215ea4891f33eb9219421fa71312d3`,
+665 total: `BUZON-ALERTA-AUTH-1`'s own recorded 656 passed + 9 skipped) -- 26 new collected items, matching
+the 19 new function defs plus the 7 extra parametrized cases counted above. No drift: this run's own
+first attempt was moved to the harness's background past its foreground cap; a stale `.gate-out/gate.xml`
+already sitting on disk (from an unrelated earlier local run, mtime 2026-11-23) was never read as this
+run's result -- this entry's figures come only from the file once its own mtime advanced past that
+leftover's, confirming it as THIS run's write. The 9 skips are the same pre-existing Windows file-mode
+skips every earlier slice in this ledger has recorded.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database. No cross-repo contract change: this slice only
+CONSUMES Cuenta Duna's own, already-decided `buzon-estado-a-cuenta-v1.md` (Main's own, written before
+this slice started, in `../dev-protocol`) -- it defines or changes no contract any other repository
+reads, the file itself is untouched by this diff, and the Finanzas buzon-v1 wire is untouched too, same
+reasoning `BUZON-FUENTES-PULL-1` recorded for its own, symmetric pull. Customer-facing bytes DID change,
+on the broader reading `BUZON-ALERTA-AUTH-1` already adopted in this same ledger: the new `cuenta: cuenta
+estado ...` stderr line and the new README section are bytes an OPERATOR reads (Carlos, Main, the desk) --
+never a customer of a Duna product, and the feature itself stays off by default, but this slice records
+the condition as tripped rather than narrowing it. The approval's own words -- "MERGE IS APPROVED on
+GREEN. Main deploys (the switch stays off)." -- are an explicit, in-words authorization to merge past a
+tripped condition once the gate is green, so this slice merges without waiting, same as `BUZON-ALERTA-
+AUTH-1` before it.
+
+### Attribution
+
+Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): the sender half of a two-repository
+contract it already wrote, additive and switched off, directly named by the approval.
