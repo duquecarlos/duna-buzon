@@ -3484,3 +3484,119 @@ to fix (2), the silence-alert floor, which found and fixed a real one (3), and t
    real mailbox, which only an operator with host access can do. This slice built the tool that answers it
    (`nuevos` per folder); running it against the live source is the next step, owned by whoever has host
    access, not by a future code slice.
+
+---
+
+## BUZON-IMAP-BODYSTRUCTURE-CACHE-1 -- an attachment's BODYSTRUCTURE is fetched once, not three times (2026-11-26)
+
+### Why -- this ledger's own named follow-up list had nothing buildable left
+
+Carlos's own overnight direction (via the desk, `ORCH-CARLOS-DELEGATES-TIER-1-1`), relayed through dispatch
+`BUZON-SIGUIENTE-SEGUIMIENTO-2026-11-26-C`: pick the most valuable OPEN follow-up this repository's own
+ledger and worker reports name, preferring a real defect in mail delivery over hygiene. `BUZON-CARPETAS-
+CONTEO-1`'s own ranked list (above) named exactly two, and both were out of reach for this slice: item 1
+(`BUZON-ALERTA-CONSOLE-LINE-1`) is cross-repo, outside this repository's own `touches:`, and this dispatch's
+own spec named it explicitly NOT this slice; item 2 (`duna-zoho`'s own `vistos=0`) the dispatch's own spec
+reported as already SETTLED overnight -- that source's INBOX fully read, 35 of 35, `nuevos=0` -- so re-
+investigating it was explicitly out of scope too. Every OTHER follow-up this ledger ever named before this
+entry was already re-verified closed by a later slice (`BUZON-IMAP-CONEXION-ROTA-1`'s own compiled list,
+re-read here against the code, not just the prose).
+
+With the ledger's own list exhausted, this slice read every module under `src/duna_buzon/` fresh against
+this repository's invariants, the same way `BUZON-IMAP-CONEXION-ROTA-1`/`BUZON-IMAP-MENSAJE-AISLADO-1`
+found their own defects: `sincronizar.py`, `graph.py`, `gmail.py`, `finanzas.py`, `reglas.py`, `limites.py`,
+`cursor.py`, `alerta.py`, `historial.py`, `registro.py`, `adjuntos.py`, `texto.py`, `fuentes.py`,
+`auth.py`, `credencial_imap.py` and `cliente_imap.py` itself. No correctness defect in mail delivery turned
+up anywhere in that reading -- forwarding, dedup, the retry/degrade ladders, the per-folder/per-message
+isolation, and the silence/auth alerting all held up against their own documented invariants. One real,
+buildable inefficiency did: `cliente_imap.py`'s own attachment path reads every matched message's
+BODYSTRUCTURE three times over the wire for the identical, unchanged structure.
+
+### The gap, verified against the code
+
+`ClienteImap.listar_mensajes`'s own combined FETCH (`UID INTERNALDATE BODY.PEEK[HEADER.FIELDS (...)]
+BODYSTRUCTURE`) already parses the full leaf-part list (`hojas`) for every candidate message, to decide
+`tiene_adjuntos` -- then discards it. `sincronizar.ejecutar_pasada` calls `listar_adjuntos_metadata(mensaje.id)`
+next for any message with `tiene_adjuntos`, which issued its OWN standalone `FETCH ... (BODYSTRUCTURE)` and
+re-parsed the identical response; for a message that then matched a rule, `obtener_mensaje_completo` issued
+a THIRD, separately. All three parses of the same bytes, for the same message, in the same pass -- never a
+correctness problem (the structure cannot have changed mid-pass), but three IMAP round trips where one
+already carried everything needed, on a connector whose own recent history (`BUZON-IMAP-CONEXION-ROTA-1`) is
+specifically about a connection breaking mid-pass: every extra round trip on an already-read message is one
+more chance for that failure to land on a message this client had already finished reading successfully,
+turning a message that WOULD have forwarded cleanly into one skipped by a transient connection break instead.
+
+### The fix
+
+A new one-slot cache, `ClienteImap._cache_hojas: tuple[int, list[_ParteHoja]] | None`, holds the exact
+`(uid, hojas)` pair `listar_mensajes` just parsed, set immediately before that message is yielded. A new
+helper, `_obtener_hojas(uid)`, returns the cached parts when `uid` matches (the real flow: the caller always
+finishes one message -- its metadata AND its content -- before this generator is ever resumed for another),
+or fetches and parses BODYSTRUCTURE fresh otherwise -- a standalone call outside `listar_mensajes`'s own
+loop (tests already exercise this shape directly), or any message the cache does not hold. Both
+`listar_adjuntos_metadata` and `obtener_mensaje_completo` now call `_obtener_hojas` instead of fetching and
+parsing BODYSTRUCTURE themselves. Content fetches (`BODY.PEEK[<n>]`, the actual attachment/body bytes) are
+untouched -- only the redundant STRUCTURE parse is ever skipped, never a byte of content, and never a change
+to which attachments are listed, downloaded, or forwarded.
+
+### Tests, measured
+
+`tests/test_cliente_imap.py` (2 new): `test_listar_mensajes_seguido_de_metadata_y_completo_no_repite_
+bodystructure` drives the real flow end to end (`listar_mensajes` -> `listar_adjuntos_metadata` ->
+`obtener_mensaje_completo`, for the exact UID `listar_mensajes` yielded) and asserts the fake server's own
+recorded commands contain NO standalone `"(BODYSTRUCTURE)"`-only FETCH (distinguished from the combined one,
+which never ends a line in exactly that parenthesized form); `test_listar_adjuntos_metadata_standalone_sin_
+listar_mensajes_sigue_funcionando` proves the cache is a pure optimization, never a requirement -- called
+with no `listar_mensajes` ever run on that client, both methods still return the right answer AND the
+standalone BODYSTRUCTURE fetch still happens twice, exactly as before this slice.
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest --junit-xml=.gate-out/gate.xml -q` on this slice's own final tree
+(branch `feat/buzon-siguiente-seguimiento-2026-11-26-c` at commit
+`94445287933c8777901c8bc9c7513a3c2400d753`, tree `8f4c5c4158ba0c76270fd0461ff82cb35072a72c`), run in the
+foreground (541s, under the 600s cap) and read back from the artifact (confirmed by mtime to postdate this
+run, not a stale file from an earlier one):
+
+    testsuite tests="751" failures="0" errors="0" skipped="9"
+
+751 - 9 = 742 passed, matching the console's own `742 passed, 9 skipped`. Reconciled against this slice's
+own base (`main` at `e3e7385dd928fbdcb28e68baf0fa2d9373c7f39b`, 749 total per `BUZON-CARPETAS-CONTEO-1`'s own
+recorded figure): 751 - 749 = 2 new collected items, matching the 2 new tests above exactly, no drift. The 9
+skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger has recorded;
+none are new.
+
+Tree identity proven before writing this entry, so the gate above was not re-run for the merge: merge
+commit (recorded below) has tree `8f4c5c4158ba0c76270fd0461ff82cb35072a72c`, IDENTICAL to the slice branch
+`feat/buzon-siguiente-seguimiento-2026-11-26-c`'s own tree at the same commit, and `git diff HEAD
+feat/buzon-siguiente-seguimiento-2026-11-26-c --stat` against the merge commit was empty.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, and no on-disk file layout changed: the new
+cache is in-memory only, on one `ClienteImap` instance, never persisted. No cross-repo contract or DTO
+change -- nothing here touches the Finanzas or Cuenta Duna wire; the diff is entirely internal to
+`cliente_imap.py`'s own IMAP-fetch bookkeeping. No customer-facing bytes -- no `print`/stdout/stderr string
+anywhere in this diff changed, no new field on any wire or on-disk record, and which attachments get listed,
+downloaded or forwarded is byte-for-byte unchanged; the only observable difference is fewer commands on the
+wire this client itself opened, which no operator-facing output (`estado`, `carpetas`, `alertas`) counts or
+prints. All three conditions clear on the diff itself, so this slice merges on green without stopping for
+approval.
+
+### Attribution
+
+Carlos's own overnight direction (via the desk, `ORCH-CARLOS-DELEGATES-TIER-1-1`) asked for the most
+valuable open follow-up. With this repository's own ledger-named follow-ups exhausted (cross-repo, or
+settled overnight per this dispatch's own spec), this slice re-read every module fresh against this
+repository's invariants, found no correctness defect in mail delivery, and built the one real, reversible
+inefficiency that turned up: the triple BODYSTRUCTURE fetch in `cliente_imap.py`, now read once per message.
+
+### Open follow-ups, ranked
+
+1. **`BUZON-ALERTA-CONSOLE-LINE-1`** (unchanged, still open, cross-repo, outside this repository's own
+   `touches:`): a console line surfacing a source's own alert (auth or silencio) in the admin UI. Still the
+   only follow-up with a clear owner (the console/admin-ui repository) yet to build its half.
+2. Every follow-up this ledger ever named before this entry is closed, settled, or (item 1 above)
+   cross-repo -- re-verified against the code and against this dispatch's own spec while compiling this
+   list. This entry's own fix (`BUZON-IMAP-BODYSTRUCTURE-CACHE-1`) was not a previously-named follow-up; it
+   was found fresh, by this slice's own reading, once the named list came up empty.
