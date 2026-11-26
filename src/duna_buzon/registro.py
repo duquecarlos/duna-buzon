@@ -3,8 +3,9 @@ retry count (BUZON-GRAPH-TIMEOUT-1), for a Graph source the `$top` the LIST
 call was last using (BUZON-GRAPH-502-1), and -- only when nonzero, for a
 provider that has one -- how many folders/messages that provider itself
 skipped rather than let block the rest of the pass (BUZON-IMAP-MENSAJE-
-AISLADO-1) -- never a sender, a subject, a body, a filename, a token, a
-cache or a Graph message id."""
+AISLADO-1), plus how many messages an IMAP source's own date fallback
+deliberately skipped (BUZON-IMAP-FECHA-DROP-VISIBLE-1) -- never a sender,
+a subject, a body, a filename, a token, a cache or a Graph message id."""
 
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ def linea_resumen(
     reintentos: int | None = None,
     top: int | None = None,
     omitidos_por_error_proveedor: int = 0,
+    omitidos_por_fecha_proveedor: int = 0,
 ) -> str:
     partes = [
         f"vistos={contadores.vistos}",
@@ -45,6 +47,11 @@ def linea_resumen(
     # changes (BUZON-IMAP-MENSAJE-AISLADO-1).
     if omitidos_por_error_proveedor:
         partes.append(f"omitidos_por_error_proveedor={omitidos_por_error_proveedor}")
+    # Same shape, for `ClienteImap.omitidos_por_fecha_proveedor`
+    # (BUZON-IMAP-FECHA-DROP-VISIBLE-1): a message the SINCE-date fallback
+    # deliberately skipped, never a provider that has nothing to report.
+    if omitidos_por_fecha_proveedor:
+        partes.append(f"omitidos_por_fecha_proveedor={omitidos_por_fecha_proveedor}")
     if reintentos is not None:
         partes.append(f"reintentos={reintentos}")
     if top is not None:

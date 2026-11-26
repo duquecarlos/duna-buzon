@@ -368,7 +368,7 @@ key was not set before) atomically, and logs one line via `logger -t duna-deploy
 and the backup -- never the value. No restart is needed: the timer's next scheduled pass reads the file
 fresh.
 
-## A dead credential becomes visible (`alertas`)
+## A dead credential, or a mailbox gone quiet, becomes visible (`alertas`)
 
 As of `BUZON-ALERTA-AUTH-1`, an app password that gets revoked or an OAuth refresh token that expires or
 is revoked no longer just prints `parada=auth error=...` to the journal forever with nobody told:
@@ -380,21 +380,27 @@ sudo -n /usr/local/sbin/duna-deploy-buzon alertas
 Read-only: runs `python -m duna_buzon alertas --json` as `duna`, the same `systemd-run` shape `status`
 uses for its own health check. Prints a JSON list, one entry per source whose own unbroken run of auth
 failures has passed `BUZON_ALERTA_AUTH_HORAS` (default 24, set in `/srv/duna/env/buzon.env` -- not a
-secret, so no piped-generation step needed), `[]` when none, exit 0 either way:
+secret, so no piped-generation step needed), OR -- as of `BUZON-ALERTA-SILENCIO-1`, and only when it is
+not already an auth alert -- whose own last sighting of mail is older than `BUZON_ALERTA_SILENCIO_HORAS`
+(same default, same file), `[]` when none, exit 0 either way:
 
 ```
 [{"fuente": "hotmail-carlos", "tipo": "auth", "desde": "2026-11-19T08:00:00Z", "horas": 30,
   "remedio": "ejecute 'entrar --fuente hotmail-carlos' para firmar"}]
 ```
 
-`remedio` is specific to the source: `entrar --fuente <id>` for a `local`-origen microsoft source, a new
-app password followed by the same `entrar` for `local`-origen imap, and reconnecting in Cuenta Duna for a
-`origen="cuenta"` source (this connector never holds that credential itself). `status`'s own health
-check does not run this -- `alertas` is its own call, meant for Main's session-start hub check to relay a
-dead credential to Carlos's own desk. A console line surfacing the same thing in the admin UI needs a
-Buzón-to-console read that does not exist yet (a named follow-up, not built by this slice). `estado` also
-prints the same ALERTA per affected source, and `sincronizar`'s own journal line for a pass that stops on
-auth gains `alerta=si` once past the threshold.
+A `"tipo": "silencio"` entry has the same shape, `desde` naming when that source last saw mail and
+`remedio` pointing only at the source id (check the mailbox is still receiving mail, check `reglas.json`
+is not excluding everything) -- never a credential, since a quiet source is not necessarily an auth
+problem. `remedio` for a `"tipo": "auth"` entry is specific to the source: `entrar --fuente <id>` for a
+`local`-origen microsoft source, a new app password followed by the same `entrar` for `local`-origen
+imap, and reconnecting in Cuenta Duna for a `origen="cuenta"` source (this connector never holds that
+credential itself). `status`'s own health check does not run this -- `alertas` is its own call, meant for
+Main's session-start hub check to relay a dead credential or a gone-quiet source to Carlos's own desk. A
+console line surfacing the same thing in the admin UI needs a Buzón-to-console read that does not exist
+yet (a named follow-up, not built by this slice). `estado` also prints the same ALERTA per affected
+source, and `sincronizar`'s own journal line for a pass that stops on auth gains `alerta=si` once past
+the threshold.
 
 ## Trust boundary
 

@@ -34,3 +34,25 @@ def test_omitidos_por_error_proveedor_convive_con_reintentos_y_top() -> None:
         "omitidos_por_413_422=0 adjuntos_descartados=0 omitidos_por_error_proveedor=1 "
         "reintentos=3 top=10"
     )
+
+
+def test_omitidos_por_fecha_proveedor_ausente_cuando_es_cero() -> None:
+    linea = linea_resumen(Contadores())
+    assert "omitidos_por_fecha_proveedor" not in linea
+
+
+def test_omitidos_por_fecha_proveedor_aparece_cuando_no_es_cero() -> None:
+    linea = linea_resumen(Contadores(), omitidos_por_fecha_proveedor=2)
+    assert linea == (
+        "vistos=0 reenviados=0 duplicados=0 omitidos_por_reglas=0 "
+        "omitidos_por_413_422=0 adjuntos_descartados=0 omitidos_por_fecha_proveedor=2"
+    )
+
+
+def test_omitidos_por_fecha_y_por_error_proveedor_conviven_en_ese_orden() -> None:
+    linea = linea_resumen(Contadores(), omitidos_por_error_proveedor=1, omitidos_por_fecha_proveedor=2)
+    assert linea == (
+        "vistos=0 reenviados=0 duplicados=0 omitidos_por_reglas=0 "
+        "omitidos_por_413_422=0 adjuntos_descartados=0 omitidos_por_error_proveedor=1 "
+        "omitidos_por_fecha_proveedor=2"
+    )

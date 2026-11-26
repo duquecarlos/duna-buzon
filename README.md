@@ -20,8 +20,13 @@ whose credential has died (app password revoked, OAuth refresh token expired or 
 an ALERTA in `estado`, in the journal, and in a machine-readable `alertas` subcommand -- by
 BUZON-ALERTA-AUTH-1; an IMAP source's own `listar_mensajes` no longer lets one broken folder or one
 unparseable message kill the whole pass -- each is skipped and counted
-(`omitidos_por_error_proveedor`) instead, by BUZON-IMAP-MENSAJE-AISLADO-1. See `CLAUDE.md` for the gate
-and the invariants, `DECISIONS.md` for the ledger, and `deploy/host/README.md` for the operator steps.
+(`omitidos_por_error_proveedor`) instead, by BUZON-IMAP-MENSAJE-AISLADO-1. An IMAP source's own UID
+watermark, never a message's date, is now the truth about "new in this folder" -- a date-based skip is
+counted (`omitidos_por_fecha_proveedor`) and still advances the watermark instead of silently wedging it
+forever, `carpetas` narrowing matches a folder name regardless of case, and a source that used to see mail
+and has gone quiet becomes an ALERTA too (`"silencio"`, alongside `"auth"`) -- all three by
+BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1. See `CLAUDE.md` for the gate and the invariants, `DECISIONS.md` for the
+ledger, and `deploy/host/README.md` for the operator steps.
 
 ## Shape
 
@@ -60,6 +65,9 @@ fuentes/<id>/alerta.json            -- ABSENT unless this source's own auth is c
                                        instant the FIRST failure of the current unbroken run happened. Set on
                                        that first failure, kept while auth keeps failing, cleared the moment a
                                        pass authenticates again -- see `alerta.py` and BUZON-ALERTA-AUTH-1
+fuentes/<id>/visto.json             -- ABSENT if this source has never once seen a message: the UTC instant
+                                       of the MOST RECENT pass that saw at least one (`vistos > 0`). Moves
+                                       forward on every such pass -- see `alerta.py` and BUZON-ALERTA-SILENCIO-1
 ```
 
 `host`/`port` are only set for `proveedor == "imap"` (`None` otherwise).
@@ -129,10 +137,12 @@ The commands:
   can't list the whole mailbox" below.
 - `estado [--pasadas <n>]` -- prints every source's own cursor and last-pass counts, when that pass finished,
   how many Graph retries it used, and -- for a Microsoft source -- the `$top` it was last using. For an IMAP
-  source, `omitidos_por_error_proveedor` also appears, but only when it is not zero: how many folders or
-  messages this pass's own provider skipped because it could not make sense of them
-  (`BUZON-IMAP-MENSAJE-AISLADO-1`, see "One broken folder or message never blocks the rest" below). Nothing
-  personal. Below that, a compact table of up to 5 PREVIOUS passes (`finalizado_en`, `vistos`, `reenviados`,
+  source, `omitidos_por_error_proveedor` and `omitidos_por_fecha_proveedor` also appear, but only when not
+  zero: how many folders or messages this pass's own provider skipped because it could not make sense of
+  them (`BUZON-IMAP-MENSAJE-AISLADO-1`, see "One broken folder or message never blocks the rest" below), and
+  how many messages its own date-bounded fallback deliberately skipped (`BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1`,
+  see "A UID past the watermark is new, whatever its date says" below). Nothing personal. Below that, a
+  compact table of up to 5 PREVIOUS passes (`finalizado_en`, `vistos`, `reenviados`,
   `duplicados`, `omitidos`, `errors`), most recent first, read from that source's own `historial.jsonl`
   (`BUZON-ESTADO-HISTORIAL-PASADAS-1`) -- so a pass that forwarded nothing, or failed, no longer hides what
   the ones before it did; `--pasadas <n>` widens the table up to the 20 passes `historial.jsonl` itself keeps.
@@ -174,12 +184,14 @@ The commands:
   variable at all -- the host entry script's `reglas`/`reglas-ver` subcommands run it, as `duna`, with
   no env file sourced (see `deploy/host/README.md`).
 - `alertas [--json]` -- read-only, machine-readable: every source currently past its own auth-failure
-  threshold, as a JSON list, `[]` when none, exit 0 either way (`BUZON-ALERTA-AUTH-1`). Each entry is
-  `{"fuente": <id>, "tipo": "auth", "desde": <ts>, "horas": <n>, "remedio": <how>}` -- never a token,
-  password or address beyond the source's own id. The host entry script's own `alertas` subcommand runs
-  this, as `duna`, the same way `status` runs `estado`; Main's own session-start hub check reads it over
-  `sudo -n` to relay a dead credential to the desk (a console line for the admin UI is a named follow-up,
-  not built by this slice).
+  threshold (`"tipo": "auth"`, `BUZON-ALERTA-AUTH-1`), OR -- when it is not already an auth alert -- past
+  its own mail-silence threshold (`"tipo": "silencio"`, `BUZON-ALERTA-SILENCIO-1`, see below), as a JSON
+  list, `[]` when none, exit 0 either way. Each entry is
+  `{"fuente": <id>, "tipo": "auth"|"silencio", "desde": <ts>, "horas": <n>, "remedio": <how>}` -- never a
+  token, password or address beyond the source's own id. The host entry script's own `alertas` subcommand
+  runs this, as `duna`, the same way `status` runs `estado`; Main's own session-start hub check reads it
+  over `sudo -n` to relay a dead credential or a gone-quiet source to the desk (a console line for the
+  admin UI is a named follow-up, not built by this slice).
 
 ### A dead credential becomes visible (BUZON-ALERTA-AUTH-1)
 
@@ -201,6 +213,28 @@ reconnect, never this connector. Main relays an `alertas --json` result to Carlo
 start; a console line surfacing the same thing in the admin UI needs a Buzón-to-console read that does not
 exist yet, named as a follow-up rather than built here.
 
+### A mailbox gone quiet becomes visible (BUZON-ALERTA-SILENCIO-1)
+
+The auth alert above only catches a credential that stops working outright. A source can also run cleanly,
+pass after pass, authenticating fine and finding nothing wrong -- `vistos=0`, no error, nothing in any log
+-- because of a problem that is never an authentication failure at all: a mailbox-side rule silently moving
+everything into a folder this source does not read, a `reglas.json` that now excludes everything, or (before
+this same slice) the per-folder watermark bug below. Before this slice there was nothing in this connector
+that ever looked at a RUN of empty passes and called it worth a flag.
+
+Now each source keeps its own `ultimo_visto_en` marker (`fuentes/<id>/visto.json` above): the UTC instant of
+the most recent pass that saw at least one message, moved forward every time one does, REGARDLESS of
+whether that pass went on to forward it, skip it by rule, or stop partway through on a transient error --
+the mailbox had mail, so it is not silent, whatever happened to that mail afterwards. A source that has
+never once seen a message has no marker at all, and is never called silent -- there has to have been mail
+before there can be a drought. Once a source's own marker is older than `BUZON_ALERTA_SILENCIO_HORAS`
+(default 24 -- see below) hours, `alertas --json` lists it with `"tipo": "silencio"`, the marker's own
+timestamp as `desde`, and a remedy that names only the source id, never a credential (check the mailbox is
+still receiving mail, check `reglas.json` is not excluding everything). A source already in an auth alert
+never also gets a redundant silencio entry for the same pass -- the auth alert already explains it. The
+alert clears the instant a pass sees mail again, since the marker simply moves forward past the threshold;
+there is no separate "clear" step to call.
+
 ### Narrowing an IMAP source to specific folders (BUZON-IMAP-CARPETAS-INCLUIDAS-1)
 
 A `fuente.json` for `proveedor == "imap"` can carry an optional `carpetas` list: when present, this source reads
@@ -209,6 +243,10 @@ ONLY folders whose LIST name equals one of its entries or sits under one of them
 never read regardless. Absent (the default, and every `fuente.json` written before this slice) means today's
 behaviour exactly: every selectable folder. A non-list or an empty list is rejected as an invalid source when it
 is loaded, not discovered later mid-sync.
+
+A `carpetas` entry matches a server folder name regardless of case (`BUZON-IMAP-CARPETAS-CASEFOLD-1`) --
+"legal" in `fuente.json` matches a server folder named "Legal", including as the parent of a nested folder
+like "Legal/Facturas".
 
 This exists for the shared-mailbox case: `legal@duna.solutions`, `hola@duna.solutions` and
 `soporte@duna.solutions` are not separate logins on Zoho -- they are SHARED MAILBOXES inside Carlos's own
@@ -253,6 +291,26 @@ processed and forwarded in the SAME pass. The count surfaces as `omitidos_por_er
 total. The one broken folder or message is retried, and re-skipped, on every future pass too -- harmless,
 since it never blocks a genuinely newer message or folder.
 
+### A UID past the watermark is new, whatever its date says (BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1)
+
+An IMAP folder's own stored watermark (`(UIDVALIDITY, UID)`) is the truth about "new in this folder": a
+message whose UID sits past it is new, by definition, however old its own `INTERNALDATE` or `Date` header
+is. Before this slice, `listar_mensajes` compared EVERY candidate message's `INTERNALDATE` against the
+pass's own date cursor and silently dropped (uncounted) anything earlier -- correct for a never-before-seen
+folder's own date-bounded `SINCE` search, which has only day granularity, but wrong for a genuine UID
+resume: a server-side filing rule (Zoho moving a message between folders, for instance) can leave
+`INTERNALDATE` at the message's ORIGINAL received time, long before that date cursor, even though its UID
+in the folder it landed in is brand new. That dropped message was never counted anywhere, and -- because
+the drop happened before this provider's own watermark was ever updated for it -- the watermark never
+advanced past it either, so the exact same drop repeated, identically, on every future pass: this folder
+wedged at `vistos=0` forever, with no error anywhere to explain why.
+
+Now the date comparison applies ONLY on the date-bounded fallback path; a genuine UID resume never drops a
+message on its date, full stop. Where the fallback DOES skip a message on date, it is counted
+(`omitidos_por_fecha_proveedor`, same shape as `omitidos_por_error_proveedor` above) and the watermark still
+advances past it, exactly like a forwarded message would -- nothing on this path can wedge a folder's
+watermark again.
+
 ### When Graph can't list the whole mailbox (BUZON-GRAPH-502-1)
 
 The retry and `$top`-degrade above handle a mailbox that is merely slow or momentarily unavailable. If a
@@ -292,6 +350,10 @@ One more, `BUZON_ALERTA_AUTH_HORAS` (`BUZON-ALERTA-AUTH-1`, default `24`) -- how
 unbroken run of auth failures must last before `estado`/`alertas`/the journal call it an ALERTA. Must be a
 positive integer; anything else is refused by name, the variable never its value. See "A dead credential
 becomes visible" above.
+
+One more, `BUZON_ALERTA_SILENCIO_HORAS` (`BUZON-ALERTA-SILENCIO-1`, default `24`) -- how many hours a
+source's own `ultimo_visto_en` marker can go without moving before `alertas` calls it a silent source.
+Same validation as `BUZON_ALERTA_AUTH_HORAS` above. See "A mailbox gone quiet becomes visible" above.
 
 One more, `BUZON_ENVIAR_ORIGEN` (`BUZON-ORIGEN-WIRE-1`) -- **turn on only after Finanzas Release 37 is live.** Off
 unless set to exactly `1` or `true`. On, every entry's `meta` carries an `origen` field: the source's own identity

@@ -42,6 +42,16 @@ _VARS_CUENTA = (_VAR_CUENTA_URL, _VAR_CUENTA_CLIENT_ID, _VAR_CUENTA_CLIENT_SECRE
 _VAR_ALERTA_AUTH_HORAS = "BUZON_ALERTA_AUTH_HORAS"
 _ALERTA_AUTH_HORAS_PREDETERMINADO = 24
 
+# BUZON-ALERTA-SILENCIO-1 -- how long a source's own `ultimo_visto_en`
+# marker (`alerta.py`) can go without moving before `alertas` calls it a
+# silent source. 24 hours by default: the same threshold as the auth
+# alert, and a reasonable floor for a business mailbox that gets at least
+# one message a day -- long enough that a normal quiet weekend or a slow
+# afternoon never fires, short enough that a connector gone silent for a
+# whole business day still gets flagged the next morning.
+_VAR_ALERTA_SILENCIO_HORAS = "BUZON_ALERTA_SILENCIO_HORAS"
+_ALERTA_SILENCIO_HORAS_PREDETERMINADO = 24
+
 # BUZON-ESTADO-A-CUENTA-1 -- OFF unless set to exactly "1" or "true": the
 # push side of `../dev-protocol/contracts/buzon-estado-a-cuenta-v1.md`
 # stays off until Cuenta Duna's own receiver (`CUENTA-API-BUZON-ESTADO-
@@ -121,17 +131,27 @@ def _validar_url_cuenta(url: str) -> str:
     return url
 
 
-def _alerta_auth_horas_desde_entorno(entorno: Mapping[str, str]) -> int:
-    valor = entorno.get(_VAR_ALERTA_AUTH_HORAS)
+def _horas_positivas_desde_entorno(entorno: Mapping[str, str], nombre: str, predeterminado: int) -> int:
+    valor = entorno.get(nombre)
     if valor is None or valor == "":
-        return _ALERTA_AUTH_HORAS_PREDETERMINADO
+        return predeterminado
     try:
         horas = int(valor)
     except ValueError as exc:
-        raise ConfigError(f"{_VAR_ALERTA_AUTH_HORAS} must be a positive integer") from exc
+        raise ConfigError(f"{nombre} must be a positive integer") from exc
     if horas <= 0:
-        raise ConfigError(f"{_VAR_ALERTA_AUTH_HORAS} must be a positive integer")
+        raise ConfigError(f"{nombre} must be a positive integer")
     return horas
+
+
+def _alerta_auth_horas_desde_entorno(entorno: Mapping[str, str]) -> int:
+    return _horas_positivas_desde_entorno(entorno, _VAR_ALERTA_AUTH_HORAS, _ALERTA_AUTH_HORAS_PREDETERMINADO)
+
+
+def _alerta_silencio_horas_desde_entorno(entorno: Mapping[str, str]) -> int:
+    return _horas_positivas_desde_entorno(
+        entorno, _VAR_ALERTA_SILENCIO_HORAS, _ALERTA_SILENCIO_HORAS_PREDETERMINADO
+    )
 
 
 def _cuenta_desde_entorno(entorno: Mapping[str, str]) -> tuple[str | None, str | None, str | None, str | None]:
@@ -173,6 +193,9 @@ class Config:
     # BUZON-ALERTA-AUTH-1 -- see `_VAR_ALERTA_AUTH_HORAS` above. 24 for every
     # deployment that never set the variable.
     alerta_auth_horas: int = _ALERTA_AUTH_HORAS_PREDETERMINADO
+    # BUZON-ALERTA-SILENCIO-1 -- see `_VAR_ALERTA_SILENCIO_HORAS` above. 24
+    # for every deployment that never set the variable.
+    alerta_silencio_horas: int = _ALERTA_SILENCIO_HORAS_PREDETERMINADO
     # BUZON-ESTADO-A-CUENTA-1 -- see `_VAR_ENVIAR_ESTADO_CUENTA` above. False
     # for every deployment that never set the variable, which is every
     # deployment before this slice.
@@ -194,6 +217,7 @@ class Config:
         cuenta_url, cuenta_client_id, cuenta_client_secret, cuenta_sub = _cuenta_desde_entorno(entorno)
         enviar_origen = entorno.get(_VAR_ENVIAR_ORIGEN) in _VALORES_ENVIAR_ORIGEN_VERDADEROS
         alerta_auth_horas = _alerta_auth_horas_desde_entorno(entorno)
+        alerta_silencio_horas = _alerta_silencio_horas_desde_entorno(entorno)
         enviar_estado_cuenta = (
             entorno.get(_VAR_ENVIAR_ESTADO_CUENTA) in _VALORES_ENVIAR_ESTADO_CUENTA_VERDADEROS
         )
@@ -209,5 +233,6 @@ class Config:
             cuenta_sub=cuenta_sub,
             enviar_origen=enviar_origen,
             alerta_auth_horas=alerta_auth_horas,
+            alerta_silencio_horas=alerta_silencio_horas,
             enviar_estado_cuenta=enviar_estado_cuenta,
         )

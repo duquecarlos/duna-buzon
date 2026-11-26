@@ -245,3 +245,34 @@ def test_alerta_auth_horas_invalido_se_rechaza_nombrando_la_variable(
     with pytest.raises(ConfigError) as excinfo:
         Config.desde_entorno(entorno_valido)
     assert "BUZON_ALERTA_AUTH_HORAS" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# BUZON_ALERTA_SILENCIO_HORAS (BUZON-ALERTA-SILENCIO-1) -- same shape as
+# BUZON_ALERTA_AUTH_HORAS above, its own threshold and its own name.
+# ---------------------------------------------------------------------------
+
+
+def test_alerta_silencio_horas_usa_el_valor_predeterminado(entorno_valido: dict[str, str]) -> None:
+    config = Config.desde_entorno(entorno_valido)
+    assert config.alerta_silencio_horas == 24
+
+
+def test_alerta_silencio_horas_acepta_un_entero_positivo(entorno_valido: dict[str, str]) -> None:
+    entorno_valido["BUZON_ALERTA_SILENCIO_HORAS"] = "6"
+    config = Config.desde_entorno(entorno_valido)
+    assert config.alerta_silencio_horas == 6
+
+
+@pytest.mark.parametrize("valor", ["0", "-1", "no-es-un-numero", "1.5", ""])
+def test_alerta_silencio_horas_invalido_se_rechaza_nombrando_la_variable(
+    entorno_valido: dict[str, str], valor: str
+) -> None:
+    entorno_valido["BUZON_ALERTA_SILENCIO_HORAS"] = valor
+    if valor == "":
+        config = Config.desde_entorno(entorno_valido)
+        assert config.alerta_silencio_horas == 24
+        return
+    with pytest.raises(ConfigError) as excinfo:
+        Config.desde_entorno(entorno_valido)
+    assert "BUZON_ALERTA_SILENCIO_HORAS" in str(excinfo.value)
