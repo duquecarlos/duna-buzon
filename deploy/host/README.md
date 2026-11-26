@@ -166,6 +166,23 @@ the piped-generation dance step 1 above uses for the encryption key) and restart
 one by hand with `systemd-run` as in `status`'s own health check. Every entry's `meta` then carries `origen`: the
 source's own identity (`imap:<id>` or `google:cuenta-<uuid>`), used for exact-label routing on Finanzas' side.
 
+## Turning on `estado_cuenta` (BUZON-ESTADO-A-CUENTA-1)
+
+**Turn on only after Cuenta Duna's own receiver (`CUENTA-API-BUZON-ESTADO-RECEPTOR-1`) is live.** Until then, leave
+it off (the default).
+
+Once the receiver is live, use `env-set` (see "Setting a non-secret env variable" below) to turn it on:
+
+```
+sudo -n /usr/local/sbin/duna-deploy-buzon env-set BUZON_ENVIAR_ESTADO_CUENTA 1 --aplicar
+```
+
+`BUZON_ENVIAR_ESTADO_CUENTA` is not a secret, same as `BUZON_ENVIAR_ORIGEN` above. On, and only when Cuenta Duna
+is configured (the four `BUZON_CUENTA_*` variables), `sincronizar` ends every pass with one heartbeat,
+`POST /servicio/buzon/estado/{sub}`, carrying this connector's own current sources. A failed or unconfigured push
+never fails the pass: it is logged as one count-only line and the pass's own exit code is unaffected. See
+README.md's own `BUZON_ENVIAR_ESTADO_CUENTA` entry for the full wire shape.
+
 ## No backup subcommand
 
 `/srv/duna/data/buzon/` holds only `fuentes/<id>/credencial.bin` (the encrypted MSAL token cache or
