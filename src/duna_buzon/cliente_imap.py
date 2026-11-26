@@ -142,6 +142,27 @@ past that watermark is counted with one more `UID SEARCH`, the same
 later) or names a UIDVALIDITY the server no longer has: in both cases a
 count against today's UID sequence would mean nothing, since the live pass
 itself would fall back to the date cursor rather than compare UIDs.
+
+BUZON-IMAP-BODYSTRUCTURE-CACHE-1: before this slice, a message with an
+attachment that matched a rule had its own BODYSTRUCTURE fetched THREE
+times over the wire for the exact same, unchanged structure -- once inside
+`listar_mensajes`'s own combined FETCH (`UID INTERNALDATE BODY.PEEK[...]
+BODYSTRUCTURE`), again by `listar_adjuntos_metadata` (`sincronizar.py`
+calls it right after, for every message with `tiene_adjuntos`), and a
+third time by `obtener_mensaje_completo` (called next, for a message that
+matched a rule) -- three IMAP round trips to parse the identical
+parenthesized list, on a connector whose own recent history
+(BUZON-IMAP-CONEXION-ROTA-1) is about a connection breaking mid-pass: every
+extra round trip is one more chance for that to happen on a message this
+client had already read successfully. `_obtener_hojas` now reuses the ONE
+parse `listar_mensajes` already did (`self._cache_hojas`, a single UID/
+parts pair, since the caller always finishes one message -- its metadata
+AND its body -- before this generator ever yields another) for both
+callers; a UID the cache does not hold (either call used standalone,
+outside a `listar_mensajes` loop, as tests already exercise) still fetches
+BODYSTRUCTURE fresh, exactly as before this slice. Content fetches
+(`BODY.PEEK[<n>]`, the actual bytes) are untouched -- only the redundant
+STRUCTURE parse is ever skipped, never a byte of content.
 """
 
 from __future__ import annotations
@@ -696,6 +717,16 @@ class ClienteImap:
         self._construir_conexion = construir_conexion
         self._conexion: ConexionImapProtocolo | None = None
         self._carpeta_actual: str | None = None
+        # BUZON-IMAP-BODYSTRUCTURE-CACHE-1 -- the one UID `listar_mensajes`
+        # just yielded, with the BODYSTRUCTURE it already parsed from that
+        # SAME combined FETCH, so `listar_adjuntos_metadata`/
+        # `obtener_mensaje_completo` (always called next, for that exact
+        # message, before this generator advances to another one) reuse it
+        # instead of issuing a second FETCH BODYSTRUCTURE for a structure
+        # already in hand. A UID this cache does not hold (a standalone
+        # call, or any other message) simply misses and fetches fresh --
+        # see `_obtener_hojas`.
+        self._cache_hojas: tuple[int, list[_ParteHoja]] | None = None
 
     def cerrar(self) -> None:
         if self._conexion is None:
@@ -972,6 +1003,14 @@ class ClienteImap:
 
                 mapa_cursor[nombre_carpeta] = (uidvalidity, uid)
 
+                # BUZON-IMAP-BODYSTRUCTURE-CACHE-1 -- the caller (`sincronizar.
+                # ejecutar_pasada`) processes this exact message, synchronously,
+                # before this generator is ever resumed: `listar_adjuntos_
+                # metadata`/`obtener_mensaje_completo` reuse this BODYSTRUCTURE
+                # via `_obtener_hojas` instead of fetching it a second (and
+                # third) time.
+                self._cache_hojas = (uid, hojas)
+
                 yield MensajeResumen(
                     id=str(uid),
                     # Folder-qualified: two different folders can each have
@@ -986,10 +1025,20 @@ class ClienteImap:
                     cursor_proveedor=_formato_cursor_multi(mapa_cursor),
                 )
 
+    def _obtener_hojas(self, uid: int) -> list[_ParteHoja]:
+        """This UID's own BODYSTRUCTURE, parsed into leaf parts -- reused
+        from `listar_mensajes`'s own combined FETCH when `uid` is the exact
+        message that generator just yielded (BUZON-IMAP-BODYSTRUCTURE-
+        CACHE-1), fetched fresh otherwise (a standalone call, or any other
+        message)."""
+        if self._cache_hojas is not None and self._cache_hojas[0] == uid:
+            return self._cache_hojas[1]
+        texto, _ = self._fetch_uno(uid, "BODYSTRUCTURE")
+        return _particionar_bodystructure(_parsear_bodystructure(texto))
+
     def listar_adjuntos_metadata(self, id_mensaje: str) -> list[AdjuntoMetadata]:
         uid = int(id_mensaje)
-        texto, _ = self._fetch_uno(uid, "BODYSTRUCTURE")
-        hojas = _particionar_bodystructure(_parsear_bodystructure(texto))
+        hojas = self._obtener_hojas(uid)
         return [
             AdjuntoMetadata(
                 id=hoja.numero,
@@ -1011,8 +1060,7 @@ class ClienteImap:
         self, id_mensaje: str, metadatos_adjuntos: Sequence[AdjuntoMetadata]
     ) -> MensajeCompleto:
         uid = int(id_mensaje)
-        texto, _ = self._fetch_uno(uid, "BODYSTRUCTURE")
-        hojas = {hoja.numero: hoja for hoja in _particionar_bodystructure(_parsear_bodystructure(texto))}
+        hojas = {hoja.numero: hoja for hoja in self._obtener_hojas(uid)}
 
         cuerpo_html = ""
         candidatos_cuerpo = [h for h in hojas.values() if not h.es_adjunto]
