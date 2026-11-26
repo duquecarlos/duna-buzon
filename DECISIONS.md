@@ -2807,3 +2807,174 @@ AUTH-1` before it.
 
 Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): the sender half of a two-repository
 contract it already wrote, additive and switched off, directly named by the approval.
+
+---
+
+## BUZON-IMAP-MENSAJE-AISLADO-1 -- one broken folder or one unparseable message no longer wedges an IMAP source to zero forwards (2026-11-26)
+
+### Why, and what this slice chose over the repository's own named follow-up
+
+Overnight direction from Carlos (via the desk, 25 Nov 2026 ~22:45): "keep everything moving... don't let
+anything go cold," pick the most valuable OPEN follow-up this repository's own ledger names, preferring a
+real defect -- "a source that silently sees nothing" was named explicitly -- over hygiene.
+
+This repository's `DECISIONS.md` names exactly ONE still-open follow-up with an id:
+`BUZON-ALERTA-CONSOLE-LINE-1` (coined in `BUZON-ALERTA-AUTH-1`, above). It was NOT built here: it needs a
+Buzón-to-console wire that does not exist today, in a repository (the admin console) outside this one and
+outside `touches:` -- a cross-repo contract and a new outward-facing surface, exactly what this slice's own
+approval ruled out ("NOT allowed: ... a new outward-facing behaviour"). Named as the one candidate this
+slice considered and set aside, per the spec's own instruction to name such a case and move to the next.
+
+With that follow-up disqualified, this slice read the code behind the spec's own weighted data point
+(duna-zoho having seen 0 mail since 24 Nov 19:30 while its folders list fine) rather than inventing
+unrelated work: `cliente_imap.py`'s `listar_mensajes` (`src/duna_buzon/cliente_imap.py`, read before this
+slice changed it) is a GENERATOR that iterates every included folder and, within each, every matching UID.
+Before this slice, EITHER `self._examinar_carpeta` (one folder's own `EXAMINE`) or the per-message
+`_fetch_uno`/`_parsear_internaldate`/`_parsear_cabeceras`/`_particionar_bodystructure`
+(`_parsear_bodystructure`) raising -- a clean server `NO`/`BAD` for one specific folder or message, or this
+module's own hand-written IMAP grammar failing to walk one message's malformed `BODYSTRUCTURE`/headers/
+`INTERNALDATE` -- propagated straight out of the generator, UNCAUGHT, at the exact point it was reached.
+`sincronizar.py`'s own `for mensaje in proveedor.listar_mensajes(...)` has a SINGLE try/except around the
+whole loop, turning that into a whole-pass stop (`detenida_por_error_transitorio`); invariant 5 then
+forbids persisting the cursor past it. The next pass resumes from the SAME cursor, re-lists the SAME
+folder or message FIRST (sorted order), hits the SAME wall, and stops at the SAME point again -- meaning
+every folder or message that would have come AFTER the broken one, in EVERY future pass, never even gets
+attempted. `carpetas <id>` (the operator's own diagnostic) never goes through `EXAMINE` at all (only
+`LIST`), so a source in exactly this state shows its folders listing fine while forwarding nothing, forever
+-- precisely the shape of the data point this slice was asked to weigh. This was found by reading the code
+against that symptom, not reproduced against a live mailbox (never attempted, never permitted by this
+slice's own approval).
+
+### The fix, and the design call this slice made
+
+Reused a principle this repository already applies one layer up, in its own words
+(`cliente_imap.py`'s `_listar_carpetas_crudo`): "one odd entry from a server must never stop every other
+[one] from being read." `listar_mensajes` now wraps each folder's own `EXAMINE`+`SEARCH` pair, and each
+message's own FETCH+parse, in its own `try`/`except`: a failure skips exactly that ONE folder or ONE
+message, counts it (`self.omitidos_por_error_proveedor`, a new public attribute, read by `cli.py` the same
+`getattr(proveedor, "...", 0)` way `GraphClient.reintentos_usados`/`top_lista_usado` already are), and
+CONTINUES -- every other folder, and every other message, still gets processed and forwarded in the SAME
+pass.
+
+The caught tuple (`_ERRORES_DE_CONTENIDO_AISLABLES`) is deliberately narrow:
+`ClienteImapErrorTransitorio` (this module's own clean "the server said NO/BAD to THIS command" or
+"this field could not be parsed" signal), `ValueError`/`IndexError`/`LookupError`/`UnicodeError` (exactly
+the exception shapes `_parsear_valor`'s own hand-written grammar and `_particionar_bodystructure`'s
+positional field access can raise on a malformed structure -- the same `IndexError` `_parsear_linea_list`
+already catches for one `LIST` line), and `email.errors.MessageError` (the stdlib `email` module's own
+parse failure on a malformed header). Deliberately EXCLUDED: `OSError` and any other bare `Exception` --
+a genuine transport failure (a broken socket, `imaplib.IMAP4.abort`) still propagates UNCAUGHT and stops
+the whole pass exactly as before this slice, because a connection problem is not specific to one folder or
+message and treating it as a permanent, skippable one would be wrong. `tests/test_cliente_imap.py::
+test_conexion_rota_durante_fetch_sigue_deteniendo_toda_la_pasada` proves this split directly, against a
+hand-rolled connection whose FETCH raises `OSError`.
+
+A folder-level skip leaves that folder's own stored cursor entry UNTOUCHED (retried, not lost, the next
+time the folder's own problem clears). A message-level skip does NOT force the per-folder cursor past that
+UID either -- deliberately: the resume search is always `"UID", f"{n}:*"` (to infinity, never a single
+next UID), so a genuinely newer message arriving after the broken one is found and forwarded on every
+pass regardless of whether the broken UID's own entry ever moves; the broken UID is simply retried, and
+re-skipped, harmlessly, on every future pass. This keeps invariant 5 exactly as strict as before: nothing
+here lets the cursor advance past a message that was never actually stored or examined successfully --
+only past messages that WERE.
+
+### Visibility, with the smallest wire possible
+
+`omitidos_por_error_proveedor` is surfaced in `estado`'s own line and `registro.linea_resumen`'s summary
+(`registro.py`), but ONLY when nonzero -- unlike `reintentos`, which is informative even at 0, a skip count
+is the common, uninteresting case for every existing source (nothing in this repository's history has ever
+triggered it), so printing it unconditionally would have forced an edit to every existing exact-match test
+asserting a summary line, for a field that is 0 everywhere today. Folded into `historial.jsonl`'s own
+`omitidos` total (`cli.py`'s `_agregar_historial`, alongside `omitidos_por_reglas`/`omitidos_por_413_422`)
+rather than given its own historial field, matching that file's own stated design ("a trend view, not the
+full breakdown"). No new on-disk file, no wire field, no change to the Finanzas or Cuenta Duna contracts --
+this is purely a local counter on `ClienteImap`, read exactly the way two existing Graph-only counters
+already are.
+
+### Tests, measured
+
+5 new `def test_` in `tests/test_cliente_imap.py`: a message whose `INTERNALDATE` names an unparseable
+month is skipped while a newer, good message in the same folder is still forwarded
+(`test_mensaje_con_internaldate_invalida_se_omite_y_no_bloquea_el_resto`); a message the fake server
+answers `NO` to on FETCH is skipped the same way
+(`test_fallo_de_fetch_en_un_mensaje_no_bloquea_los_siguientes`); a message with an unwalkable
+`BODYSTRUCTURE` (`IndexError` on an empty parts list) is skipped the same way
+(`test_bodystructure_ilegible_se_omite_y_no_bloquea_el_resto`); a folder the fake server always answers
+`NO` to on `EXAMINE` is skipped while a healthy sibling folder is still read
+(`test_examine_fallido_en_una_carpeta_no_bloquea_las_demas`); and the negative case above proving a
+transport-level `OSError` still propagates and stops the whole pass
+(`test_conexion_rota_durante_fetch_sigue_deteniendo_toda_la_pasada`). The fake server
+(`_ServidorImapFalso`) gained two fault-injection knobs for this (`carpetas_examine_falla`,
+`uids_fetch_falla`), both defaulting to empty so every pre-existing test is unaffected.
+
+New `tests/test_registro.py` (3 tests): `omitidos_por_error_proveedor` is absent from the line when 0
+(byte-identical to every line this function has ever produced), present and exactly placed when nonzero,
+and coexists correctly alongside `reintentos`/`top`.
+
+2 new `def test_` in `tests/test_cli.py`: a provider exposing a nonzero `omitidos_por_error_proveedor`
+gets it printed in `estado`'s own line and folded into `historial.jsonl`'s `omitidos` total
+(`test_sincronizar_registra_omitidos_por_error_proveedor_en_estado_y_en_historial`); a provider with no
+such attribute (every existing Microsoft/Gmail fake, including `_ProveedorFalso`) never gets a guessed
+value printed (`test_sincronizar_sin_omitidos_de_proveedor_no_lo_imprime`).
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest --junit-xml=.gate-out/gate.xml -q` on this slice's own final tree
+(commit recorded below once written), run in the background past the 600s foreground cap and read back
+from the artifact rather than inferred from an exit code:
+
+    692 passed, 9 skipped in 657.68s
+
+(`gate.xml`'s own `testsuite` attributes: `tests="701" failures="0" errors="0" skipped="9"` -- 701 - 9 =
+692 passed.) Reconciled
+against this slice's own base (`main` at `e6e4906029350ecdf8d0dcfd4788dc879b8155a5`, 691 total:
+`BUZON-ESTADO-A-CUENTA-1`'s own recorded 682 passed + 9 skipped): 701 - 691 = 10 new collected items,
+matching the 7 new `def test_` lines `git diff main -- tests/` shows against tracked files PLUS the 3 more
+in the new, untracked-until-this-commit `tests/test_registro.py` (git diff against an untracked file shows
+nothing, so that file's own 3 defs are counted by hand) -- no drift, no parametrization multiplier needed
+since none of these new tests are parametrized. The 9 skips are the same pre-existing Windows file-mode
+skips every earlier slice in this ledger has recorded; none are new.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, and no on-disk file layout changed (the new
+counter is an in-memory attribute on `ClienteImap`, never persisted on its own). No cross-repo contract or
+DTO change -- nothing here touches the Finanzas or Cuenta Duna wire; `omitidos_por_error_proveedor` is a
+local counter, read by this connector's own `cli.py`, never sent anywhere. Judged NO customer-facing bytes,
+same reasoning `BUZON-CONECTOR-1` through `BUZON-FUENTE-WIRE-CORREO-1` already recorded (the narrower
+reading, not the broader one `BUZON-ALERTA-AUTH-1`/`BUZON-ESTADO-A-CUENTA-1` adopted for a NEW alert
+surface): the one new conditionally-printed field in `estado`'s own line is the same category of operator
+diagnostic as every count already there, not a new kind of surface, and this repository's only reader
+remains Carlos acting as his own system's administrator. All three conditions clear, so this slice merges
+on green without stopping for approval.
+
+### Attribution
+
+Carlos's own overnight direction (via the desk, `ORCH-CARLOS-DELEGATES-TIER-1-1`) asked for the most
+valuable open follow-up, weighted toward a real defect over hygiene, and named the one live data point
+(duna-zoho silent since 24 Nov 19:30) to weigh it against. This slice read `BUZON-ALERTA-CONSOLE-LINE-1`
+(the only named, open follow-up) and set it aside as needing a cross-repo wire outside this slice's
+approval, then found and fixed the defect behind that data point by reading `cliente_imap.py` and
+`sincronizar.py` against it: the per-folder and per-message isolation in `listar_mensajes`, the
+`omitidos_por_error_proveedor` counter and its wiring through `registro.py`/`cli.py`, and the tests above.
+
+### Open follow-ups, ranked
+
+1. **`BUZON-ALERTA-CONSOLE-LINE-1`** (named by `BUZON-ALERTA-AUTH-1`, still open): a console line
+   surfacing a source's own dead-credential alert in the admin UI, needing a Buzón-to-console wire that
+   does not exist yet -- cross-repo, outside this repository's own `touches:` and this slice's approval.
+   Highest-ranked because it is the only follow-up this ledger already names with an id and a clear owner
+   (the console/admin-ui repository) still to build the receiving half.
+2. **A genuine IMAP transport failure (`OSError`/`imaplib.IMAP4.abort`) is still uncaught and untranslated**
+   at every call site in `cliente_imap.py` -- it propagates as a raw Python exception rather than a clean
+   `ClienteImapErrorTransitorio`, risking an uncontrolled traceback in the journal (invariant 2 names
+   logs as counts-only) instead of the safe, class-name-only `motivo` string every other failure path in
+   this connector already produces. `_conexion_activa` already translates `OSError` for `conectar`/
+   `login`; `_examinar_carpeta`/`_buscar_uids`/`_fetch_uno` do not. Not built here: this slice deliberately
+   kept the one new catch narrow (content/protocol-level only) so a genuine connection break keeps
+   stopping the whole pass, per invariant 5 -- but the exception TYPE it propagates as should still be
+   this module's own, not imaplib's raw one. Reversible, small, no behavior change beyond the exception's
+   own class.
+3. **FIN-API-BUZON-ORIGEN-OBS-1 is resolved** (`BUZON-ORIGEN-WIRE-1` built the `origen` field) and every
+   other follow-up this ledger ever named before this entry is closed by a later slice -- re-verified
+   against the code while compiling this list, not merely against the ledger's own prose.
