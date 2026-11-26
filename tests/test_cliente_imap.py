@@ -530,6 +530,62 @@ def test_adjunto_en_linea_se_lista_pero_nunca_se_descarga() -> None:
     assert not comandos_fetch_seccion
 
 
+def test_listar_mensajes_seguido_de_metadata_y_completo_no_repite_bodystructure() -> None:
+    """BUZON-IMAP-BODYSTRUCTURE-CACHE-1: the real flow (`sincronizar.
+    ejecutar_pasada`) always calls `listar_adjuntos_metadata`/
+    `obtener_mensaje_completo` for the exact message `listar_mensajes` just
+    yielded, before asking this generator for another one -- so the
+    BODYSTRUCTURE that combined FETCH already parsed is reused for both,
+    never fetched a second or third time over the wire."""
+    mensajes = [
+        _mensaje_con_adjunto(
+            1, nombre_adjunto="factura.zip", contenido_adjunto=b"PK\x03\x04contenido-zip", cuerpo=b"ver adjunto"
+        )
+    ]
+    with _ServidorImapFalso(mensajes) as servidor:
+        cliente = _cliente(servidor)
+        resumenes = list(cliente.listar_mensajes(_DESDE))
+        assert len(resumenes) == 1
+        metadatos = cliente.listar_adjuntos_metadata(resumenes[0].id)
+        completo = cliente.obtener_mensaje_completo(resumenes[0].id, metadatos)
+        cliente.cerrar()
+
+    assert completo.cuerpo_html == "ver adjunto"
+    assert len(completo.adjuntos) == 1
+    assert completo.adjuntos[0].contenido == b"PK\x03\x04contenido-zip"
+
+    # A standalone "(BODYSTRUCTURE)"-only FETCH (never combined with
+    # HEADER.FIELDS) is what `listar_adjuntos_metadata`/
+    # `obtener_mensaje_completo` issued before this slice, every time --
+    # now neither does, for this exact message.
+    fetch_bodystructure_solo = [
+        c for c in servidor.comandos if "UID FETCH" in c and c.rstrip().endswith("(BODYSTRUCTURE)")
+    ]
+    assert fetch_bodystructure_solo == []
+
+
+def test_listar_adjuntos_metadata_standalone_sin_listar_mensajes_sigue_funcionando() -> None:
+    """The cache is a pure optimization, never a requirement: called on
+    its own (no `listar_mensajes` ever run on this client), both methods
+    still fetch BODYSTRUCTURE fresh and return the right answer, exactly
+    as before this slice (`test_listar_adjuntos_metadata_y_obtener_mensaje_
+    completo` already covers the same shape; this one also asserts the
+    fetch actually happened, unaffected by any cache)."""
+    mensajes = [_mensaje_con_adjunto(1, nombre_adjunto="factura.zip")]
+    with _ServidorImapFalso(mensajes) as servidor:
+        cliente = _cliente(servidor)
+        metadatos = cliente.listar_adjuntos_metadata("1")
+        completo = cliente.obtener_mensaje_completo("1", metadatos)
+        cliente.cerrar()
+
+    assert len(metadatos) == 1
+    assert len(completo.adjuntos) == 1
+    fetch_bodystructure_solo = [
+        c for c in servidor.comandos if "UID FETCH" in c and c.rstrip().endswith("(BODYSTRUCTURE)")
+    ]
+    assert len(fetch_bodystructure_solo) == 2
+
+
 def test_mensaje_mas_antiguo_que_desde_se_descarta_en_el_filtro_since() -> None:
     # The SINCE fallback only has day granularity -- a message from the
     # SAME day but before the exact `desde` timestamp must still be
