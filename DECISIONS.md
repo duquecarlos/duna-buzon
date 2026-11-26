@@ -2983,3 +2983,209 @@ approval, then found and fixed the defect behind that data point by reading `cli
 3. **FIN-API-BUZON-ORIGEN-OBS-1 is resolved** (`BUZON-ORIGEN-WIRE-1` built the `origen` field) and every
    other follow-up this ledger ever named before this entry is closed by a later slice -- re-verified
    against the code while compiling this list, not merely against the ledger's own prose.
+
+## BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1 -- the UID watermark over the date, carpetas casefold, a silence alert (2026-11-26)
+
+### Why
+
+`BUZON-ZOHO-CURSOR-QUIETO-INV-1` (an OBSERVED investigation run on `edfb9dc`, writing nothing of its own)
+found a code path that explains duna-zoho's 35 h of `vistos=0` with no error anywhere: a message whose
+`INTERNALDATE` stays old after a server-side filing is found by the per-folder UID search, then dropped,
+uncounted, by the global date filter (`cliente_imap.py:783-788`, a bare `continue`), wedging the folder's
+own UID watermark and the connector's single global cursor together. Main's own host check
+(`carpetas duna-zoho`) showed every one of that source's folders (`INBOX`, `Archive`, `Newsletter`,
+`Notification`, `Snoozed`, `Templates`) already read (`leida=si`), ruling OUT the folder-name casefold bug
+as THIS source's own cause -- but that casefold gap was still a real defect in its own right, and the
+investigation named three follow-ups. Carlos, through Main (`ORCH-CARLOS-DELEGATES-TIER-1-1`), asked for
+all three built as one slice: the fixes a silent loss of mail, and adds the alert his standing default
+calls for ("anything off the normal flow raises a flag"). Forwards only mail the source's own rules
+already allow -- no rule, no `reglas.json`, no wire shape changed.
+
+### Fix 1: the UID watermark, never the date, is the truth about "new in this folder"
+
+Before this slice, `listar_mensajes` fetched every candidate UID (from either the UID-resume search or the
+date-bounded `SINCE` fallback), parsed its `INTERNALDATE`, and dropped it with a bare `continue` whenever
+that date was earlier than the pass's own date cursor (`desde`) -- correct reasoning for the `SINCE`
+fallback (day granularity can return a message from the right day but before the exact timestamp), wrong
+for a genuine UID resume: every UID a resume search returns is, by construction, already strictly newer
+than the last one this folder's own watermark remembers, so its own date is irrelevant to whether it is
+new. A server-side filing rule (Zoho moving a message between folders, for instance) can leave
+`INTERNALDATE` at the message's ORIGINAL received time, long before `desde`, even though its UID in the
+folder it landed in is brand new -- exactly the shape the investigation named. That drop happened before
+`mapa_cursor` was ever touched for that UID, so the folder's own watermark never advanced past it either:
+the identical drop repeated, forever, on every future pass, with nothing printed or logged (invariant 2
+already forbids logging the message itself, and nothing here ever classified the drop as a skip worth
+counting at all).
+
+`listar_mensajes` now computes, once per folder, `usa_resumen_por_uid = cursor_previo is not None and
+cursor_previo[0] == uidvalidity` -- exactly the same condition `_buscar_uids` already uses internally to
+choose between the two search shapes, so the two never disagree. The date comparison applies ONLY when
+`usa_resumen_por_uid` is `False`; a genuine UID resume never drops a message on its date, full stop. Where
+the fallback DOES skip a message on date, the skip is counted (`ClienteImap.omitidos_por_fecha_proveedor`,
+a new public attribute, read by `cli.py` exactly the way `omitidos_por_error_proveedor` already is) and the
+folder's own watermark (`mapa_cursor[nombre_carpeta]`) still advances past it, exactly like a forwarded
+message would -- never a bare, silent `continue`. Surfaced in `registro.linea_resumen` and `estado`'s own
+line only when nonzero (same convention as `omitidos_por_error_proveedor`), and folded into
+`historial.jsonl`'s `omitidos` total (`cli.py`'s `_agregar_historial`).
+
+### Fix 2: `_carpeta_en_lista` casefolds both sides (`BUZON-IMAP-CARPETAS-CASEFOLD-1`)
+
+`_carpeta_excluida` already casefolds every flag and name comparison it makes; `_carpeta_en_lista` (the
+`carpetas` allow-list match `BUZON-IMAP-CARPETAS-INCLUIDAS-1` added) did not, so an operator-entered
+`carpetas` entry like `"legal"` would never match a server folder actually named `"Legal"`. Now both the
+exact-match and the delimiter-boundary child match casefold both sides before comparing -- the exclusion
+rules (which always run first, and already casefolded) are unaffected, so this can only ever let a
+`carpetas` entry match a folder name it was clearly meant to, never pull in a folder the exclusion rules
+already dropped.
+
+### Fix 3: a durable "last pass with vistos>0" marker raises and clears a silence alert
+
+The auth alert (`BUZON-ALERTA-AUTH-1`) only ever catches a credential that stops working outright. A
+source can run cleanly, pass after pass, authenticating fine and genuinely finding nothing -- `vistos=0`,
+no error anywhere -- for a reason that is never an auth failure: Fix 1's own bug (before this slice), a
+mailbox-side rule moving everything into an unread folder, or a `reglas.json` that now excludes everything.
+`historial.jsonl` cannot answer "has this source gone quiet" on its own: it is bounded to
+`historial.CAPACIDAD` (20) entries, which for a source syncing every 10 minutes holds only about 3h20 of
+history -- far too short to notice a mailbox quiet for most of a day.
+
+`alerta.py` gains a second, separate marker alongside `auth_fallando_desde`: `fuentes/<id>/visto.json`
+holding `ultimo_visto_en`, the UTC instant of the MOST RECENT pass that saw at least one message. Unlike
+the auth marker (set once per failing run, cleared only by a clean pass), this one is unconditional --
+`cli.py`'s `_ejecutar_una_fuente` calls `marcar_ultimo_visto` every time `resultado.contadores.vistos > 0`,
+regardless of what that pass went on to do with those messages (forward, skip by rule, or stop partway
+through on a transient Finanzas error) -- the mailbox HAD mail this pass, so it is not silent, whatever
+happened to that mail afterwards. A source with no marker at all has never once seen a message -- not "a
+source that used to see mail" -- so `cli._estado_silencio` never calls that silence; there has to have
+been mail before there can be a drought.
+
+`Config` gains `alerta_silencio_horas` (`BUZON_ALERTA_SILENCIO_HORAS`, default 24 -- the same threshold as
+the auth alert, and a reasonable floor for a business mailbox that gets at least one message a day: long
+enough that a quiet weekend never fires, short enough that a connector gone silent for a whole business day
+is flagged the next morning), validated by the same positive-integer rule `BUZON_ALERTA_AUTH_HORAS` already
+uses (`config.py`'s new shared `_horas_positivas_desde_entorno` helper, so the two never drift in how they
+reject a bad value). `comando_alertas` lists a `"tipo": "silencio"` entry, `desde`/`horas`/`remedio` in the
+exact same shape as an `"auth"` entry (`_remedio_silencio` names only the source id, never a credential:
+check the mailbox is still receiving mail, check `reglas.json` is not excluding everything), for any source
+past that threshold that is NOT already in an auth alert -- an auth failure already explains the silence,
+so the two never double up on the same underlying cause. There is no separate "clear" step: the marker
+simply moves forward past the threshold the instant a pass sees mail again, so the alert disappears on its
+own, by construction, same as `alerta_auth_horas`'s own comparison always has.
+
+### Tests, measured
+
+4 new `def test_` in `tests/test_cliente_imap.py`: a message with an old `INTERNALDATE` but a UID past the
+stored watermark is forwarded once and never repeated on a second pass
+(`test_mensaje_con_fecha_antigua_pero_uid_nuevo_en_resumen_se_ve_y_se_reenvia_una_vez`); the `SINCE`
+fallback's own date skip is counted and still advances the watermark, proven by a SECOND folder (sorted
+after the skipped one) yielding a message whose own `cursor_proveedor` snapshot already carries the first
+folder's advanced watermark even though that folder never yielded anything itself
+(`test_fecha_antigua_en_fallback_since_se_cuenta_y_avanza_el_cursor`); and two casefold tests, a flat
+`carpetas` entry and one across the delimiter boundary
+(`test_carpetas_coincide_sin_importar_mayusculas_o_minusculas`,
+`test_carpetas_hijo_anidado_coincide_sin_importar_mayusculas_o_minusculas`).
+
+3 new `def test_` in `tests/test_registro.py`, same shape as the existing `omitidos_por_error_proveedor`
+trio: `omitidos_por_fecha_proveedor` absent at 0, present and exactly placed when nonzero, and coexisting
+correctly alongside `omitidos_por_error_proveedor`.
+
+3 new `def test_` in `tests/test_alerta.py`: `cargar_ultimo_visto_en` is `None` with no marker;
+`marcar_ultimo_visto` writes and reads back the exact moment; a second call moves the marker FORWARD
+(unlike `marcar_auth_fallando`'s own set-once behavior).
+
+3 new `def test_` (one parametrized, 5 cases) in `tests/test_config.py`, the same shape as the existing
+`BUZON_ALERTA_AUTH_HORAS` trio: `alerta_silencio_horas` defaults to 24, accepts a positive integer, and
+rejects `"0"`/`"-1"`/a non-integer/a float-looking string by naming the variable (empty treated as unset).
+
+10 new `def test_` in `tests/test_cli.py`: `omitidos_por_fecha_proveedor` wired through `estado`'s line and
+`historial.jsonl`'s `omitidos` total, same shape as the existing `omitidos_por_error_proveedor` pair
+(`test_sincronizar_registra_omitidos_por_fecha_proveedor_en_estado_y_en_historial`, and the existing
+`test_sincronizar_sin_omitidos_de_proveedor_no_lo_imprime` extended to also assert the new field is absent
+at zero); a pass with `vistos>0` marks `ultimo_visto_en` to that pass's own moment
+(`test_pasada_con_vistos_marca_el_ultimo_visto`); a pass with `vistos=0` leaves it untouched
+(`test_pasada_sin_vistos_no_marca_el_ultimo_visto`); a pass that saw mail but then stopped on a transient
+error still marks it (`test_pasada_con_vistos_pero_detenida_igual_marca_el_ultimo_visto`); `alertas --json`
+lists a silent source, stays empty under the threshold, never calls a never-seen source silent, clears the
+instant a pass sees mail again, and never double-lists a source already in an auth alert
+(`test_alertas_json_lista_la_fuente_en_silencio`,
+`test_alertas_json_sin_pasar_el_umbral_de_silencio_queda_vacio`,
+`test_alertas_json_fuente_que_nunca_vio_correo_nunca_esta_en_silencio`,
+`test_alertas_json_silencio_se_limpia_tras_una_pasada_con_correo`,
+`test_alertas_json_auth_tiene_prioridad_sobre_silencio_para_la_misma_fuente`); and the Finanzas token still
+never appears in `alertas`' own output with a silencio entry present
+(`test_estado_y_alertas_nunca_imprimen_el_token_finanzas_con_silencio`).
+
+### Gate, measured
+
+`uv run pytest -q --junitxml=.gate-out/gate_report.xml` on this slice's own final tree (slice commit
+`6b803cb`, tree `2055d30eb40488c9ff179a45abd1fc4b8f911f52`), run in the background past the 600s foreground
+cap and read back from the artifact rather than inferred from an exit code:
+
+    testsuite tests="728" failures="0" errors="0" skipped="9"
+
+728 - 9 = 719 passed. Reconciled against this slice's own base (`main` at
+`edfb9dcd7f998d40a43bd9aacceadae694b1ad85`, 701 total per `BUZON-IMAP-MENSAJE-AISLADO-1`'s own recorded
+figure): 728 - 701 = 27 new collected items, matching the 23 new `def test_` lines above once the one
+parametrized `test_config.py` case (5 values, 1 already counted as a def) is expanded: 4 + 3 + 3 +
+(2 plain + 5 parametrized) + 10 = 27 -- no drift, no guessed number. The 9 skips are the same pre-existing
+Windows file-mode skips every earlier slice in this ledger has recorded; none are new.
+
+Tree identity proven before writing this entry, so the gate above was not re-run for the merge: merge
+commit `dafcd72d0a750309984513b09f86cb23e1e2e6d2` has tree `2055d30eb40488c9ff179a45abd1fc4b8f911f52`,
+IDENTICAL to the slice branch's own tree at commit `6b803cbb21e0bd92b629d65f258ae534b56a47bc`, and
+`git diff HEAD feat/buzon-imap-fecha-drop-y-silencio-1 --stat` against the merge commit was empty.
+
+### What the first pass after deploy should show on duna-zoho, if Fix 1 was the cause
+
+If the investigation's own candidate explanation was right, the first `sincronizar` pass after this slice
+deploys should show duna-zoho's own stuck folder (whichever of `INBOX`/`Archive`/`Newsletter`/
+`Notification`/`Snoozed`/`Templates` was holding the wedged message) with `vistos` finally greater than
+zero and `reenviados` (or `duplicados`/`omitidos_por_reglas`, depending on that message's own content and
+rules) accounting for it, exactly ONCE -- the stuck message forwarded (or correctly skipped by rule) a
+single time, never repeated on the pass after. `historial.jsonl`'s own trend table should show that one
+pass's `vistos` rising off the 35h-long run of zeros, with no `omitidos_por_fecha_proveedor` necessarily
+appearing at all for duna-zoho specifically (Fix 1 removes a drop that happened on the UID-RESUME path;
+`omitidos_por_fecha_proveedor` only ever counts a drop on the `SINCE` fallback, a different, narrower case).
+If `vistos` for duna-zoho is STILL zero after this deploys, Fix 1 was not the whole explanation and the
+silence alert (Fix 3) is what should catch it next, once `BUZON_ALERTA_SILENCIO_HORAS` passes.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database; `fuentes/<id>/visto.json` is a new per-source
+file on disk, the same category `BUZON-ALERTA-AUTH-1`'s own `alerta.json` and `BUZON-FUENTES-ESQUEMA-1`'s
+`cursor_proveedor.json` were already classified as. No cross-repo contract or DTO change -- nothing here
+touches the Finanzas or Cuenta Duna wire; `omitidos_por_fecha_proveedor` and the `"silencio"` alert type
+are both local to this connector's own CLI output, never sent to another repository. Customer-facing bytes
+DID change, on the SAME broader reading `BUZON-ALERTA-AUTH-1` recorded rather than the narrower one earlier
+entries used: the new `omitidos_por_fecha_proveedor=<n>` field in `estado`'s line, and the new
+`"tipo": "silencio"` entries in `alertas --json`, are bytes an OPERATOR reads (Carlos over SSH, Main and
+the desk over `sudo -n`) -- never a customer of a Duna product, but this is a NEW alert surface, the same
+kind of addition `BUZON-ALERTA-AUTH-1` chose not to narrow. The approval's own words -- "MERGE IS APPROVED
+on GREEN." -- are, exactly as they were for that entry, an explicit, in-words authorization to merge past a
+tripped condition once the gate is green, so this slice merges without waiting, on the broader reading of
+this one condition rather than a claim that it did not trip.
+
+### Attribution
+
+Carlos, through Main, delegated Tier 1 work under `ORCH-CARLOS-DELEGATES-TIER-1-1`, naming
+`BUZON-ZOHO-CURSOR-QUIETO-INV-1`'s own three follow-ups to be built as one slice. This slice read
+`cliente_imap.py`'s own `listar_mensajes` against that investigation's exact line numbers, confirmed the
+UID-resume-vs-date-fallback distinction already lived in `_buscar_uids`'s own branching condition, and
+reused it rather than inventing a new one; read `_carpeta_excluida` against `_carpeta_en_lista` to find the
+missing casefold; and read `alerta.py`'s own set-once marker shape before deciding the silence marker
+needed the opposite (unconditional, move-forward) behavior, rather than reusing that same function.
+
+### Open follow-ups, ranked
+
+1. **`BUZON-ALERTA-CONSOLE-LINE-1`** (named by `BUZON-ALERTA-AUTH-1`, still open, now also covering
+   `"tipo": "silencio"`): a console line surfacing a source's own alert in the admin UI, needing a
+   Buzón-to-console wire that does not exist yet -- cross-repo, outside this repository's own `touches:`.
+2. **A genuine IMAP transport failure (`OSError`/`imaplib.IMAP4.abort`) is still uncaught and untranslated**
+   at every call site in `cliente_imap.py` (named by `BUZON-IMAP-MENSAJE-AISLADO-1`, still open) --
+   unrelated to this slice's own three fixes, not touched here.
+3. **A source already in a silence alert that THEN also starts failing auth** reports only `"tipo": "auth"`
+   (auth takes priority, by this slice's own design, to avoid a redundant entry for the same underlying
+   cause) -- but the moment auth starts succeeding again while the mailbox is STILL genuinely quiet (a
+   `reglas.json` excluding everything, say), the silence alert resumes from whatever `ultimo_visto_en`
+   already held, which could already be well past the threshold, surfacing immediately rather than needing
+   a fresh 24h. This is the CORRECT behavior (the silence is real and has been ongoing), named here only so
+   a future reader does not mistake it for a bug.
