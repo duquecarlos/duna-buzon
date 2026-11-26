@@ -2920,8 +2920,8 @@ value printed (`test_sincronizar_sin_omitidos_de_proveedor_no_lo_imprime`).
 ### Gate, measured
 
 `.venv/Scripts/python.exe -m pytest --junit-xml=.gate-out/gate.xml -q` on this slice's own final tree
-(commit recorded below once written), run in the background past the 600s foreground cap and read back
-from the artifact rather than inferred from an exit code:
+(slice commit `e04380a`, tree `d740da75dd65c08148b3c1b1214ad17e14abe8f7`), run in the background past the
+600s foreground cap and read back from the artifact rather than inferred from an exit code:
 
     692 passed, 9 skipped in 657.68s
 
@@ -2934,6 +2934,11 @@ in the new, untracked-until-this-commit `tests/test_registro.py` (git diff again
 nothing, so that file's own 3 defs are counted by hand) -- no drift, no parametrization multiplier needed
 since none of these new tests are parametrized. The 9 skips are the same pre-existing Windows file-mode
 skips every earlier slice in this ledger has recorded; none are new.
+
+Tree identity proven before writing this entry, so the gate above was not re-run for the merge: merge
+commit `7bfe082` has tree `d740da75dd65c08148b3c1b1214ad17e14abe8f7`, IDENTICAL to the slice branch's own
+tree at commit `e04380a`, and `git diff HEAD feat/buzon-siguiente-seguimiento-2026-11-26 --stat` against
+the merge commit was empty.
 
 ### Merge-policy-A classification, made by this slice
 
