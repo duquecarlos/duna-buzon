@@ -3600,3 +3600,77 @@ inefficiency that turned up: the triple BODYSTRUCTURE fetch in `cliente_imap.py`
    cross-repo -- re-verified against the code and against this dispatch's own spec while compiling this
    list. This entry's own fix (`BUZON-IMAP-BODYSTRUCTURE-CACHE-1`) was not a previously-named follow-up; it
    was found fresh, by this slice's own reading, once the named list came up empty.
+
+---
+
+## BUZON-ESTADO-INTERRUPTOR-PERMITIDO-1 -- `env-set` learns `BUZON_ENVIAR_ESTADO_CUENTA` (2026-11-26)
+
+### Why
+
+Cuenta's own receiver for Buzón's status heartbeat is live (`CUENTA-API-BUZON-ESTADO-RECEPTOR-1-FINISH`,
+duna-cuenta-api `4d4ad9e`, migration `2d8bc2ec38a5` applied 26 Nov 2026 22:29 UTC; `POST
+/servicio/buzon/estado/{sub}` answers `401` unauthenticated, not `404`). Buzón's own sender
+(`BUZON-ESTADO-A-CUENTA-1`) has sat behind `Config.enviar_estado_cuenta` / `BUZON_ENVIAR_ESTADO_CUENTA`,
+off by default, since that slice -- the contract (`buzon-estado-a-cuenta-v1`) says to turn it on once the
+receiver is live. Main turns a switch like this on through the host's own `env-set` verb, but
+`deploy/host/env-permitidas.json` listed only `BUZON_ENVIAR_ORIGEN`, so `env-set` refused the key. This
+slice is the allowlist entry only -- it does not itself flip the switch; Main does that, through
+`env-set`, after this deploys.
+
+### What changed
+
+One allowlist entry, `deploy/host/env-permitidas.json`:
+
+    "BUZON_ENVIAR_ESTADO_CUENTA": "^(0|1)$"
+
+Same pattern as `BUZON_ENVIAR_ORIGEN`'s own entry, checked against `config.py`: both
+`_VALORES_ENVIAR_ORIGEN_VERDADEROS` and `_VALORES_ENVIAR_ESTADO_CUENTA_VERDADEROS` are
+`frozenset({"1", "true"})`, yet the existing `BUZON_ENVIAR_ORIGEN` allowlist entry only ever let `env-set`
+write `0` or `1` -- narrower than what `Config` itself tolerates, on purpose, so `env-set`'s own
+dry-run/apply report always shows the one canonical spelling. `^(0|1)$` for the new key matches that
+existing convention exactly; it is not a new choice. `cmd_env_set` and `_patron_permitido` in
+`deploy/host/duna-deploy-buzon` already read the allowlist file generically by key, so no script change
+was needed for `env-set BUZON_ENVIAR_ESTADO_CUENTA ...` to work once the key is listed.
+
+Documented next to `BUZON_ENVIAR_ORIGEN` in `deploy/host/README.md` (new "Turning on `estado_cuenta`"
+section): turn on only after the receiver is live, the exact `env-set ... --aplicar` command, and that a
+failed or unconfigured push never fails the pass. The top-level `README.md` already documented
+`BUZON_ENVIAR_ESTADO_CUENTA` in full (added by `BUZON-ESTADO-A-CUENTA-1`) and needed no change.
+
+### Tests, measured
+
+One new `def test_` in `tests/test_host_deploy_entry_script.py`
+(`git diff main~1 main -- tests/ | grep -c '^+def test_'`), parametrized into 7 collected items, proving
+`_patron_permitido`'s own pattern for `BUZON_ENVIAR_ESTADO_CUENTA` -- read from the real, shipped
+`deploy/host/env-permitidas.json`, not a copy -- matches `0` and `1` and refuses `2`, `true`, `01`, the
+empty string, and `"1 "`. The existing `test_archivo_env_permitidas_existe_y_es_json_valido`, which pins
+the allowlist's contents, gained an assertion for the new key alongside the existing one for
+`BUZON_ENVIAR_ORIGEN`.
+
+Gate, `uv run pytest`, run in two chunks on the final tree (the subprocess-spawning
+`tests/test_host_deploy_entry_script.py` is slow on this host independent of this slice -- 194 items took
+1005.54s, pre-existing cost, not caused by this diff):
+
+    uv run pytest tests/test_host_deploy_entry_script.py -q
+    194 passed in 1005.54s (0:16:45)
+
+    uv run pytest -q --ignore=tests/test_host_deploy_entry_script.py
+    555 passed, 9 skipped in 33.34s
+
+749 passed + 9 skipped = 758, matching `uv run pytest --collect-only -q` (`758 tests collected`) exactly --
+no drift, nothing failed, nothing pre-existing broke.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database. No customer-facing bytes -- the allowlist file
+and the operator README are read only by Main, the desk or Carlos himself over SSH, never by a customer of
+any Duna product. No cross-repo contract change -- this slice sends nothing over any wire; it only widens
+what `env-set` (already-shipped, already-tested local tooling) is allowed to write, for a key `Config`
+already parses unchanged. All three conditions clear, and the approval ("MERGE IS APPROVED on GREEN.")
+authorizes merging without waiting.
+
+### Attribution
+
+Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): one allowlist entry for an existing
+on/off switch, turned on only once its receiver is confirmed live -- exactly the contract's own
+instruction, nothing wider.
