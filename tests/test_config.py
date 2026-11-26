@@ -185,6 +185,36 @@ def test_enviar_origen_con_cualquier_otro_valor_queda_apagado(
 
 
 # ---------------------------------------------------------------------------
+# BUZON_ENVIAR_ESTADO_CUENTA (BUZON-ESTADO-A-CUENTA-1) -- off unless set to
+# EXACTLY "1" or "true"; everything else, including an unset variable,
+# stays off.
+# ---------------------------------------------------------------------------
+
+
+def test_enviar_estado_cuenta_ausente_queda_apagado(entorno_valido: dict[str, str]) -> None:
+    config = Config.desde_entorno(entorno_valido)
+    assert config.enviar_estado_cuenta is False
+
+
+@pytest.mark.parametrize("valor", ["1", "true"])
+def test_enviar_estado_cuenta_se_enciende_con_los_valores_exactos(
+    entorno_valido: dict[str, str], valor: str
+) -> None:
+    entorno_valido["BUZON_ENVIAR_ESTADO_CUENTA"] = valor
+    config = Config.desde_entorno(entorno_valido)
+    assert config.enviar_estado_cuenta is True
+
+
+@pytest.mark.parametrize("valor", ["0", "false", "True", "TRUE", "yes", "on", ""])
+def test_enviar_estado_cuenta_con_cualquier_otro_valor_queda_apagado(
+    entorno_valido: dict[str, str], valor: str
+) -> None:
+    entorno_valido["BUZON_ENVIAR_ESTADO_CUENTA"] = valor
+    config = Config.desde_entorno(entorno_valido)
+    assert config.enviar_estado_cuenta is False
+
+
+# ---------------------------------------------------------------------------
 # BUZON_ALERTA_AUTH_HORAS (BUZON-ALERTA-AUTH-1) -- threshold as DATA, never a
 # literal in cli.py. 24 hours when unset; any other value must be a positive
 # integer, named by error without echoing what was actually given.
