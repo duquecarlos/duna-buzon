@@ -1249,6 +1249,80 @@ def test_comando_carpetas_con_filtro_marca_solo_las_incluidas(
     assert "carpeta='Legal' banderas=- leida=si" in salida
 
 
+def test_comando_carpetas_con_marca_imprime_conteos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon import cursor as modulo_cursor
+    from duna_buzon.cliente_imap import ClienteImap
+
+    from .test_cliente_imap import _CarpetaFalsa, _ServidorImapFalso, _conectar_a, _mensaje_simple
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(
+        tmp_path, id="legal-duna", proveedor="imap", direccion="legal@duna.solutions"
+    )
+    cripto.escribir_archivo_sensible(
+        directorio / "credencial.bin", cripto.cifrar(b"app-password", config.clave_cifrado)
+    )
+    modulo_cursor.guardar_cursor_proveedor(str(directorio), '{"Legal": "1000:2"}')
+
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={})
+    legal = _CarpetaFalsa(
+        nombre="Legal",
+        mensajes={i: _mensaje_simple(i) for i in range(1, 5)},
+        uidvalidity=1000,
+        uidnext=5,
+    )
+    with _ServidorImapFalso(carpetas=[inbox, legal]) as servidor:
+        monkeypatch.setattr(
+            cli,
+            "ClienteImap",
+            lambda **kwargs: ClienteImap(**{**kwargs, "construir_conexion": _conectar_a(servidor)}),
+        )
+        assert cli.comando_carpetas(config, "legal-duna") == 0
+
+    salida = capsys.readouterr().out
+    assert (
+        "carpeta='Legal' banderas=- leida=si mensajes=4 uidnext=5 uidvalidity=1000 "
+        "marca=1000:2 nuevos=2" in salida
+    )
+    # INBOX has no stored watermark at all -- "sin marca", both fields.
+    assert (
+        "carpeta='INBOX' banderas=- leida=si mensajes=0 uidnext=1 uidvalidity=1000 "
+        "marca=sin marca nuevos=sin marca" in salida
+    )
+
+
+def test_comando_carpetas_excluida_no_imprime_conteos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.cliente_imap import ClienteImap
+
+    from .test_cliente_imap import _CarpetaFalsa, _ServidorImapFalso, _conectar_a
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(
+        tmp_path, id="legal-duna", proveedor="imap", direccion="legal@duna.solutions"
+    )
+    cripto.escribir_archivo_sensible(
+        directorio / "credencial.bin", cripto.cifrar(b"app-password", config.clave_cifrado)
+    )
+
+    trash = _CarpetaFalsa(nombre="Trash", banderas=("\\Trash",), mensajes={})
+    with _ServidorImapFalso(carpetas=[trash]) as servidor:
+        monkeypatch.setattr(
+            cli,
+            "ClienteImap",
+            lambda **kwargs: ClienteImap(**{**kwargs, "construir_conexion": _conectar_a(servidor)}),
+        )
+        assert cli.comando_carpetas(config, "legal-duna") == 0
+
+    salida = capsys.readouterr().out
+    assert salida.strip() == "carpeta='Trash' banderas=\\Trash leida=no"
+    # Never EXAMINEd -- it is excluded, so this must never issue EXAMINE for it.
+    assert not any('"Trash"' in c for c in servidor.comandos if "EXAMINE" in c)
+
+
 def test_comando_carpetas_id_desconocido_es_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2798,12 +2872,113 @@ def test_alertas_json_sin_pasar_el_umbral_de_silencio_queda_vacio(
 def test_alertas_json_fuente_que_nunca_vio_correo_nunca_esta_en_silencio(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # No `ultimo_visto_en` marker at all -- this source has never once
-    # seen mail, so it is not "a source that used to see mail".
+    # Neither `ultimo_visto_en` NOR `primera_pasada_en` exists -- this
+    # source has never even attempted a single pass yet, so there is
+    # nothing to measure silence from.
     config = _config(tmp_path)
     _escribir_fuente(tmp_path)
     assert cli.comando_alertas(config) == 0
     assert json.loads(capsys.readouterr().out) == []
+
+
+def test_alertas_json_fuente_que_nunca_vio_correo_pero_ya_fue_pasada_cae_en_silencio_tras_el_umbral(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No `ultimo_visto_en` at all (this source has NEVER once seen mail),
+    # but it HAS been checked before (`primera_pasada_en` is set) -- past
+    # BUZON_ALERTA_SILENCIO_HORAS since that first pass, this must raise,
+    # not stay quiet forever (BUZON-CARPETAS-CONTEO-1).
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_primera_pasada(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=25))
+
+    assert cli.comando_alertas(config) == 0
+    salida = json.loads(capsys.readouterr().out)
+    assert salida == [
+        {
+            "fuente": "hotmail-carlos",
+            "tipo": "silencio",
+            "desde": "2026-11-19T08:00:00Z",
+            "horas": 25,
+            "remedio": cli._remedio_silencio(cargar_fuente(str(tmp_path), "hotmail-carlos")),
+        }
+    ]
+
+
+def test_alertas_json_fuente_que_nunca_vio_correo_antes_del_umbral_queda_vacio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_primera_pasada(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=23))
+
+    assert cli.comando_alertas(config) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_alertas_json_ultimo_visto_tiene_prioridad_sobre_primera_pasada(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A source that DID once see mail measures silence from THAT sighting,
+    # never from the older `primera_pasada_en` -- `ultimo_visto_en` is the
+    # one that moves forward.
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    primera_pasada = datetime.datetime(2026, 11, 1, 8, 0, tzinfo=datetime.UTC)
+    ultimo_visto = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_primera_pasada(str(directorio), primera_pasada)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), ultimo_visto)
+    # Past the threshold since `primera_pasada`, but NOT since `ultimo_visto`.
+    monkeypatch.setattr(cli, "_ahora", lambda: ultimo_visto + datetime.timedelta(hours=23))
+
+    assert cli.comando_alertas(config) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_sincronizar_marca_primera_pasada_en_la_primera_corrida(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores()))
+
+    momento = datetime.datetime(2026, 11, 20, 8, 0, tzinfo=datetime.UTC)
+    monkeypatch.setattr(cli, "_ahora", lambda: momento)
+    assert cli.comando_sincronizar(config) == 0
+    assert modulo_alerta.cargar_primera_pasada_en(str(directorio)) == momento
+
+
+def test_sincronizar_no_sobrescribe_primera_pasada_en_corridas_siguientes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores()))
+
+    primero = datetime.datetime(2026, 11, 20, 8, 0, tzinfo=datetime.UTC)
+    segundo = datetime.datetime(2026, 11, 20, 8, 10, tzinfo=datetime.UTC)
+    monkeypatch.setattr(cli, "_ahora", lambda: primero)
+    assert cli.comando_sincronizar(config) == 0
+    monkeypatch.setattr(cli, "_ahora", lambda: segundo)
+    assert cli.comando_sincronizar(config) == 0
+
+    assert modulo_alerta.cargar_primera_pasada_en(str(directorio)) == primero
 
 
 def test_alertas_json_silencio_se_limpia_tras_una_pasada_con_correo(

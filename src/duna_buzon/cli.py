@@ -35,7 +35,7 @@ from duna_buzon import cursor as modulo_cursor
 from duna_buzon import fuentes as modulo_fuentes
 from duna_buzon import historial as modulo_historial
 from duna_buzon import registro
-from duna_buzon.cliente_imap import ClienteImap, ClienteImapError
+from duna_buzon.cliente_imap import ClienteImap, ClienteImapError, ClienteImapErrorTransitorio
 from duna_buzon.config import Config
 from duna_buzon.cuenta import CuentaClient, CuentaPullError, FuenteEstadoWire
 from duna_buzon.finanzas import FinanzasClient
@@ -106,13 +106,19 @@ def _estado_alerta(
 def _estado_silencio(
     config: Config, fuente: FuenteConfig, ahora: datetime.datetime
 ) -> tuple[datetime.datetime, int] | None:
-    """`(desde, horas)` when this source's own `ultimo_visto_en`
-    (BUZON-ALERTA-SILENCIO-1) is OLDER than `config.alerta_silencio_horas`,
-    `None` otherwise -- no marker at all (this source has never once seen
-    mail -- never "used to see mail", so there is nothing to call silence
-    yet), or one still under the threshold."""
+    """`(desde, horas)` when this source has gone quiet longer than
+    `config.alerta_silencio_horas`, `None` otherwise. `desde` is this
+    source's own `ultimo_visto_en` (BUZON-ALERTA-SILENCIO-1) when it has
+    ever once seen mail; for a source that NEVER has, this falls back to
+    `primera_pasada_en` (BUZON-CARPETAS-CONTEO-1) -- the first pass this
+    connector ever attempted for it -- so a mailbox that has produced
+    nothing from the very start still raises past the threshold instead of
+    staying invisible forever. `None` only when this source has never even
+    attempted a single pass yet, or one still under the threshold."""
     directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
     desde = modulo_alerta.cargar_ultimo_visto_en(directorio)
+    if desde is None:
+        desde = modulo_alerta.cargar_primera_pasada_en(directorio)
     if desde is None:
         return None
     transcurrido = ahora - desde
@@ -270,6 +276,11 @@ def _ejecutar_una_fuente(
     `credencial.bin` to read, so this never calls `auth`/`credencial_imap`
     for it."""
     directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
+    # BUZON-CARPETAS-CONTEO-1 -- set once, on the FIRST pass this source
+    # ever attempts, whatever it does next: `_estado_silencio`'s own
+    # fallback needs to know when this connector started watching this
+    # source even if it never once sees mail afterwards.
+    modulo_alerta.marcar_primera_pasada(directorio, _ahora())
 
     def _detenida(motivo: str) -> tuple[str, str | None, bool]:
         # No provider exists yet at this point (auth/rules both run before
@@ -795,7 +806,20 @@ def comando_carpetas(config: Config, id_fuente: str) -> int:
     name, flags, and whether this source would read it today -- so the
     operator can see, before the first sync, whether a shared mailbox like
     Zoho's is exposed at all, and under what name. Never prints message
-    content, and never the credential (`BUZON-IMAP-CARPETAS-INCLUIDAS-1`)."""
+    content, and never the credential (`BUZON-IMAP-CARPETAS-INCLUIDAS-1`).
+
+    For every folder THIS source would read, also prints its own counts
+    (`BUZON-CARPETAS-CONTEO-1`): MESSAGES, UIDNEXT, UIDVALIDITY (from the
+    same EXAMINE `cliente_imap.diagnosticar_carpeta` issues), this source's
+    own stored UID watermark for that folder (`marca`, "sin marca" when
+    none is stored yet), and how many messages carry a UID past it
+    (`nuevos`) -- the line that tells apart "no mail arrived" (`nuevos=0`)
+    from "mail is there and a pass is not seeing it" (`nuevos` > 0 while
+    `sincronizar` keeps reporting `vistos=0`). One folder's own broken
+    EXAMINE or SEARCH is reported on its own line and never stops the rest
+    of this report (same isolation `listar_mensajes` already gives a live
+    pass, BUZON-IMAP-MENSAJE-AISLADO-1) -- only a connection-level failure
+    still stops the whole command."""
     _migrar_si_necesario(config)
     todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
     try:
@@ -816,24 +840,44 @@ def comando_carpetas(config: Config, id_fuente: str) -> int:
         return 1
 
     assert fuente.host is not None and fuente.port is not None
+    cursor_proveedor_inicial = modulo_cursor.cargar_cursor_proveedor(directorio)
     cliente = ClienteImap(
         host=fuente.host,
         puerto=fuente.port,
         usuario=fuente.direccion,
         password=password,
         carpetas=fuente.carpetas,
+        cursor_proveedor_inicial=cursor_proveedor_inicial,
     )
     try:
-        listado = cliente.listar_carpetas_con_estado()
-    except ClienteImapError as exc:
-        print(f"error: imap {exc}", file=sys.stderr)
-        return 1
+        try:
+            listado = cliente.listar_carpetas_con_estado()
+        except ClienteImapError as exc:
+            print(f"error: imap {exc}", file=sys.stderr)
+            return 1
+
+        for nombre, banderas, incluida in listado:
+            banderas_txt = ",".join(banderas) if banderas else "-"
+            linea = f"carpeta={nombre!r} banderas={banderas_txt} leida={'si' if incluida else 'no'}"
+            if incluida:
+                try:
+                    diagnostico = cliente.diagnosticar_carpeta(nombre)
+                except ClienteImapErrorTransitorio as exc:
+                    linea += f" error=imap {exc}"
+                else:
+                    marca_txt = (
+                        f"{diagnostico.marca[0]}:{diagnostico.marca[1]}"
+                        if diagnostico.marca is not None
+                        else "sin marca"
+                    )
+                    nuevos_txt = str(diagnostico.nuevos) if diagnostico.nuevos is not None else "sin marca"
+                    linea += (
+                        f" mensajes={diagnostico.mensajes} uidnext={diagnostico.uidnext} "
+                        f"uidvalidity={diagnostico.uidvalidity} marca={marca_txt} nuevos={nuevos_txt}"
+                    )
+            print(linea)
     finally:
         cliente.cerrar()
-
-    for nombre, banderas, incluida in listado:
-        banderas_txt = ",".join(banderas) if banderas else "-"
-        print(f"carpeta={nombre!r} banderas={banderas_txt} leida={'si' if incluida else 'no'}")
     return 0
 
 

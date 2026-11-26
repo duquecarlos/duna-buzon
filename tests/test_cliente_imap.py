@@ -24,6 +24,7 @@ from duna_buzon.cliente_imap import (
     ClienteImapAutenticacionError,
     ClienteImapConexionError,
     ClienteImapErrorTransitorio,
+    DiagnosticoCarpeta,
 )
 from duna_buzon.graph import AdjuntoMetadata
 from duna_buzon.proveedor_errores import ProveedorErrorTransitorio
@@ -806,6 +807,64 @@ def test_cursor_proveedor_formato_antiguo_se_lee_como_inbox() -> None:
         cliente.cerrar()
 
     assert resultado == []
+    assert not any("UID SEARCH" in c for c in servidor.comandos)
+
+
+# ---------------------------------------------------------------------------
+# `diagnosticar_carpeta` (BUZON-CARPETAS-CONTEO-1): the `carpetas` operator
+# command's own counts -- never used by `listar_mensajes`.
+# ---------------------------------------------------------------------------
+
+
+def test_diagnosticar_carpeta_con_marca_cuenta_los_uids_por_encima() -> None:
+    mensajes = [_mensaje_simple(1), _mensaje_simple(2), _mensaje_simple(3), _mensaje_simple(4)]
+    with _ServidorImapFalso(mensajes, uidvalidity=1000, uidnext=5) as servidor:
+        cliente = _cliente(servidor, cursor_proveedor_inicial="1000:2")
+        diagnostico = cliente.diagnosticar_carpeta("INBOX")
+        cliente.cerrar()
+
+    assert diagnostico == DiagnosticoCarpeta(
+        mensajes=4, uidnext=5, uidvalidity=1000, marca=(1000, 2), nuevos=2
+    )
+
+
+def test_diagnosticar_carpeta_sin_marca_es_sin_marca() -> None:
+    mensajes = [_mensaje_simple(1), _mensaje_simple(2)]
+    with _ServidorImapFalso(mensajes, uidvalidity=1000, uidnext=3) as servidor:
+        cliente = _cliente(servidor, cursor_proveedor_inicial=None)
+        diagnostico = cliente.diagnosticar_carpeta("INBOX")
+        cliente.cerrar()
+
+    assert diagnostico.mensajes == 2
+    assert diagnostico.uidnext == 3
+    assert diagnostico.uidvalidity == 1000
+    assert diagnostico.marca is None
+    assert diagnostico.nuevos is None
+
+
+def test_diagnosticar_carpeta_con_uidvalidity_distinta_no_cuenta() -> None:
+    # The stored watermark names a UIDVALIDITY the server no longer has --
+    # counting UIDs against it would mean nothing, since a live pass would
+    # fall back to the date cursor instead of comparing UIDs. The stale
+    # pair is still reported as `marca`, just never counted.
+    mensajes = [_mensaje_simple(1)]
+    with _ServidorImapFalso(mensajes, uidvalidity=2000, uidnext=2) as servidor:
+        cliente = _cliente(servidor, cursor_proveedor_inicial="1000:50")
+        diagnostico = cliente.diagnosticar_carpeta("INBOX")
+        cliente.cerrar()
+
+    assert diagnostico.marca == (1000, 50)
+    assert diagnostico.nuevos is None
+
+
+def test_diagnosticar_carpeta_al_dia_no_emite_busqueda() -> None:
+    mensajes = [_mensaje_simple(1)]
+    with _ServidorImapFalso(mensajes, uidvalidity=1000, uidnext=2) as servidor:
+        cliente = _cliente(servidor, cursor_proveedor_inicial="1000:1")
+        diagnostico = cliente.diagnosticar_carpeta("INBOX")
+        cliente.cerrar()
+
+    assert diagnostico.nuevos == 0
     assert not any("UID SEARCH" in c for c in servidor.comandos)
 
 

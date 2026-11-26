@@ -61,3 +61,31 @@ def test_marcar_ultimo_visto_dos_veces_conserva_el_segundo_momento(tmp_path: Pat
     alerta.marcar_ultimo_visto(str(tmp_path), primero)
     alerta.marcar_ultimo_visto(str(tmp_path), segundo)
     assert alerta.cargar_ultimo_visto_en(str(tmp_path)) == segundo
+
+
+# ---------------------------------------------------------------------------
+# BUZON-CARPETAS-CONTEO-1 -- `primera_pasada_en`: set once, on the FIRST
+# pass this connector ever attempted for a source, the silence alert's own
+# fallback for a source that has NEVER once seen mail.
+# ---------------------------------------------------------------------------
+
+
+def test_cargar_primera_pasada_sin_marcador_es_none(tmp_path: Path) -> None:
+    assert alerta.cargar_primera_pasada_en(str(tmp_path)) is None
+
+
+def test_marcar_primera_pasada_escribe_el_momento(tmp_path: Path) -> None:
+    momento = datetime.datetime(2026, 11, 20, 8, 0, 0, tzinfo=datetime.UTC)
+    alerta.marcar_primera_pasada(str(tmp_path), momento)
+    assert alerta.cargar_primera_pasada_en(str(tmp_path)) == momento
+
+
+def test_marcar_primera_pasada_dos_veces_conserva_el_primer_momento(tmp_path: Path) -> None:
+    # Set once -- unlike `marcar_ultimo_visto`'s own latest-sighting
+    # marker, every later pass is a no-op so this always names when this
+    # connector FIRST started watching the source.
+    primero = datetime.datetime(2026, 11, 20, 8, 0, 0, tzinfo=datetime.UTC)
+    segundo = datetime.datetime(2026, 11, 20, 20, 0, 0, tzinfo=datetime.UTC)
+    alerta.marcar_primera_pasada(str(tmp_path), primero)
+    alerta.marcar_primera_pasada(str(tmp_path), segundo)
+    assert alerta.cargar_primera_pasada_en(str(tmp_path)) == primero
