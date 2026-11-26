@@ -103,6 +103,35 @@ def _estado_alerta(
     return desde, horas
 
 
+def _estado_silencio(
+    config: Config, fuente: FuenteConfig, ahora: datetime.datetime
+) -> tuple[datetime.datetime, int] | None:
+    """`(desde, horas)` when this source's own `ultimo_visto_en`
+    (BUZON-ALERTA-SILENCIO-1) is OLDER than `config.alerta_silencio_horas`,
+    `None` otherwise -- no marker at all (this source has never once seen
+    mail -- never "used to see mail", so there is nothing to call silence
+    yet), or one still under the threshold."""
+    directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
+    desde = modulo_alerta.cargar_ultimo_visto_en(directorio)
+    if desde is None:
+        return None
+    transcurrido = ahora - desde
+    if transcurrido < datetime.timedelta(hours=config.alerta_silencio_horas):
+        return None
+    horas = int(transcurrido // datetime.timedelta(hours=1))
+    return desde, horas
+
+
+def _remedio_silencio(fuente: FuenteConfig) -> str:
+    """Never a token, password or address -- only what to go check: the
+    mailbox itself (still receiving mail at all?) and this source's own
+    rules (not excluding everything that arrives)."""
+    return (
+        f"revise la fuente {fuente.id!r}: confirme que la cuenta sigue recibiendo correo "
+        "y que sus reglas no estan excluyendolo todo"
+    )
+
+
 def _migrar_si_necesario(config: Config) -> None:
     modulo_fuentes.migrar_fuente_unica_si_necesario(config.directorio_datos, config.clave_cifrado)
 
@@ -184,6 +213,7 @@ def _agregar_historial(
     finalizado_en: datetime.datetime,
     *,
     omitidos_por_error_proveedor: int = 0,
+    omitidos_por_fecha_proveedor: int = 0,
 ) -> None:
     """Appends this pass's summary to the source's bounded history
     (`historial.py`), right beside the `estado.json` write that already
@@ -191,7 +221,8 @@ def _agregar_historial(
     slice, so every existing reader of it keeps working. `omitidos` merges
     every skip counter (`omitidos_por_reglas`, `omitidos_por_413_422`, and --
     for a provider that has one -- `omitidos_por_error_proveedor`,
-    BUZON-IMAP-MENSAJE-AISLADO-1): the compact table is a trend view, not
+    BUZON-IMAP-MENSAJE-AISLADO-1, and `omitidos_por_fecha_proveedor`,
+    BUZON-IMAP-FECHA-DROP-VISIBLE-1): the compact table is a trend view, not
     the full breakdown `estado.json` and `registro.linea_resumen` still
     carry for the latest pass."""
     modulo_historial.agregar_pasada(
@@ -205,6 +236,7 @@ def _agregar_historial(
                 contadores.omitidos_por_reglas
                 + contadores.omitidos_por_413_422
                 + omitidos_por_error_proveedor
+                + omitidos_por_fecha_proveedor
             ),
             errors=motivo,
         ),
@@ -330,7 +362,19 @@ def _ejecutar_una_fuente(
     # this source's pass. Microsoft and Gmail have no such concept yet, so
     # this reports 0 for them -- never a guess.
     omitidos_proveedor = getattr(proveedor, "omitidos_por_error_proveedor", 0)
+    # `omitidos_por_fecha_proveedor` is `ClienteImap`'s own counter
+    # (BUZON-IMAP-FECHA-DROP-VISIBLE-1): a message its own date-bounded
+    # SINCE fallback deliberately skipped. Microsoft and Gmail have no such
+    # concept, so this reports 0 for them -- never a guess.
+    omitidos_fecha_proveedor = getattr(proveedor, "omitidos_por_fecha_proveedor", 0)
     momento = _ahora()
+    if resultado.contadores.vistos > 0:
+        # BUZON-ALERTA-SILENCIO-1 -- this source's mailbox had mail THIS
+        # pass (whatever happened to it afterwards: forwarded, duplicated,
+        # omitted by rules), so the silence marker resets to now. Never
+        # gated on the pass finishing cleanly: a source that stopped on a
+        # transient Finanzas error after seeing mail is not "silent".
+        modulo_alerta.marcar_ultimo_visto(directorio, momento)
     linea = registro.linea_resumen(
         resultado.contadores,
         resultado.motivo,
@@ -338,6 +382,7 @@ def _ejecutar_una_fuente(
         reintentos=reintentos,
         top=top_usado,
         omitidos_por_error_proveedor=omitidos_proveedor,
+        omitidos_por_fecha_proveedor=omitidos_fecha_proveedor,
     )
     cripto.asegurar_directorio_datos(Path(directorio))
     cripto.escribir_archivo_sensible(Path(directorio) / NOMBRE_ARCHIVO_ESTADO, linea.encode("utf-8"))
@@ -347,6 +392,7 @@ def _ejecutar_una_fuente(
         resultado.motivo,
         momento,
         omitidos_por_error_proveedor=omitidos_proveedor,
+        omitidos_por_fecha_proveedor=omitidos_fecha_proveedor,
     )
     return linea, resultado.motivo, resultado.detenida_por_autenticacion
 
@@ -632,27 +678,42 @@ def comando_estado(config: Config, *, pasadas: int | None = None) -> int:
 
 def comando_alertas(config: Config) -> int:
     """Machine-readable: every source currently past its own auth-failure
-    threshold (BUZON-ALERTA-AUTH-1), as a JSON list -- `[]` when none.
-    Read-only, exits 0 either way: Main's own session-start hub check
-    reads this through `duna-deploy-buzon alertas` to relay a dead
-    credential to the desk, never a token, password or address beyond the
-    source's own id."""
+    threshold (BUZON-ALERTA-AUTH-1), OR -- when it is not already an auth
+    alert, the auth failure already explains the silence -- past its own
+    mail-silence threshold (BUZON-ALERTA-SILENCIO-1), as a JSON list --
+    `[]` when none. Read-only, exits 0 either way: Main's own
+    session-start hub check reads this through `duna-deploy-buzon alertas`
+    to relay a dead credential or a gone-quiet source to the desk, never a
+    token, password or address beyond the source's own id."""
     _migrar_si_necesario(config)
     todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
     ahora = _ahora()
     alertas: list[dict[str, object]] = []
     for fuente in todas:
         en_alerta = _estado_alerta(config, fuente, ahora)
-        if en_alerta is None:
+        if en_alerta is not None:
+            desde, horas = en_alerta
+            alertas.append(
+                {
+                    "fuente": fuente.id,
+                    "tipo": "auth",
+                    "desde": registro.formato_fecha_utc(desde),
+                    "horas": horas,
+                    "remedio": _remedio_credencial(fuente),
+                }
+            )
             continue
-        desde, horas = en_alerta
+        en_silencio = _estado_silencio(config, fuente, ahora)
+        if en_silencio is None:
+            continue
+        desde, horas = en_silencio
         alertas.append(
             {
                 "fuente": fuente.id,
-                "tipo": "auth",
+                "tipo": "silencio",
                 "desde": registro.formato_fecha_utc(desde),
                 "horas": horas,
-                "remedio": _remedio_credencial(fuente),
+                "remedio": _remedio_silencio(fuente),
             }
         )
     print(json.dumps(alertas))

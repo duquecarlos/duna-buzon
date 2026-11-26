@@ -599,6 +599,81 @@ def test_uidvalidity_distinta_cae_de_nuevo_a_since() -> None:
 
 
 # ---------------------------------------------------------------------------
+# BUZON-IMAP-FECHA-DROP-VISIBLE-1: the UID watermark, never the date, is
+# the truth about "new in this folder" -- a UID past the stored watermark
+# is forwarded whatever its own INTERNALDATE says, and a message the
+# SINCE-date fallback itself skips is counted and still advances the
+# watermark, never a bare, silent `continue`.
+# ---------------------------------------------------------------------------
+
+
+def test_mensaje_con_fecha_antigua_pero_uid_nuevo_en_resumen_se_ve_y_se_reenvia_una_vez() -> None:
+    # UID 2 is past the stored watermark (UID 1) -- genuinely new in this
+    # folder -- even though its own INTERNALDATE is long before `desde`,
+    # exactly like a server-side filing rule (e.g. Zoho moving a message
+    # into a different folder) can leave it. Before this slice this was
+    # silently dropped on the date check alone, uncounted, and the
+    # watermark never advanced past it, so it repeated forever.
+    desde = datetime.datetime(2026, 3, 1, tzinfo=datetime.UTC)
+    mensajes = [
+        _mensaje_simple(1, internaldate="01-Mar-2026 10:00:00 +0000"),
+        _mensaje_simple(2, internaldate="01-Jan-2026 09:00:00 +0000", asunto="archivado"),
+    ]
+    with _ServidorImapFalso(mensajes, uidvalidity=1000, uidnext=3) as servidor:
+        cliente = _cliente(servidor, cursor_proveedor_inicial="1000:1")
+        resultado = list(cliente.listar_mensajes(desde))
+        cliente.cerrar()
+
+    assert {m.id for m in resultado} == {"2"}
+    assert resultado[0].asunto == "archivado"
+    assert cliente.omitidos_por_fecha_proveedor == 0
+    cursor_final = json.loads(resultado[-1].cursor_proveedor)
+    assert cursor_final == {"INBOX": "1000:2"}
+
+    # A second pass, resuming from the now-advanced watermark, never sees
+    # it again -- the cursor and watermark both moved past it for good.
+    with _ServidorImapFalso(mensajes, uidvalidity=1000, uidnext=3) as servidor2:
+        cliente2 = _cliente(servidor2, cursor_proveedor_inicial=json.dumps(cursor_final))
+        resultado2 = list(cliente2.listar_mensajes(desde))
+        cliente2.cerrar()
+
+    assert resultado2 == []
+
+
+def test_fecha_antigua_en_fallback_since_se_cuenta_y_avanza_el_cursor() -> None:
+    # No usable stored cursor for "INBOX" (first-ever pass) -- the
+    # SINCE-date fallback is used, and its own day granularity still
+    # excludes a message from before `desde`. That skip is now counted
+    # (`omitidos_por_fecha_proveedor`), never a bare `continue`, and the
+    # watermark advances past it anyway -- proven here by "Zeta" (sorted
+    # after "INBOX", so examined second) yielding a message whose own
+    # `cursor_proveedor` snapshot already carries INBOX's advanced
+    # watermark, even though INBOX itself never yielded anything this pass.
+    desde = datetime.datetime(2026, 3, 1, 9, 0, tzinfo=datetime.UTC)
+    inbox = _CarpetaFalsa(
+        nombre="INBOX",
+        mensajes={1: _mensaje_simple(1, internaldate="01-Mar-2026 08:00:00 +0000")},
+        uidvalidity=1000,
+        uidnext=2,
+    )
+    zeta = _CarpetaFalsa(
+        nombre="Zeta",
+        mensajes={1: _mensaje_simple(1, internaldate="02-Mar-2026 10:00:00 +0000", asunto="nueva")},
+        uidvalidity=2000,
+        uidnext=2,
+    )
+    with _ServidorImapFalso(carpetas=[inbox, zeta]) as servidor:
+        cliente = _cliente(servidor)
+        resultado = list(cliente.listar_mensajes(desde))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"nueva"}
+    assert cliente.omitidos_por_fecha_proveedor == 1
+    cursor_final = json.loads(resultado[-1].cursor_proveedor)
+    assert cursor_final == {"INBOX": "1000:1", "Zeta": "2000:1"}
+
+
+# ---------------------------------------------------------------------------
 # Multiple folders (BUZON-FUENTE-IMAP-CARPETAS-1): discovery, SPECIAL-USE
 # and name-based exclusion, a per-folder cursor, and a per-folder
 # UIDVALIDITY change.
@@ -830,6 +905,40 @@ def test_carpetas_un_nombre_que_solo_empieza_igual_nunca_coincide() -> None:
     assert {m.asunto for m in resultado} == {"debe aparecer"}
     comandos_examine = [c for c in servidor.comandos if "EXAMINE" in c]
     assert not any('"Legales"' in c for c in comandos_examine)
+
+
+def test_carpetas_coincide_sin_importar_mayusculas_o_minusculas() -> None:
+    # BUZON-IMAP-CARPETAS-CASEFOLD-1: `carpetas` names "legal" (lowercase)
+    # but the server's own folder is "Legal" -- `_carpeta_en_lista` must
+    # casefold both sides, the same as `_carpeta_excluida` already does.
+    legal = _CarpetaFalsa(nombre="Legal", mensajes={1: _mensaje_simple(1, asunto="debe aparecer")})
+    otra = _CarpetaFalsa(nombre="Otra", mensajes={1: _mensaje_simple(1, asunto="nunca debe aparecer")})
+    with _ServidorImapFalso(carpetas=[legal, otra]) as servidor:
+        cliente = _cliente(servidor, carpetas=["legal"])
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"debe aparecer"}
+    comandos_examine = [c for c in servidor.comandos if "EXAMINE" in c]
+    assert any('"Legal"' in c for c in comandos_examine)
+    assert not any('"Otra"' in c for c in comandos_examine)
+
+
+def test_carpetas_hijo_anidado_coincide_sin_importar_mayusculas_o_minusculas() -> None:
+    # Same casefold, now across the delimiter boundary: `carpetas` names
+    # "LEGAL" and the server's child folder is "Legal/Facturas".
+    legal = _CarpetaFalsa(nombre="Legal", mensajes={})
+    legal_facturas = _CarpetaFalsa(
+        nombre="Legal/Facturas", mensajes={1: _mensaje_simple(1, asunto="debe aparecer")}
+    )
+    with _ServidorImapFalso(carpetas=[legal, legal_facturas], delimitador="/") as servidor:
+        cliente = _cliente(servidor, carpetas=["LEGAL"])
+        resultado = list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert {m.asunto for m in resultado} == {"debe aparecer"}
+    comandos_examine = [c for c in servidor.comandos if "EXAMINE" in c]
+    assert any('"Legal/Facturas"' in c for c in comandos_examine)
 
 
 def test_carpetas_excluida_por_special_use_nunca_se_incluye_aunque_coincida_el_nombre() -> None:

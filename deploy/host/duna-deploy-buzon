@@ -20,14 +20,17 @@
 #   sudo -n /usr/local/sbin/duna-deploy-buzon env-set <CLAVE> <VALOR> [--aplicar]
 #   sudo -n /usr/local/sbin/duna-deploy-buzon alertas
 #
-# BUZON-ALERTA-AUTH-1 -- `alertas` is read-only: it just runs `python -m
-# duna_buzon alertas --json`, as `duna`, the same way `status` runs
-# `estado` -- a JSON list of every source whose own credential has been
-# failing to authenticate for more than BUZON_ALERTA_AUTH_HORAS (default
-# 24) hours, `[]` when none. Main's own session-start hub check reads this
-# over `sudo -n` (the sudoers rule below is a bare script path, so this
-# subcommand needs no sudoers change) to relay a dead credential to the
-# desk. Never a token, password or address beyond the source's own id.
+# BUZON-ALERTA-AUTH-1 / BUZON-ALERTA-SILENCIO-1 -- `alertas` is read-only:
+# it just runs `python -m duna_buzon alertas --json`, as `duna`, the same
+# way `status` runs `estado` -- a JSON list of every source whose own
+# credential has been failing to authenticate for more than
+# BUZON_ALERTA_AUTH_HORAS (default 24) hours ("tipo": "auth"), or whose own
+# last sighting of mail is older than BUZON_ALERTA_SILENCIO_HORAS (same
+# default) ("tipo": "silencio"), `[]` when none. Main's own session-start
+# hub check reads this over `sudo -n` (the sudoers rule below is a bare
+# script path, so this subcommand needs no sudoers change) to relay a dead
+# credential or a gone-quiet source to the desk. Never a token, password or
+# address beyond the source's own id.
 #
 # BUZON-REGLAS-ENTRADA-1 -- `reglas-ver <fuente>` prints a source's own
 # `reglas.json`, read-only (never a secret: `reglas.json` holds only

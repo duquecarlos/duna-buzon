@@ -715,6 +715,48 @@ def test_sincronizar_registra_omitidos_por_error_proveedor_en_estado_y_en_histor
     assert registros[-1].omitidos == 3
 
 
+def test_sincronizar_registra_omitidos_por_fecha_proveedor_en_estado_y_en_historial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """BUZON-IMAP-FECHA-DROP-VISIBLE-1: same shape as
+    `omitidos_por_error_proveedor` above, for `ClienteImap.
+    omitidos_por_fecha_proveedor` -- a message its own date-bounded SINCE
+    fallback deliberately skipped."""
+    from duna_buzon import historial
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+
+    class _ProveedorConOmitidosPorFecha:
+        omitidos_por_fecha_proveedor = 2
+
+        def cerrar(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        cli,
+        "construir_proveedor",
+        lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorConOmitidosPorFecha(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "ejecutar_pasada",
+        lambda **kwargs: ResultadoPasada(
+            contadores=Contadores(vistos=4, reenviados=1, omitidos_por_reglas=0, omitidos_por_413_422=0)
+        ),
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    salida = capsys.readouterr()
+    assert "omitidos_por_fecha_proveedor=2" in salida.out
+
+    registros, descartadas = historial.leer_historial(directorio)
+    assert descartadas == 0
+    assert registros[-1].omitidos == 2
+
+
 def test_sincronizar_sin_omitidos_de_proveedor_no_lo_imprime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -736,6 +778,7 @@ def test_sincronizar_sin_omitidos_de_proveedor_no_lo_imprime(
     assert cli.comando_sincronizar(config) == 0
     salida = capsys.readouterr()
     assert "omitidos_por_error_proveedor=" not in salida.out
+    assert "omitidos_por_fecha_proveedor=" not in salida.out
 
 
 def test_sincronizar_sin_enviar_origen_no_pasa_etiqueta_ni_imprime_nada(
@@ -2642,3 +2685,179 @@ def test_parada_no_auth_nunca_lleva_alerta_si_aunque_haya_alerta_vieja(
     assert cli.comando_sincronizar(config) == 1
     salida = capsys.readouterr()
     assert salida.err.strip() == "fuente=hotmail-carlos parada: finanzas enviar http=503"
+
+
+# ---------------------------------------------------------------------------
+# BUZON-ALERTA-SILENCIO-1 -- a durable per-source "last pass with
+# vistos>0" marker (`alerta.ultimo_visto_en`): a source that used to see
+# mail and has gone quiet for `BUZON_ALERTA_SILENCIO_HORAS` raises a
+# "silencio" alert through `alertas`, and clears the moment a pass sees
+# mail again.
+# ---------------------------------------------------------------------------
+
+
+def test_pasada_con_vistos_marca_el_ultimo_visto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1, reenviados=1))
+    )
+
+    momento = datetime.datetime(2026, 11, 20, 8, 0, tzinfo=datetime.UTC)
+    monkeypatch.setattr(cli, "_ahora", lambda: momento)
+    assert cli.comando_sincronizar(config) == 0
+    assert modulo_alerta.cargar_ultimo_visto_en(str(directorio)) == momento
+
+
+def test_pasada_sin_vistos_no_marca_el_ultimo_visto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores()))
+
+    assert cli.comando_sincronizar(config) == 0
+    assert modulo_alerta.cargar_ultimo_visto_en(str(directorio)) is None
+
+
+def test_pasada_con_vistos_pero_detenida_igual_marca_el_ultimo_visto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The mailbox HAD mail this pass, whatever happened to it afterwards --
+    # a transient Finanzas error does not make the source "silent".
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    resultado_falso = ResultadoPasada(
+        contadores=Contadores(vistos=1),
+        detenida_por_error_transitorio=True,
+        motivo="finanzas enviar http=503",
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: resultado_falso)
+
+    momento = datetime.datetime(2026, 11, 20, 8, 0, tzinfo=datetime.UTC)
+    monkeypatch.setattr(cli, "_ahora", lambda: momento)
+    assert cli.comando_sincronizar(config) == 1
+    assert modulo_alerta.cargar_ultimo_visto_en(str(directorio)) == momento
+
+
+def test_alertas_json_lista_la_fuente_en_silencio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=25))
+
+    assert cli.comando_alertas(config) == 0
+    salida = json.loads(capsys.readouterr().out)
+    assert salida == [
+        {
+            "fuente": "hotmail-carlos",
+            "tipo": "silencio",
+            "desde": "2026-11-19T08:00:00Z",
+            "horas": 25,
+            "remedio": cli._remedio_silencio(cargar_fuente(str(tmp_path), "hotmail-carlos")),
+        }
+    ]
+
+
+def test_alertas_json_sin_pasar_el_umbral_de_silencio_queda_vacio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=23))
+
+    assert cli.comando_alertas(config) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_alertas_json_fuente_que_nunca_vio_correo_nunca_esta_en_silencio(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No `ultimo_visto_en` marker at all -- this source has never once
+    # seen mail, so it is not "a source that used to see mail".
+    config = _config(tmp_path)
+    _escribir_fuente(tmp_path)
+    assert cli.comando_alertas(config) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_alertas_json_silencio_se_limpia_tras_una_pasada_con_correo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    ahora = desde + datetime.timedelta(hours=30)
+    monkeypatch.setattr(cli, "_ahora", lambda: ahora)
+    assert cli.comando_alertas(config) == 0
+    assert json.loads(capsys.readouterr().out) != []
+
+    # The next pass sees mail again -- the marker moves forward to now,
+    # and the alert clears immediately.
+    modulo_alerta.marcar_ultimo_visto(str(directorio), ahora)
+    assert cli.comando_alertas(config) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_alertas_json_auth_tiene_prioridad_sobre_silencio_para_la_misma_fuente(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A source already failing auth never also gets a redundant "silencio"
+    # entry for the same underlying cause.
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=30))
+
+    assert cli.comando_alertas(config) == 0
+    salida = json.loads(capsys.readouterr().out)
+    assert [entrada["tipo"] for entrada in salida] == ["auth"]
+
+
+def test_estado_y_alertas_nunca_imprimen_el_token_finanzas_con_silencio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secreto = "TOKEN-FINANZAS-SECRETO-NO-DEBE-APARECER"
+    config = Config.desde_entorno(
+        {
+            "BUZON_GRAPH_CLIENT_ID": "cliente",
+            "BUZON_CLAVE_CIFRADO": CLAVE_VALIDA_BASE64,
+            "FINANZAS_BUZON_TOKEN": secreto,
+            "BUZON_DATOS": str(tmp_path),
+            "BUZON_FINANZAS_URL": "http://127.0.0.1:8010",
+        }
+    )
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=30))
+
+    assert cli.comando_alertas(config) == 0
+    assert secreto not in capsys.readouterr().out

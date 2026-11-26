@@ -85,6 +85,34 @@ processed and forwarded in the SAME pass. Never a connection-level failure:
 propagate and stop the whole pass exactly as before -- only a clean,
 protocol- or content-level problem with ONE specific folder or message is
 treated as skippable.
+
+BUZON-IMAP-FECHA-DROP-VISIBLE-1: the per-folder UID watermark is the truth
+about "new in this folder" -- a message whose UID sits past the stored
+watermark is new, whatever its own INTERNALDATE or Date header says. Before
+this slice, `listar_mensajes` compared EVERY candidate message's
+INTERNALDATE against `desde` and silently dropped (a bare `continue`,
+uncounted) anything earlier -- correct for the date-bounded SINCE fallback
+(day granularity can return a message from the right day but before the
+exact timestamp), but wrong for a genuine UID-resume: a server-side filing
+rule (e.g. Zoho moving a message into a different folder) can leave
+INTERNALDATE at the message's ORIGINAL received time, long before `desde`,
+even though its UID in the destination folder is brand new. That dropped
+message was never counted anywhere, and the folder's own watermark never
+advanced past it either (the drop happened before `mapa_cursor` was
+touched) -- so the SAME uncounted drop repeated on every future pass,
+wedging that folder's watermark (and, by extension, the connector's single
+global cursor, see `sincronizar.py`) at the same point forever, with no
+error anywhere: `BUZON-ZOHO-CURSOR-QUIETO-INV-1`'s own candidate explanation
+for a source stuck at `vistos=0` with nothing in any log. Now the date
+comparison applies ONLY on the SINCE-fallback path; a genuine UID-resume
+never drops on date, full stop. Where a message IS skipped for a date
+reason, it is counted (`omitidos_por_fecha_proveedor`, read by `cli.py` the
+same way `omitidos_por_error_proveedor` already is) and the watermark still
+advances past it, so nothing can wedge on this path again.
+
+BUZON-IMAP-CARPETAS-CASEFOLD-1: `_carpeta_en_lista` now casefolds both
+sides, the same as `_carpeta_excluida` already does -- an operator-entered
+`carpetas` entry must match a server folder name regardless of case.
 """
 
 from __future__ import annotations
@@ -351,11 +379,15 @@ def _carpeta_en_lista(nombre: str, delimitador: str | None, carpetas: Sequence[s
     under one of them in the server's own hierarchy (`entrada +
     delimitador + lo-que-sea`). Never a bare prefix match -- without the
     delimiter boundary, an entry "Legal" would wrongly match a sibling
-    folder "Legales"."""
+    folder "Legales". Casefolds both sides (BUZON-IMAP-CARPETAS-CASEFOLD-1),
+    the same as `_carpeta_excluida` already does -- an operator-entered
+    `carpetas` entry must match a server folder name regardless of case."""
+    nombre_cf = nombre.casefold()
     for entrada in carpetas:
-        if nombre == entrada:
+        entrada_cf = entrada.casefold()
+        if nombre_cf == entrada_cf:
             return True
-        if delimitador and nombre.startswith(entrada + delimitador):
+        if delimitador and nombre_cf.startswith(entrada_cf + delimitador.casefold()):
             return True
     return False
 
@@ -576,6 +608,13 @@ class ClienteImap:
         # rather than let block every other folder or message this pass
         # (BUZON-IMAP-MENSAJE-AISLADO-1).
         self.omitidos_por_error_proveedor: int = 0
+        # Public, read the same way -- a message the date-bounded SINCE
+        # fallback returned whose own INTERNALDATE is still before `desde`
+        # (day granularity): a deliberate, permanent skip, never a message
+        # the UID watermark ever called new (BUZON-IMAP-FECHA-DROP-
+        # VISIBLE-1). Counted here so it never disappears as a bare
+        # `continue`.
+        self.omitidos_por_fecha_proveedor: int = 0
         self._construir_conexion = construir_conexion
         self._conexion: ConexionImapProtocolo | None = None
         self._carpeta_actual: str | None = None
@@ -757,6 +796,23 @@ class ClienteImap:
                 self.omitidos_por_error_proveedor += 1
                 continue
 
+            # Whether THIS folder's own search just now resumed from its
+            # stored UID watermark (a genuine resume -- every candidate UID
+            # it returned is, by construction, already strictly newer than
+            # the last one processed) or fell back to the date-bounded
+            # SINCE search (no usable watermark for this folder this pass).
+            # Only the SECOND can ever return a message whose own
+            # INTERNALDATE sits before `desde` (SINCE has day granularity,
+            # and a server-side filing rule can leave INTERNALDATE at the
+            # message's original received time) -- so only there does
+            # comparing against `desde` mean anything. A UID past the
+            # watermark is new BY DEFINITION, whatever its own date says
+            # (BUZON-IMAP-FECHA-DROP-VISIBLE-1): before this slice this
+            # same comparison, applied unconditionally, silently dropped
+            # such a message on the resume path too, wedging this folder's
+            # watermark against a cursor that could never advance past it.
+            usa_resumen_por_uid = cursor_previo is not None and cursor_previo[0] == uidvalidity
+
             for uid in uids:
                 try:
                     texto, literal = self._fetch_uno(
@@ -780,11 +836,18 @@ class ClienteImap:
                     self.omitidos_por_error_proveedor += 1
                     continue
 
-                if recibido_en < desde:
-                    # Only the SINCE-date fallback (day granularity) can ever
-                    # return something earlier than `desde` -- the UID-resume
-                    # path never does, since every candidate UID is already
-                    # strictly newer than the last one processed.
+                if not usa_resumen_por_uid and recibido_en < desde:
+                    # The SINCE fallback's own day granularity caught a
+                    # message from the right day but before the exact
+                    # `desde` timestamp -- a deliberate, permanent skip
+                    # (this same comparison gives the same answer on every
+                    # future pass), never a failure, so the watermark still
+                    # advances past it here, exactly like a genuinely
+                    # forwarded message would, and it is counted rather
+                    # than vanishing as a bare `continue`
+                    # (BUZON-IMAP-FECHA-DROP-VISIBLE-1).
+                    mapa_cursor[nombre_carpeta] = (uidvalidity, uid)
+                    self.omitidos_por_fecha_proveedor += 1
                     continue
 
                 tiene_adjuntos = any(hoja.es_adjunto for hoja in hojas)
