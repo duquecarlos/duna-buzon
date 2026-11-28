@@ -627,6 +627,7 @@ def _pull_fuentes_cuenta(config: Config) -> dict[str, str] | None:
                 token_finanzas_ref=config.cuenta_sub,
                 activa=True,
                 origen="cuenta",
+                id_fuente_conectada=pullada.id,
             ),
         )
 
@@ -678,7 +679,14 @@ def _estado_wire_para(
     `_estado_alerta` threshold `estado`/`alertas` already use). `None`
     otherwise -- this connector has no other failure it can attribute to a
     single source today, so `"error"` is named by the contract but never
-    sent here."""
+    sent here.
+
+    `fuente_conectada_id` (`CUENTA-BUZON-FUENTE-ID-ECO-2`) is the Cuenta
+    Duna id Cuenta itself sent for this mailbox, echoed back so Cuenta can
+    link this heartbeat row to the `fuente_conectada` it already knows
+    about -- `None` for a local source, via `fuentes.id_fuente_conectada_
+    efectiva`, which also recovers it for a `fuente.json` written before
+    this slice."""
     directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
     registros, _ = modulo_historial.leer_historial(directorio)
     if not registros:
@@ -701,6 +709,10 @@ def _estado_wire_para(
         vistos=ultimo.vistos,
         reenviados=ultimo.reenviados,
         alerta=alerta,
+        # CUENTA-BUZON-FUENTE-ID-ECO-2 -- `id_fuente_conectada_efectiva`
+        # already returns `None` for a local source, so this is correct
+        # unconditionally, not just "only for origen == cuenta".
+        fuente_conectada_id=modulo_fuentes.id_fuente_conectada_efectiva(fuente),
     )
 
 

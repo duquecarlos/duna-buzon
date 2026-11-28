@@ -110,6 +110,13 @@ class FuenteConfig:
     # excluded kinds; for `microsoft`, whatever Graph itself accepts as a
     # `/me/mailFolders/{carpeta}/...` segment (BUZON-GRAPH-502-1).
     carpetas: tuple[str, ...] | None = None
+    # CUENTA-BUZON-FUENTE-ID-ECO-2 -- only ever set for `origen == "cuenta"`,
+    # written by `cli.py`'s own `_pull_fuentes_cuenta` from the exact `id`
+    # Cuenta Duna returned for this mailbox (`GET /servicio/fuentes/{sub}`).
+    # `None` for a local source, and also `None` for a `fuente.json` written
+    # before this slice -- `id_fuente_conectada_efectiva` below recovers that
+    # case from the `cuenta-` prefix `id_fuente_cuenta` itself writes.
+    id_fuente_conectada: str | None = None
 
     @property
     def etiqueta_registro(self) -> str:
@@ -203,6 +210,15 @@ def _fuente_desde_json(id_fuente: str, datos: dict) -> FuenteConfig:
             )
         carpetas = tuple(valor_carpetas)
 
+    # CUENTA-BUZON-FUENTE-ID-ECO-2 -- absent on every `fuente.json` written
+    # before this slice, which must keep loading exactly as before.
+    id_fuente_conectada = datos.get("id_fuente_conectada")
+    if id_fuente_conectada is not None and not isinstance(id_fuente_conectada, str):
+        raise FuenteInvalidaError(
+            f"fuente.json for {id_fuente!r} names an invalid id_fuente_conectada: "
+            f"{id_fuente_conectada!r}"
+        )
+
     return FuenteConfig(
         id=id_fuente,
         proveedor=proveedor,
@@ -214,6 +230,7 @@ def _fuente_desde_json(id_fuente: str, datos: dict) -> FuenteConfig:
         port=port,
         origen=origen,
         carpetas=carpetas,
+        id_fuente_conectada=id_fuente_conectada,
     )
 
 
@@ -241,6 +258,7 @@ def _contenido_fuente_json(fuente: FuenteConfig) -> bytes:
             "port": fuente.port,
             "origen": fuente.origen,
             "carpetas": list(fuente.carpetas) if fuente.carpetas is not None else None,
+            "id_fuente_conectada": fuente.id_fuente_conectada,
         }
     ).encode("utf-8")
 
@@ -335,6 +353,28 @@ def id_fuente_cuenta(id_cuenta: str) -> str:
     resumes the SAME cursor and rules rather than starting over under a
     different id."""
     return f"cuenta-{id_cuenta}"
+
+
+_PREFIJO_ID_FUENTE_CUENTA = "cuenta-"
+
+
+def id_fuente_conectada_efectiva(fuente: FuenteConfig) -> str | None:
+    """The Cuenta Duna id this source's own heartbeat echoes back
+    (`CUENTA-BUZON-FUENTE-ID-ECO-2`), or `None` for a local source.
+    Prefers `fuente.id_fuente_conectada` -- written by `cli.py`'s own
+    `_pull_fuentes_cuenta` from Cuenta's own `id` on every pull since this
+    slice. Falls back, for an `origen == "cuenta"` source whose
+    `fuente.json` predates this slice and so carries no such field, to
+    recovering it from the `cuenta-` prefix `id_fuente_cuenta` itself
+    writes -- the ONE place this parsing happens, per this slice's own
+    build instructions."""
+    if fuente.id_fuente_conectada is not None:
+        return fuente.id_fuente_conectada
+    if fuente.origen != "cuenta":
+        return None
+    if fuente.id.startswith(_PREFIJO_ID_FUENTE_CUENTA):
+        return fuente.id[len(_PREFIJO_ID_FUENTE_CUENTA):]
+    return None
 
 
 def _direccion_desde_cache_msal(contenido: bytes) -> str:

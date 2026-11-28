@@ -15,6 +15,7 @@ from duna_buzon.fuentes import (
     directorio_fuente,
     fuentes_activas,
     guardar_fuente,
+    id_fuente_conectada_efectiva,
     id_fuente_cuenta,
     listar_fuentes,
     listar_fuentes_con_errores,
@@ -82,6 +83,47 @@ def test_guardar_y_cargar_una_fuente_de_cuenta_ida_y_vuelta(tmp_path: Path) -> N
 
 def test_id_fuente_cuenta_antepone_el_prefijo() -> None:
     assert id_fuente_cuenta("abc123") == "cuenta-abc123"
+
+
+# ---------------------------------------------------------------------------
+# `id_fuente_conectada` / `id_fuente_conectada_efectiva` (CUENTA-BUZON-
+# FUENTE-ID-ECO-2)
+# ---------------------------------------------------------------------------
+
+
+def test_id_fuente_conectada_por_defecto_es_nulo() -> None:
+    assert _fuente().id_fuente_conectada is None
+
+
+def test_guardar_y_cargar_una_fuente_de_cuenta_con_id_conectada_ida_y_vuelta(tmp_path: Path) -> None:
+    fuente_cuenta = _fuente(
+        id="cuenta-abc123",
+        proveedor="google",
+        direccion="carlos@gmail.com",
+        origen="cuenta",
+        id_fuente_conectada="abc123",
+    )
+    guardar_fuente(str(tmp_path), fuente_cuenta)
+    assert cargar_fuente(str(tmp_path), "cuenta-abc123") == fuente_cuenta
+
+
+def test_id_fuente_conectada_efectiva_usa_el_campo_cuando_esta_presente() -> None:
+    fuente = _fuente(
+        id="cuenta-abc123", proveedor="google", origen="cuenta", id_fuente_conectada="abc123"
+    )
+    assert id_fuente_conectada_efectiva(fuente) == "abc123"
+
+
+def test_id_fuente_conectada_efectiva_la_recupera_del_prefijo_en_un_fuente_json_legado() -> None:
+    # A `fuente.json` written before this slice has no `id_fuente_conectada`
+    # key at all -- it must still echo the right id.
+    fuente = _fuente(id="cuenta-abc123", proveedor="google", origen="cuenta")
+    assert fuente.id_fuente_conectada is None
+    assert id_fuente_conectada_efectiva(fuente) == "abc123"
+
+
+def test_id_fuente_conectada_efectiva_es_nula_para_una_fuente_local() -> None:
+    assert id_fuente_conectada_efectiva(_fuente()) is None
 
 
 def test_cargar_fuente_origen_desconocido_se_rechaza(tmp_path: Path) -> None:

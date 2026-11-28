@@ -1967,6 +1967,7 @@ def test_estado_cuenta_nunca_manda_mas_que_los_campos_enumerados(
         "vistos",
         "reenviados",
         "alerta",
+        "fuente_conectada_id",
     }
 
 
@@ -2139,6 +2140,91 @@ def test_estado_cuenta_falla_nunca_falla_la_pasada(
     assert cli.comando_sincronizar(config) == 0  # the push's own failure never fails the pass
     salida = capsys.readouterr()
     assert "cuenta: cuenta estado http=500" in salida.err
+
+
+# ---------------------------------------------------------------------------
+# `fuente_conectada_id` on the heartbeat row (CUENTA-BUZON-FUENTE-ID-ECO-2)
+# ---------------------------------------------------------------------------
+
+
+def _fuente_cuenta_directorio(tmp_path: Path, **over: object) -> tuple[Path, FuenteConfig]:
+    base: dict[str, object] = dict(
+        id="cuenta-3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        proveedor="google",
+        direccion="carlos@gmail.com",
+        etiqueta="carlos@gmail.com",
+        token_finanzas_ref="sub-carlos",
+        activa=True,
+        origen="cuenta",
+        id_fuente_conectada="3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    )
+    base.update(over)
+    fuente = FuenteConfig(**base)  # type: ignore[arg-type]
+    guardar_fuente(str(tmp_path), fuente)
+    return tmp_path / "fuentes" / fuente.id, fuente
+
+
+def test_estado_wire_para_fuente_de_cuenta_manda_su_uuid(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    directorio, fuente = _fuente_cuenta_directorio(tmp_path)
+    _agregar_pasada_historial(directorio, finalizado_en="2026-11-26T10:00:00Z", vistos=2)
+
+    wire = cli._estado_wire_para(config, fuente, datetime.datetime(2026, 11, 26, 11, tzinfo=datetime.UTC))
+
+    assert wire is not None
+    assert wire.fuente_conectada_id == "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+
+
+def test_estado_wire_para_fuente_local_manda_nulo(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    fuente = cargar_fuente(str(tmp_path), "hotmail-carlos")
+    _agregar_pasada_historial(directorio, finalizado_en="2026-11-26T10:00:00Z", vistos=2)
+
+    wire = cli._estado_wire_para(config, fuente, datetime.datetime(2026, 11, 26, 11, tzinfo=datetime.UTC))
+
+    assert wire is not None
+    assert wire.fuente_conectada_id is None
+
+
+def test_estado_wire_para_fuente_json_legado_recupera_el_id_del_prefijo(tmp_path: Path) -> None:
+    # No `id_fuente_conectada` key at all -- a `fuente.json` written before
+    # this slice.
+    config = _config(tmp_path)
+    directorio, fuente = _fuente_cuenta_directorio(tmp_path, id_fuente_conectada=None)
+    assert fuente.id_fuente_conectada is None
+    _agregar_pasada_historial(directorio, finalizado_en="2026-11-26T10:00:00Z", vistos=2)
+
+    wire = cli._estado_wire_para(config, fuente, datetime.datetime(2026, 11, 26, 11, tzinfo=datetime.UTC))
+
+    assert wire is not None
+    assert wire.fuente_conectada_id == "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+
+
+def test_estado_wire_para_fuente_de_cuenta_inactiva_sigue_mandando_su_id(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    directorio, fuente = _fuente_cuenta_directorio(tmp_path, activa=False)
+    _agregar_pasada_historial(directorio, finalizado_en="2026-11-26T10:00:00Z", vistos=2)
+
+    wire = cli._estado_wire_para(config, fuente, datetime.datetime(2026, 11, 26, 11, tzinfo=datetime.UTC))
+
+    assert wire is not None
+    assert wire.alerta == "reingreso_requerido"
+    assert wire.fuente_conectada_id == "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+
+
+def test_estado_wire_para_id_malformado_no_lanza(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    directorio, fuente = _fuente_cuenta_directorio(tmp_path, id_fuente_conectada="no-es-un-uuid")
+    _agregar_pasada_historial(directorio, finalizado_en="2026-11-26T10:00:00Z", vistos=2)
+
+    wire = cli._estado_wire_para(config, fuente, datetime.datetime(2026, 11, 26, 11, tzinfo=datetime.UTC))
+
+    assert wire is not None
+    # `_estado_wire_para` still carries the malformed value through --
+    # `CuentaClient.enviar_estado` is the one place that nulls it before
+    # the wire, so a request never built never needs to raise either.
+    assert wire.fuente_conectada_id == "no-es-un-uuid"
 
 
 # ---------------------------------------------------------------------------

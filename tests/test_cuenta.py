@@ -166,6 +166,7 @@ def _fuente_wire(**overrides: object) -> FuenteEstadoWire:
         vistos=12,
         reenviados=3,
         alerta=None,
+        fuente_conectada_id=None,
     )
     base.update(overrides)
     return FuenteEstadoWire(**base)  # type: ignore[arg-type]
@@ -211,6 +212,7 @@ def test_enviar_estado_el_cuerpo_tiene_exactamente_los_campos_del_contrato() -> 
                 vistos=5,
                 reenviados=1,
                 alerta="reingreso_requerido",
+                fuente_conectada_id="3fa85f64-5717-4562-b3fc-2c963f66afa6",
             )
         ],
         enviado_en=datetime.datetime(2026, 11, 26, 10, 5, tzinfo=datetime.UTC),
@@ -233,6 +235,7 @@ def test_enviar_estado_el_cuerpo_tiene_exactamente_los_campos_del_contrato() -> 
         "vistos",
         "reenviados",
         "alerta",
+        "fuente_conectada_id",
     }
     assert fila == {
         "fuente_id": "cuenta-abc123",
@@ -244,7 +247,78 @@ def test_enviar_estado_el_cuerpo_tiene_exactamente_los_campos_del_contrato() -> 
         "vistos": 5,
         "reenviados": 1,
         "alerta": "reingreso_requerido",
+        "fuente_conectada_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
     }
+
+
+# ---------------------------------------------------------------------------
+# `fuente_conectada_id` (CUENTA-BUZON-FUENTE-ID-ECO-2)
+# ---------------------------------------------------------------------------
+
+
+def test_enviar_estado_fuente_local_manda_fuente_conectada_id_nulo() -> None:
+    cuerpos: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        cuerpos.append(json.loads(request.content))
+        return httpx.Response(204)
+
+    cliente = _cliente_con(handler)
+    cliente.enviar_estado(
+        [_fuente_wire(origen="buzon", fuente_conectada_id=None)],
+        enviado_en=datetime.datetime(2026, 11, 26, 10, 5, tzinfo=datetime.UTC),
+    )
+    cliente.cerrar()
+
+    assert cuerpos[0]["fuentes"][0]["fuente_conectada_id"] is None
+
+
+def test_enviar_estado_id_malformado_se_manda_como_nulo_sin_lanzar() -> None:
+    cuerpos: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        cuerpos.append(json.loads(request.content))
+        return httpx.Response(204)
+
+    cliente = _cliente_con(handler)
+    cliente.enviar_estado(
+        [_fuente_wire(origen="cuenta", fuente_conectada_id="no-es-un-uuid")],
+        enviado_en=datetime.datetime(2026, 11, 26, 10, 5, tzinfo=datetime.UTC),
+    )
+    cliente.cerrar()
+
+    assert cuerpos[0]["fuentes"][0]["fuente_conectada_id"] is None
+
+
+def test_enviar_estado_id_malformado_imprime_una_linea_de_conteo_sin_el_id(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cliente = _cliente_con(lambda request: httpx.Response(204))
+    cliente.enviar_estado(
+        [_fuente_wire(origen="cuenta", fuente_conectada_id="no-es-un-uuid-secreto")],
+        enviado_en=datetime.datetime(2026, 11, 26, 10, 5, tzinfo=datetime.UTC),
+    )
+    cliente.cerrar()
+
+    salida = capsys.readouterr()
+    assert "cuenta: fuente_conectada_id invalido omitidos=1" in salida.err
+    assert "no-es-un-uuid-secreto" not in salida.err
+
+
+def test_enviar_estado_id_valido_no_imprime_nada(capsys: pytest.CaptureFixture[str]) -> None:
+    cliente = _cliente_con(lambda request: httpx.Response(204))
+    cliente.enviar_estado(
+        [_fuente_wire(origen="cuenta", fuente_conectada_id="3fa85f64-5717-4562-b3fc-2c963f66afa6")],
+        enviado_en=datetime.datetime(2026, 11, 26, 10, 5, tzinfo=datetime.UTC),
+    )
+    cliente.cerrar()
+
+    salida = capsys.readouterr()
+    assert salida.err == ""
 
 
 def test_enviar_estado_nunca_manda_la_direccion_sin_enmascarar() -> None:

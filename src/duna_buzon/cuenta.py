@@ -32,6 +32,8 @@ this slice: a failed `enviar_estado` call never fails the pass.
 from __future__ import annotations
 
 import datetime
+import sys
+import uuid
 from dataclasses import dataclass
 from typing import Literal
 
@@ -124,6 +126,14 @@ class FuenteEstadoWire:
     vistos: int
     reenviados: int
     alerta: AlertaEstadoWire | None = None
+    # CUENTA-BUZON-FUENTE-ID-ECO-2 -- the exact Cuenta Duna `id` this
+    # mailbox was pulled under (`GET /servicio/fuentes/{sub}`), set only
+    # for `origen == "cuenta"` (`cli.py`'s own `_estado_wire_para`). `None`
+    # for a local source. `enviar_estado` validates this locally before it
+    # ever reaches the wire -- a malformed value is sent as `null`, never
+    # as itself, because Cuenta would reject the WHOLE heartbeat with a
+    # 422 over one bad field.
+    fuente_conectada_id: str | None = None
 
 
 def enmascarar_direccion(direccion: str) -> str:
@@ -139,8 +149,22 @@ def enmascarar_direccion(direccion: str) -> str:
     return f"{primera}***@{dominio}"
 
 
+def _id_fuente_conectada_valido_para_wire(valor: str | None) -> str | None:
+    """`valor` unchanged when it is `None` or parses as a uuid; `None`
+    otherwise -- `CUENTA-BUZON-FUENTE-ID-ECO-2`'s own local check, so a
+    malformed `fuente_conectada_id` never reaches Cuenta, which would
+    reject the whole heartbeat with a 422 over this one field."""
+    if valor is None:
+        return None
+    try:
+        uuid.UUID(valor)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return valor
+
+
 def _fuente_estado_a_wire(fuente: FuenteEstadoWire) -> dict[str, object]:
-    """Exactly the nine fields `buzon-estado-a-cuenta-v1.md` names -- never
+    """Exactly the ten fields `buzon-estado-a-cuenta-v1.md` names -- never
     a subject, a sender, a token, or the unmasked address."""
     return {
         "fuente_id": fuente.fuente_id,
@@ -152,6 +176,7 @@ def _fuente_estado_a_wire(fuente: FuenteEstadoWire) -> dict[str, object]:
         "vistos": fuente.vistos,
         "reenviados": fuente.reenviados,
         "alerta": fuente.alerta,
+        "fuente_conectada_id": _id_fuente_conectada_valido_para_wire(fuente.fuente_conectada_id),
     }
 
 
@@ -190,7 +215,20 @@ class CuentaClient:
         """`POST /servicio/buzon/estado/{sub}` -- one heartbeat carrying
         `fuentes`' FULL current set, per `buzon-estado-a-cuenta-v1.md`.
         Raises `CuentaPullError(paso="estado", ...)` on anything but a 204;
-        `cli.py` is the one caller, and it never lets this stop a pass."""
+        `cli.py` is the one caller, and it never lets this stop a pass.
+
+        CUENTA-BUZON-FUENTE-ID-ECO-2 -- a `fuente_conectada_id` that fails
+        the local uuid check is sent as `null`, counted here and logged in
+        one count-only line, never as content: never the id itself, an
+        address, or a token."""
+        invalidos = sum(
+            1
+            for f in fuentes
+            if f.fuente_conectada_id is not None
+            and _id_fuente_conectada_valido_para_wire(f.fuente_conectada_id) is None
+        )
+        if invalidos:
+            print(f"cuenta: fuente_conectada_id invalido omitidos={invalidos}", file=sys.stderr)
         cuerpo = {
             "fuentes": [_fuente_estado_a_wire(f) for f in fuentes],
             "enviado_en": registro.formato_fecha_utc(enviado_en),
