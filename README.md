@@ -79,10 +79,13 @@ fuentes/<id>/primera_pasada.json    -- the UTC instant of the FIRST pass this co
                                        fallback for a source that has NEVER once seen mail, so it still raises
                                        past the threshold instead of staying invisible forever -- see
                                        `alerta.py` and BUZON-CARPETAS-CONTEO-1
-fuentes/<id>/carpetas_actual.json  -- ABSENT for a source with no IMAP folder concept, or until its first
-                                       pass with folder data: `{carpeta: uidnext}` as of the MOST RECENT
-                                       pass, overwritten every time. See `alerta.py` and
-                                       BUZON-SILENCIO-SIN-CORREO-NUEVO-1
+fuentes/<id>/carpetas_actual.json  -- ABSENT for a source with no IMAP folder concept, until its first pass
+                                       with folder data, or whenever a pass could not read ANY included
+                                       folder at all: `{carpeta: uidnext}` as of the MOST RECENT pass that
+                                       measured at least one, overwritten every such pass -- deleted, never
+                                       left stale, by a pass that measured none. See `alerta.py` and
+                                       BUZON-SILENCIO-SIN-CORREO-NUEVO-1/
+                                       BUZON-SIGUIENTE-SEGUIMIENTO-2026-11-28-B
 fuentes/<id>/carpetas_base.json    -- same shape, frozen at the START of the current silence window:
                                        overwritten when a pass sees mail, or once when no map existed yet.
                                        Compared against the one above to tell "the provider has nothing
@@ -300,6 +303,13 @@ source. `estado`/`alertas --json` compare the two:
   yet) -- the provider moved while Buzón forwarded nothing, or this cannot be measured at all; either way
   this keeps today's `ALERTA silencio` / `"tipo": "silencio"`, with its own remedy, exactly as before this
   slice. This never claims "nothing to check" without the measurement to back it.
+
+A pass whose own `carpetas_uidnext` comes back EMPTY -- every included folder's own `EXAMINE`/`SEARCH`
+failed this specific pass (`BUZON-IMAP-MENSAJE-AISLADO-1`), or none is included at all -- deletes
+`carpetas_actual.json` rather than leaving an earlier pass's map in place
+(`BUZON-SIGUIENTE-SEGUIMIENTO-2026-11-28-B`): a stale map that happens to still equal `carpetas_base.json`
+would otherwise read as "the provider has nothing new" when this pass never actually measured anything,
+turning a folder-read fault into a false INFO line instead of the ALERTA it should raise.
 
 ### Narrowing an IMAP source to specific folders (BUZON-IMAP-CARPETAS-INCLUIDAS-1)
 

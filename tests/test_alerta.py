@@ -114,6 +114,17 @@ def test_marcar_carpetas_actual_dos_veces_conserva_el_segundo_mapa(tmp_path: Pat
     assert alerta.cargar_carpetas_actual(str(tmp_path)) == {"INBOX": 40}
 
 
+def test_borrar_carpetas_actual_sin_marcador_no_falla(tmp_path: Path) -> None:
+    alerta.borrar_carpetas_actual(str(tmp_path))
+    assert alerta.cargar_carpetas_actual(str(tmp_path)) is None
+
+
+def test_borrar_carpetas_actual_quita_el_marcador_existente(tmp_path: Path) -> None:
+    alerta.marcar_carpetas_actual(str(tmp_path), {"INBOX": 36})
+    alerta.borrar_carpetas_actual(str(tmp_path))
+    assert alerta.cargar_carpetas_actual(str(tmp_path)) is None
+
+
 def test_cargar_carpetas_base_sin_marcador_es_none(tmp_path: Path) -> None:
     assert alerta.cargar_carpetas_base(str(tmp_path)) is None
 

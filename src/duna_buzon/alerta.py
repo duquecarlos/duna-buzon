@@ -184,6 +184,19 @@ def cargar_carpetas_base(directorio_fuente: str) -> dict[str, int] | None:
     return _cargar_mapa_carpetas(_ruta_carpetas_base(directorio_fuente))
 
 
+def borrar_carpetas_actual(directorio_fuente: str) -> None:
+    """Removes `carpetas_actual.json` if present -- a no-op when there was
+    none. Used when a pass could not measure ANY folder's own UIDNEXT at
+    all (every included folder's own `EXAMINE`/`SEARCH` failed this pass,
+    or none is included) -- a stale map an earlier pass left behind must
+    never sit there looking like a fresh measurement that just happens to
+    match `carpetas_base.json`; `cli.py`'s own `_proveedor_sin_cambios`
+    then reads this source's data as missing, the same "could not
+    measure" fallback it already gives a provider with no folder concept
+    at all (BUZON-SIGUIENTE-SEGUIMIENTO-2026-11-28-B)."""
+    _ruta_carpetas_actual(directorio_fuente).unlink(missing_ok=True)
+
+
 def marcar_carpetas_base(directorio_fuente: str, mapa: dict[str, int]) -> None:
     """Overwrites `carpetas_base.json` UNCONDITIONALLY with `mapa` -- the
     caller (`cli.py`) decides WHEN this should happen: on a pass that sees

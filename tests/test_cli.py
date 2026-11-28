@@ -3387,6 +3387,59 @@ def test_pasada_con_vistos_reinicia_la_base_de_carpetas(
     assert modulo_alerta.cargar_carpetas_base(str(directorio)) == {"INBOX": 40}
 
 
+def test_pasada_sin_ninguna_carpeta_medida_borra_el_actual_rancio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every included folder's own EXAMINE/SEARCH failed this pass --
+    # `ClienteImap.carpetas_uidnext` stays `{}`, never a stale guess
+    # (BUZON-IMAP-MENSAJE-AISLADO-1). Before BUZON-SIGUIENTE-SEGUIMIENTO-
+    # 2026-11-28-B, `carpetas_actual.json` from an earlier healthy pass
+    # was left untouched, so it could sit there matching `carpetas_base.
+    # json` and read as "the provider has nothing new" even though THIS
+    # pass could not read a single folder -- this pass must clear it
+    # instead, so the next read calls it "could not measure".
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    modulo_alerta.marcar_carpetas_base(str(directorio), {"INBOX": 36})
+    modulo_alerta.marcar_carpetas_actual(str(directorio), {"INBOX": 36})
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli,
+        "construir_proveedor",
+        lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalsoConCarpetas({}),
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores()))
+
+    assert cli.comando_sincronizar(config) == 0
+    assert modulo_alerta.cargar_carpetas_actual(str(directorio)) is None
+    # The baseline itself is untouched -- it is not what this pass measured.
+    assert modulo_alerta.cargar_carpetas_base(str(directorio)) == {"INBOX": 36}
+
+
+def test_pasada_sin_concepto_de_carpetas_nunca_toca_el_actual(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Microsoft/Gmail-shaped provider has no `carpetas_uidnext` attribute
+    # at all -- `getattr(..., None)` reads `None`, never an empty dict, so
+    # this pass must not go anywhere near `carpetas_actual.json`.
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    modulo_alerta.marcar_carpetas_base(str(directorio), {"INBOX": 36})
+    modulo_alerta.marcar_carpetas_actual(str(directorio), {"INBOX": 36})
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores()))
+
+    assert cli.comando_sincronizar(config) == 0
+    assert modulo_alerta.cargar_carpetas_actual(str(directorio)) == {"INBOX": 36}
+
+
 def test_estado_silencio_uidnext_sin_cambios_es_info_nunca_alerta(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
