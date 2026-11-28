@@ -489,6 +489,33 @@ def test_listar_mensajes_con_adjunto_marca_tiene_adjuntos() -> None:
     assert resultado[0].tiene_adjuntos is True
 
 
+def test_listar_mensajes_expone_uidnext_por_carpeta_examinada() -> None:
+    # BUZON-SILENCIO-SIN-CORREO-NUEVO-1 -- `cli.py` reads this attribute
+    # the same way it already reads `omitidos_por_error_proveedor`, to
+    # tell "the provider has nothing new" apart from "something is wrong".
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={1: _mensaje_simple(1)}, uidvalidity=1000, uidnext=36)
+    newsletter = _CarpetaFalsa(nombre="Newsletter", mensajes={1: _mensaje_simple(1)}, uidvalidity=2000, uidnext=2)
+    with _ServidorImapFalso(carpetas=[inbox, newsletter]) as servidor:
+        cliente = _cliente(servidor)
+        list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert cliente.carpetas_uidnext == {"INBOX": 36, "Newsletter": 2}
+
+
+def test_carpeta_cuyo_examine_falla_nunca_aparece_en_carpetas_uidnext() -> None:
+    inbox = _CarpetaFalsa(nombre="INBOX", mensajes={1: _mensaje_simple(1)}, uidvalidity=1000, uidnext=36)
+    facturas = _CarpetaFalsa(nombre="Facturas", mensajes={1: _mensaje_simple(1)})
+    with _ServidorImapFalso(
+        carpetas=[inbox, facturas], carpetas_examine_falla=frozenset({"Facturas"})
+    ) as servidor:
+        cliente = _cliente(servidor)
+        list(cliente.listar_mensajes(_DESDE))
+        cliente.cerrar()
+
+    assert cliente.carpetas_uidnext == {"INBOX": 36}
+
+
 def test_listar_adjuntos_metadata_y_obtener_mensaje_completo() -> None:
     mensajes = [
         _mensaje_con_adjunto(

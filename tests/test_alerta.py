@@ -89,3 +89,44 @@ def test_marcar_primera_pasada_dos_veces_conserva_el_primer_momento(tmp_path: Pa
     alerta.marcar_primera_pasada(str(tmp_path), primero)
     alerta.marcar_primera_pasada(str(tmp_path), segundo)
     assert alerta.cargar_primera_pasada_en(str(tmp_path)) == primero
+
+
+# ---------------------------------------------------------------------------
+# BUZON-SILENCIO-SIN-CORREO-NUEVO-1 -- `carpetas_actual`/`carpetas_base`:
+# each a `{carpeta: uidnext}` map, `actual` always overwritten,
+# `base` overwritten only when the caller (`cli.py`) decides the window
+# has restarted.
+# ---------------------------------------------------------------------------
+
+
+def test_cargar_carpetas_actual_sin_marcador_es_none(tmp_path: Path) -> None:
+    assert alerta.cargar_carpetas_actual(str(tmp_path)) is None
+
+
+def test_marcar_carpetas_actual_escribe_el_mapa(tmp_path: Path) -> None:
+    alerta.marcar_carpetas_actual(str(tmp_path), {"INBOX": 36, "Newsletter": 2})
+    assert alerta.cargar_carpetas_actual(str(tmp_path)) == {"INBOX": 36, "Newsletter": 2}
+
+
+def test_marcar_carpetas_actual_dos_veces_conserva_el_segundo_mapa(tmp_path: Path) -> None:
+    alerta.marcar_carpetas_actual(str(tmp_path), {"INBOX": 36})
+    alerta.marcar_carpetas_actual(str(tmp_path), {"INBOX": 40})
+    assert alerta.cargar_carpetas_actual(str(tmp_path)) == {"INBOX": 40}
+
+
+def test_cargar_carpetas_base_sin_marcador_es_none(tmp_path: Path) -> None:
+    assert alerta.cargar_carpetas_base(str(tmp_path)) is None
+
+
+def test_marcar_carpetas_base_escribe_el_mapa(tmp_path: Path) -> None:
+    alerta.marcar_carpetas_base(str(tmp_path), {"INBOX": 36, "Newsletter": 2})
+    assert alerta.cargar_carpetas_base(str(tmp_path)) == {"INBOX": 36, "Newsletter": 2}
+
+
+def test_marcar_carpetas_base_dos_veces_conserva_el_segundo_mapa(tmp_path: Path) -> None:
+    # Unlike `marcar_primera_pasada`'s own set-once marker, this function
+    # always overwrites -- it is the CALLER's job to decide when that
+    # should happen, never this one's.
+    alerta.marcar_carpetas_base(str(tmp_path), {"INBOX": 36})
+    alerta.marcar_carpetas_base(str(tmp_path), {"INBOX": 40})
+    assert alerta.cargar_carpetas_base(str(tmp_path)) == {"INBOX": 40}
