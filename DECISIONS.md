@@ -4024,3 +4024,168 @@ nothing wider.
    invented a Graph/Gmail equivalent of UIDNEXT), not a bug. A real Graph/Gmail equivalent (a delta token, a
    `historyId`) would need its own measurement first; named here so a future reader does not re-derive why
    those two providers never get the quieter INFO line.
+
+---
+
+## BUZON-SIGUIENTE-SEGUIMIENTO-2026-11-28-B -- a stale `carpetas_actual.json` could mask a real folder-read
+failure as "nothing to check" (2026-11-28)
+
+### Why
+
+Carlos's overnight direction, relayed through this dispatch (`ORCH-CARLOS-DELEGATES-TIER-1-1`): pick the
+most valuable OPEN follow-up this repository's own ledger and worker reports name, preferring a real defect
+in mail delivery over hygiene. Re-verified against the code, this ledger's own most recent ranked list
+(`BUZON-SILENCIO-SIN-CORREO-NUEVO-1`, above) was correct that the named list is exhausted:
+`BUZON-ALERTA-CONSOLE-LINE-1` still needs a Buzón-to-console wire that does not exist (cross-repo, out of
+this repository's own `touches:`), `CUENTA-BUZON-FUENTE-MATCH-KEY-INV-1` is a cross-repo contract question
+this dispatch's own spec names explicitly out of scope, and the third item (Graph/Gmail never getting
+`"silencio_info"`) is recorded as deliberate, not a bug, needing its own measurement first. With the named
+list empty of anything buildable, this slice read every module behind the silence-alert split fresh
+(`alerta.py`, `cli.py`, `cliente_imap.py`) against this repository's own invariants and Carlos's standing
+default ("anything off the normal flow raises a flag"), and found a real, reversible gap in
+`BUZON-SILENCIO-SIN-CORREO-NUEVO-1`'s own logic.
+
+### The gap, verified against the code and the tests
+
+`cli.py`'s own pass-finalization step only called `modulo_alerta.marcar_carpetas_actual` inside `if
+carpetas_uidnext:` -- confirmed by reading that block before this slice touched it. `ClienteImap.
+carpetas_uidnext` (`cliente_imap.py:724`, `:957`) is populated ONE folder at a time, inside
+`listar_mensajes`'s own per-folder loop, and a folder whose `EXAMINE`/`SEARCH` raises
+`ClienteImapErrorTransitorio` is simply skipped (`omitidos_por_error_proveedor += 1`, `continue`) without
+ever being added to that map (`BUZON-IMAP-MENSAJE-AISLADO-1`'s own isolation, unchanged by this slice). A
+fresh `ClienteImap` is built every pass (`cli.py`'s own `construir_proveedor` call, confirmed by reading
+`_ejecutar_una_fuente`'s body), so `carpetas_uidnext` starts at `{}` every time. If EVERY included folder
+failed its own `EXAMINE`/`SEARCH` this pass -- a server-side fault with those specific folders, never a
+connection-level break (that still raises `ClienteImapConexionError` uncaught, stopping the whole pass
+exactly as before) -- `carpetas_uidnext` stayed `{}` for the whole pass, the `if carpetas_uidnext:` guard
+was false, and `carpetas_actual.json` was left at whatever an EARLIER, healthy pass had written. No test
+covered this: `grep -n "carpetas_uidnext" tests/test_cli.py` before this slice showed only
+`_ProveedorFalsoConCarpetas`, always constructed with a non-empty map.
+
+`_proveedor_sin_cambios` (`cli.py`) only ever compares `cargar_carpetas_base`/`cargar_carpetas_actual`'s
+returned dicts for equality; it has no way to know whether `actual` reflects THIS pass or an older one. So a
+source whose folders started failing `EXAMINE` every pass -- while `carpetas_actual.json` happened to still
+equal the frozen `carpetas_base.json` from before the fault started -- would read as `_proveedor_sin_cambios
+== True`: `estado`/`alertas --json` would print the benign `"silencio_info"` / "nada que revisar en Buzon"
+line, the one this repository's own README says is reserved for "the provider itself has nothing new",
+precisely while every folder this source reads was, in fact, unreadable. The ONE existing line that
+would have shown the real fault, `omitidos_por_error_proveedor` in `estado`'s per-pass summary, is never
+read by the silence classification at all. This is the exact "a source that silently sees nothing" shape
+this dispatch's own spec text names as the preferred kind of defect, and the exact failure mode
+`BUZON-SILENCIO-SIN-CORREO-NUEVO-1`'s own stated goal ("never claims 'nothing to check' without the
+measurement to back it") was written to rule out -- it just missed this one path into the same file.
+
+### What changed
+
+`alerta.py` gained one new function, `borrar_carpetas_actual` -- removes `carpetas_actual.json` if present,
+a no-op otherwise, the same `unlink(missing_ok=True)` shape `limpiar_auth_fallando` already uses for its own
+marker.
+
+`cli.py`'s pass-finalization step now has an `elif` beside the existing `if carpetas_uidnext:` branch:
+when `carpetas_uidnext` is not `None` (this IS an IMAP-shaped provider -- Microsoft/Gmail have no such
+attribute at all, so `getattr(..., None)` reads `None` for them, never an empty dict) but is falsy (empty --
+every included folder failed this pass, or none is included), it calls `borrar_carpetas_actual` instead of
+leaving the file untouched. `_proveedor_sin_cambios` then reads `actual is None` and returns `False` -- the
+SAME "could not measure" fallback it already gives a Microsoft/Gmail source, or an IMAP source on its first
+ever pass with folder data -- so `estado`/`alertas --json` fall back to today's `ALERTA silencio` with its
+own remedy, never the INFO line. `carpetas_base.json` is left exactly as it was: it is not what this pass
+measured, and the next pass that DOES measure folder data decides on its own, unchanged, whether the window
+restarts.
+
+`README.md` updated in two places: the `fuentes/<id>/carpetas_actual.json` file-layout bullet, and the
+"Telling 'nothing to check' apart from 'something is wrong'" subsection, both now naming this clearing step.
+
+### Tests, measured
+
+4 new `def test_` (`git diff main~1 main -- tests/ | grep -c '^+def test_'`, confirmed against the actual
+diff):
+- `tests/test_alerta.py` (2): `test_borrar_carpetas_actual_sin_marcador_no_falla` (a no-op when nothing was
+  stored) and `test_borrar_carpetas_actual_quita_el_marcador_existente` (an existing marker is actually
+  removed).
+- `tests/test_cli.py` (2): `test_pasada_sin_ninguna_carpeta_medida_borra_el_actual_rancio` (a pass whose
+  `carpetas_uidnext` is `{}`, with `carpetas_actual.json` already equal to `carpetas_base.json` from an
+  earlier pass, ends with `carpetas_actual.json` GONE rather than still matching -- the base itself stays
+  untouched) and `test_pasada_sin_concepto_de_carpetas_nunca_toca_el_actual` (a plain `_ProveedorFalso`, with
+  no `carpetas_uidnext` attribute at all, leaves an existing `carpetas_actual.json` exactly as it was --
+  this `elif` branch is reached only for an IMAP-shaped provider, never a Microsoft/Gmail one).
+
+Every pre-existing `*carpetas*`/`*silencio*` test continues to pass unchanged (`uv run pytest -k "carpetas or
+silencio" -q`: 39 passed): none of them exercises an empty `carpetas_uidnext`, so the new `elif` branch is
+never reached by them and `_proveedor_sin_cambios`'s own existing behaviour (equal maps -> info, different or
+missing -> alert) is untouched for every scenario they already cover.
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest` (`uv run pytest` in this environment), run once on this slice's own
+final tree (merge commit `5e7c0bc491e7b95785d4e90c956afab8b5236411`, tree
+`fcad1c4906b0b4a87405a6b7a13f94ed260605e9`):
+
+    791 tests collected in 0.67s (--collect-only -q)
+    782 passed, 9 skipped in 41.22s
+
+782 + 9 = 791, matching the collected count exactly. Reconciled against this slice's own base (`main` at
+`abf51bac602fd0ed40252bc4744347ed9ff45188`, 787 collected / 778 passed + 9 skipped per
+`BUZON-SILENCIO-SIN-CORREO-NUEVO-1`'s own recorded figure): 791 - 787 = 4 new collected and 782 - 778 = 4 new
+passed, both matching the 4 new `def test_` lines above exactly -- no drift, nothing pre-existing broke. The
+9 skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger has recorded;
+none are new.
+
+Tree identity proven before writing this entry, so the gate above was not re-run a second time for the
+merge: merge commit `5e7c0bc491e7b95785d4e90c956afab8b5236411` has tree
+`fcad1c4906b0b4a87405a6b7a13f94ed260605e9`, IDENTICAL to the slice branch
+`feat/buzon-siguiente-seguimiento-2026-11-28-b`'s own tree at commit
+`b136b3f7baca4f0bec17ee71337eaec16d77a6e9`, and `git diff HEAD
+feat/buzon-siguiente-seguimiento-2026-11-28-b --stat` against the merge commit was empty.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, and no new on-disk file layout was added: the
+new code path only DELETES an existing per-source file (`carpetas_actual.json`) that
+`BUZON-SILENCIO-SIN-CORREO-NUEVO-1` already created; nothing new is ever written. No cross-repo contract or
+DTO change -- nothing here touches the Finanzas or Cuenta Duna wire; this diff is entirely local to
+`cli.py`'s own pass-finalization step and `_proveedor_sin_cambios`'s own downstream read. Customer-facing
+bytes DID change, on the same broader reading `BUZON-ESTADO-ALERTA-SILENCIO-1` and
+`BUZON-SILENCIO-SIN-CORREO-NUEVO-1` already used: a source in this exact fault condition now prints
+`ALERTA silencio` instead of the INFO line, in `estado` and in `alertas --json` -- bytes an OPERATOR reads
+(Carlos over SSH, Main and the desk over `sudo -n`), never a customer of a Duna product -- but this
+dispatch's own body says, in words, "Build it with tests, full gate GREEN, merge to main, write the ledger
+entry, leave the repo on main", an explicit instruction to merge once the gate is green regardless of this
+classification, so this slice merges without waiting, on the broader reading rather than a claim that it
+did not trip.
+
+### Why this was the right follow-up to build, over the alternatives read and set aside
+
+`BUZON-ALERTA-CONSOLE-LINE-1` and `CUENTA-BUZON-FUENTE-MATCH-KEY-INV-1`: both still cross-repo, unchanged
+from every prior slice's own reasoning -- this dispatch's own spec text names the second explicitly out of
+scope. The Graph/Gmail `"silencio_info"` gap (item 3 above): recorded as deliberate, needing its own
+measurement of a real delta-token/`historyId` equivalent first, not something this slice could build without
+first doing that investigation -- correctly set aside rather than guessed at. Every module this slice read
+fresh for `BUZON-SILENCIO-SIN-CORREO-NUEVO-1`'s own split (`alerta.py`, `cli.py`, `cliente_imap.py`) matched
+its own invariants and tests except for this one path, which is also the one candidate that is a pure,
+reversible observability fix -- no rule, no wire shape, no forwarding decision touched, and the smallest
+change that closes the exact gap `BUZON-SILENCIO-SIN-CORREO-NUEVO-1` set out to close but missed.
+
+### Attribution
+
+Carlos, through Main, delegated Tier 1 work under `ORCH-CARLOS-DELEGATES-TIER-1-1`. This slice re-verified
+every previously-named follow-up against the code (all closed or cross-repo), read every module behind the
+most recent slice's own split fresh per this ledger's own established practice when the named list comes up
+empty, and built the one real gap that turned up: a stale `carpetas_actual.json` no longer survives a pass
+that could not measure any folder at all.
+
+### Open follow-ups, ranked
+
+1. **`BUZON-ALERTA-CONSOLE-LINE-1`** (named by `BUZON-ALERTA-AUTH-1`, still open, covering all three `tipo`s
+   now in play -- `auth`, `silencio`, `silencio_info`): a console line surfacing a source's own alert in the
+   admin UI, needing a Buzón-to-console wire that does not exist yet -- cross-repo, outside this
+   repository's own `touches:`. Still the only follow-up with a clear owner (the console/admin-ui
+   repository) yet to build its half.
+2. **`CUENTA-BUZON-FUENTE-MATCH-KEY-INV-1`** (named by a prior dispatch, unchanged): the host-observed
+   anomaly where a live Cuenta pull returns `fuentes=0` while Buzón itself runs 3 sources -- a cross-repo
+   contract question, not investigated further by this slice either.
+3. A Microsoft/Graph or Gmail source's own silence alert always reads `"tipo": "silencio"`, never
+   `"silencio_info"` -- unchanged from `BUZON-SILENCIO-SIN-CORREO-NUEVO-1`'s own entry above; still deliberate,
+   not a bug, still needing its own measurement of a delta-token/`historyId` equivalent before it could be
+   built.
+4. Every other follow-up this ledger ever named before this entry is closed by a later slice, re-verified
+   against the code while compiling this list.
