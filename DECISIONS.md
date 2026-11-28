@@ -4303,3 +4303,157 @@ echoed, and locally validated before it ever reaches the wire.
 2. Every follow-up this ledger ranked before this entry (`BUZON-ALERTA-CONSOLE-LINE-1`,
    `CUENTA-BUZON-FUENTE-MATCH-KEY-INV-1`, the Graph/Gmail `"silencio_info"` gap) is unchanged by this slice,
    which touched none of that code.
+
+## BUZON-SIGUIENTE-SEGUIMIENTO-2026-11-28-C -- a crashed cursor write could stop every source's pass, not
+only its own (2026-11-28)
+
+### Why
+
+Carlos's overnight direction, relayed through this dispatch (`ORCH-CARLOS-DELEGATES-TIER-1-1`): pick the
+most valuable OPEN follow-up this repository's own ledger and worker reports name, preferring a real
+defect in mail delivery over hygiene. This dispatch's own spec also carried a hard constraint earlier
+dispatches did not: NOT allowed to change which mail is forwarded, introduce any new outward-facing
+behaviour, or touch a live mailbox -- and, unlike several prior entries in this ledger, this spec's body
+carried no "merge on green regardless" override for a condition that trips.
+
+Re-verified against the code, this ledger's own most recent ranked list (`CUENTA-BUZON-FUENTE-ID-ECO-2`,
+above) was correct that the named list is exhausted: `BUZON-ALERTA-CONSOLE-LINE-1` and the cuenta-ui half
+are cross-repo, out of this repository's own `touches:`; `CUENTA-BUZON-FUENTE-MATCH-KEY-INV-1` is a
+cross-repo contract question this dispatch's own spec names explicitly out of scope; the Graph/Gmail
+`"silencio_info"` gap is recorded as deliberate, needing its own measurement of a delta-token/`historyId`
+equivalent first, not something buildable without that investigation. With the named list empty of
+anything buildable, and this dispatch's own NOT-ALLOWED list ruling out the one candidate this slice found
+and set aside (below), this slice read `cursor.py`, `cli.py`'s pass-finalization step, and `cripto.py`
+fresh against this repository's own invariants (`CLAUDE.md` invariant 5: "the cursor ... is the only state
+on disk, and both are protected") and found a real, reversible gap that fits the constraint exactly:
+nothing it changes is observable in normal operation.
+
+### A candidate read and set aside, because it would have tripped the NOT-ALLOWED list
+
+`cli.py`'s own comment (confirmed by reading it) says plainly: "Microsoft and Gmail have no such concept
+yet" for `omitidos_por_error_proveedor`, the per-item isolation `BUZON-IMAP-MENSAJE-AISLADO-1` gave IMAP (a
+broken folder or message is skipped and counted, never stops the rest of that source's pass).
+`gmail.py`'s own `listar_mensajes` fetches each candidate message individually
+(`_mensaje_completo_crudo`), exactly the per-item fetch shape IMAP had before that isolation existed; a
+transient `GmailErrorTransitorio` fetching ONE message today propagates out of `sincronizar.
+ejecutar_pasada`'s own `try`, stopping the WHOLE pass for that source at that message -- every message
+after it in `desde`-order is not forwarded until a later pass retries the whole window. Building the same
+isolation for Gmail would change which messages get forwarded IN THIS PASS versus a later one under a
+transient-error condition -- a new outward-facing behaviour this dispatch's own spec explicitly disallows,
+not a product-shape question for Carlos to rule on, so this is named here rather than raised as
+`RULING_NEEDED`: the spec already answered it ("NOT allowed"), this slice just verified the candidate
+against the code before setting it aside. Left for whichever future slice is dispatched WITHOUT that
+constraint.
+
+### The gap this slice built instead, verified against the code
+
+`cursor.guardar_cursor` and `cursor.guardar_cursor_proveedor` -- called every pass, by every source, from
+`cli.py`'s own pass-finalization step -- wrote `cursor.json`/`cursor_proveedor.json` via
+`cripto.escribir_archivo_sensible`: open with `O_TRUNC`, write, done. `cursor.guardar_cursor_atomico`
+already existed as a SEPARATE function, writing via a temp file plus `os.replace`, but only
+`rebobinar-cursor --aplicar` (`BUZON-CURSOR-REBOBINAR-CLI-1`) called it -- confirmed by `grep -n
+"guardar_cursor_atomico" src/`. A process killed or crashed mid-write to the truncate-in-place path (OOM,
+a host reboot, `SIGKILL`) leaves `cursor.json` truncated. `cursor.cargar_cursor`'s own
+`json.loads(ruta.read_text(...))` is not wrapped in any `try`/`except` at its one call site
+(`cli.py:457`, inside `_ejecutar_una_fuente`, itself called from `comando_sincronizar`'s own single `for
+fuente in activas:` loop with no per-source `try`/`except` around that call) -- a `JSONDecodeError` there
+propagates uncaught out of the whole loop, stopping every source still left to run THAT pass, not only the
+one whose file was corrupted, and the same source corrupts again on its very next scheduled run, every run,
+until someone manually repairs or deletes the file. `cursor_proveedor.json`'s own
+`cargar_cursor_proveedor` has the identical unwrapped `json.loads` at the same risk.
+
+### What changed
+
+`cursor.py` gained one private helper, `_escribir_json_atomico` (the exact temp-file-plus-`os.replace`
+body `guardar_cursor_atomico` already had, extracted so every writer in this module shares it).
+`guardar_cursor` and `guardar_cursor_proveedor` now call it instead of
+`cripto.escribir_archivo_sensible`; `guardar_cursor_atomico` is now an explicit one-line alias for
+`guardar_cursor` (same file, same name, same tests, same behaviour -- `rebobinar-cursor --aplicar`'s own
+call site is untouched). The JSON written, its mode (0600 where the OS supports it), and the directory it
+lands in are all unchanged -- the only difference is that a write which does not complete leaves the
+PREVIOUS valid file in place instead of a truncated one. No forwarding behaviour changes, no new text or
+JSON field appears anywhere, and no live mailbox is touched -- the diff is entirely inside how two files
+already written every pass get written.
+
+`README.md`'s `rebobinar-cursor` bullet updated to say every normal pass now writes its cursor atomically
+too, not only `--aplicar`.
+
+### Tests, measured
+
+5 new `def test_` (`git diff main~1 main -- tests/ | grep -c '^+def test_'`, confirmed against the actual
+diff), all in `tests/test_cursor.py`: `test_guardar_cursor_no_deja_archivo_tmp` and
+`test_guardar_cursor_sobreescribe_sin_dejar_tmp` (no leftover `.tmp`, overwriting works, for the now-atomic
+`guardar_cursor`), `test_guardar_cursor_proveedor_no_deja_archivo_tmp` and
+`test_guardar_cursor_proveedor_es_modo_0600` (the same two properties for the provider cursor, neither
+tested before this slice), and
+`test_guardar_cursor_una_escritura_interrumpida_deja_el_cursor_anterior_intacto` -- monkeypatches
+`cursor.os.replace` to raise mid-write and asserts the PREVIOUS cursor is still readable afterwards and no
+`.tmp` file survives, the exact property this slice exists to prove.
+
+Every pre-existing `tests/test_cursor.py` test continues to pass unchanged, including the four
+`guardar_cursor_atomico`-named tests (round trip, no leftover `.tmp`, overwrite, mode 0600) -- unaffected
+since `guardar_cursor_atomico` now delegates to `guardar_cursor` with identical observable behaviour.
+
+### Gate, measured
+
+`.venv/Scripts/python.exe -m pytest` on this slice's own final tree (merge commit
+`1b28aee77e52cc1e326215fb92ee5346348c25a5`, tree `4637cc0c523a1bf239c20be5be567a782f2cab75`, proven
+IDENTICAL to the slice branch `feat/buzon-siguiente-seguimiento-2026-11-28-c`'s own tree at commit
+`e089e7cd9a6187b933b594402ede7051c2d325cc` by `git diff HEAD feat/buzon-siguiente-seguimiento-2026-11-28-c
+--stat`, empty -- the gate below was run once, on the slice branch, and not re-run a second time for the
+merge):
+
+    810 tests collected in 0.64s (--collect-only -q)
+    800 passed, 10 skipped in 40.40s
+
+800 + 10 = 810, matching the collected count exactly. Reconciled against this slice's own base (`main` at
+`b9a8081720c1eadc735b9526a378c634eaa9d787`, 805 collected / 796 passed + 9 skipped per
+`CUENTA-BUZON-FUENTE-ID-ECO-2`'s own recorded figure): 810 - 805 = 5 new collected and 800 - 796 = 4 new
+passed, both matching the 5 new `def test_` lines above (one of which, the Windows-mode test, is gated by
+the same `no_es_windows` fixture every other mode test in this file already uses, accounting for the 10 -
+9 = 1 new skip) -- no drift, nothing pre-existing broke. The 9 pre-existing skips are the same Windows
+file-mode skips every earlier slice in this ledger has recorded.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, and no on-disk file's SHAPE changed: `cursor.
+json`/`cursor_proveedor.json` carry the exact same JSON they always did. No customer-facing bytes -- the
+only text change anywhere in this diff is a doc sentence in `README.md`; no stdout/stderr line, no
+`estado`/`alertas --json` field, changed or was added. No cross-repo contract or DTO change -- nothing here
+touches the Finanzas or Cuenta Duna wire, or any provider's own request shape; this diff is entirely
+internal to how two already-existing local files get written. All three conditions clear, so this slice
+merges on green without waiting for approval.
+
+### Attribution
+
+Carlos, through Main, delegated Tier 2 work under `ORCH-CARLOS-DELEGATES-TIER-1-1`. This slice verified
+every claim it made about the current code (`guardar_cursor`/`guardar_cursor_proveedor`'s own
+truncate-in-place write, `guardar_cursor_atomico`'s existing but narrowly-called atomic path, `cargar_
+cursor`'s unwrapped `json.loads`, `comando_sincronizar`'s own un-isolated `for` loop) before writing
+anything, read one other real candidate (Gmail per-message isolation) and set it aside by name because
+this dispatch's own spec ruled it out, then closed the gap it found instead.
+
+### Open follow-ups, ranked
+
+1. **`BUZON-ALERTA-CONSOLE-LINE-1`** (named by `BUZON-ALERTA-AUTH-1`, still open): a console line surfacing
+   a source's own alert in the admin UI -- still cross-repo, outside this repository's own `touches:`.
+   Still the only follow-up with a clear owner (the console/admin-ui repository) yet to build its half.
+2. **cuenta-ui half (`-3`)** (named by `CUENTA-BUZON-FUENTE-ID-ECO-2`, unchanged): showing
+   `fuente_conectada_id` in Cuenta's own UI -- a separate repository's own work.
+3. **`CUENTA-BUZON-FUENTE-MATCH-KEY-INV-1`** (named by a prior dispatch, unchanged): the host-observed
+   anomaly where a live Cuenta pull returns `fuentes=0` while Buzón itself runs 3 sources -- a cross-repo
+   contract question, not investigated by this slice either.
+4. The Graph/Gmail `"silencio_info"` gap (unchanged): still deliberate, not a bug, still needing its own
+   measurement of a delta-token/`historyId` equivalent before it could be built.
+5. **NEW -- Gmail has no per-message isolation on a transient fetch error** (found and set aside by this
+   slice, above): unlike IMAP's own `BUZON-IMAP-MENSAJE-AISLADO-1`, one message's own transient
+   `GmailErrorTransitorio` inside `gmail.py`'s `_mensaje_completo_crudo` stops `sincronizar.
+   ejecutar_pasada` for the WHOLE Gmail source at that message, deferring every later message in that
+   pass's window to a future pass rather than forwarding what it already could reach. Not built by this
+   slice because doing so changes which mail is forwarded in a given pass under a transient-error
+   condition -- this dispatch's own spec explicitly disallows that, so it needs either a future dispatch
+   without that constraint, or Carlos's own ruling that the timing change is acceptable the way it already
+   is for IMAP.
+6. Every other follow-up this ledger ever named before this entry is closed by a later slice, re-verified
+   while building this slice, is fixed by this same entry (the stale-cursor-on-crash gap above), or is
+   cross-repo and listed above.
