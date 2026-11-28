@@ -163,6 +163,11 @@ The commands:
   completed a pass (`BUZON-ESTADO-FUENTE-NUEVA-NUDGE-1`). A source whose own credential has been failing to
   authenticate for more than `BUZON_ALERTA_AUTH_HORAS` (default 24) also gets an `ALERTA` line naming when
   the failing run started, how many hours ago, and how to reconnect it (`BUZON-ALERTA-AUTH-1`, see below).
+  A source that is not already in an auth alert but has gone quiet for more than
+  `BUZON_ALERTA_SILENCIO_HORAS` (default 24) gets its own `ALERTA silencio` line the same way
+  (`BUZON-ESTADO-ALERTA-SILENCIO-1`, see below) -- before this, only the machine-readable `alertas --json`
+  ever showed a silence alert, so the exact command `duna-deploy-buzon status` already runs (`estado`)
+  could read clean while a source had quietly stopped seeing mail.
 - `fuentes` -- lists every configured source (id, provider, address, label, active/inactive). No secrets. One
   source whose own `fuente.json` is broken is reported by id and reason (never its contents) on its own line,
   without stopping the rest of the list from printing (`BUZON-FUENTES-LISTAR-RESILIENTE-1`); every other command
@@ -247,6 +252,12 @@ source id, never a credential (check the mailbox is still receiving mail, check 
 excluding everything). A source already in an auth alert never also gets a redundant silencio entry for the
 same pass -- the auth alert already explains it. The alert clears the instant a pass sees mail again, since
 the marker simply moves forward past the threshold; there is no separate "clear" step to call.
+
+`estado` prints the same `ALERTA silencio` line per affected source now too (`BUZON-ESTADO-ALERTA-SILENCIO-1`),
+the same priority as above (only when that source is not already showing the auth alert). Until this, the
+auth alert was visible both in `estado` and in `alertas --json`, but the silence alert was visible only in
+`alertas --json` -- `duna-deploy-buzon status`, which runs `estado`, could read entirely clean for a source
+that had quietly stopped seeing mail, exactly the blind spot this whole alert exists to close.
 
 A source that has NEVER once seen a message has no `visto.json` marker at all. Before
 BUZON-CARPETAS-CONTEO-1, that meant it could never be called silent either, however many empty passes it
