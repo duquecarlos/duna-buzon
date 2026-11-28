@@ -44,7 +44,13 @@ under `$BUZON_DATOS/fuentes/<id>/`:
 
 ```
 fuentes/<id>/fuente.json           -- {id, proveedor, direccion, etiqueta, token_finanzas_ref, activa, host, port, origen,
-                                       carpetas}
+                                       carpetas, id_fuente_conectada}
+                                       `id_fuente_conectada` (CUENTA-BUZON-FUENTE-ID-ECO-2) is the exact Cuenta Duna
+                                       `id` this mailbox was pulled under -- set only for origen="cuenta", written
+                                       by `_pull_fuentes_cuenta` from `GET /servicio/fuentes/{sub}`'s own `id`.
+                                       `null` for a local source, and also `null` on a `fuente.json` written before
+                                       this slice -- `fuentes.id_fuente_conectada_efectiva` recovers that case from
+                                       the `cuenta-` id prefix instead.
 fuentes/<id>/credencial.bin        -- the signed-in account's own credential, AES-256-GCM encrypted (an MSAL token
                                        cache for "microsoft"; the app password itself for "imap") -- ABSENT for
                                        origen="cuenta" (see below): that source's token is never written to disk.
@@ -465,10 +471,16 @@ cuenta-v1.md`: each source's own id, provider, a MASKED address (`c***@hotmail.c
 label, who holds the connection (`"buzon"` for a `local`-origen source, `"cuenta"` for one Cuenta Duna connected),
 the latest recorded pass's own finish time and vistos/reenviados, and `"reingreso_requerido"` when that source
 needs reconnecting (an `origen="cuenta"` source Cuenta Duna no longer returns, or a `local` one past its own
-`BUZON_ALERTA_AUTH_HORAS` threshold) -- never a subject, a sender, a token, or the unmasked address. A source
-that has never completed a single pass yet is left out of that pass's heartbeat; it joins the next one the
-moment its first pass finishes. A failed or unconfigured push is never an error for the pass: logged as one
-count-only line (`cuenta: cuenta estado http=...` / `error=...`) and the pass's own exit code is unaffected.
+`BUZON_ALERTA_AUTH_HORAS` threshold), and -- for an `origen="cuenta"` source only, `null` for a local one --
+`fuente_conectada_id` (`CUENTA-BUZON-FUENTE-ID-ECO-2`): the exact Cuenta Duna `id` this mailbox was pulled
+under, echoed back per `buzon-estado-a-cuenta-v1.md` so Cuenta can link this row to the `fuente_conectada` it
+already knows about. Never a subject, a sender, a token, or the unmasked address. A value that fails a local
+uuid check is sent as `null` instead (never itself -- Cuenta would reject the whole heartbeat with a 422 over
+one bad field) and logged as one count-only line (`cuenta: fuente_conectada_id invalido omitidos=<n>`), never
+the id itself. A source that has never completed a single pass yet is left out of that pass's heartbeat; it
+joins the next one the moment its first pass finishes. A failed or unconfigured push is never an error for the
+pass: logged as one count-only line (`cuenta: cuenta estado http=...` / `error=...`) and the pass's own exit
+code is unaffected.
 
 ## Gate
 
