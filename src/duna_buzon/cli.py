@@ -29,6 +29,17 @@ same facts with their timestamp into `cuenta_estado.json` (directly under
 file back, so `duna-deploy-buzon status` (which already runs `python -m
 duna_buzon estado`) can finally tell "linked and working" from "never
 called", without any change to the entry script itself.
+
+The mail-silence alert (BUZON-ALERTA-SILENCIO-1) is itself split in two
+(BUZON-SILENCIO-SIN-CORREO-NUEVO-1), through `_entrada_silencio`: when
+every read folder's own UIDNEXT has stayed exactly what it was at the
+start of the silent window, the provider itself has nothing new, and
+`estado`/`alertas` print an INFO line rather than an ALERTA -- a low-
+volume mailbox going quiet for a few days is not a fault to chase. The
+ALERTA stays, with its own remedy, whenever the provider DID move (or its
+own folder data could not be measured at all) while Buzon forwarded
+nothing: that is still exactly the "reglas excluding everything" or
+"account stopped receiving mail" case this alert exists to catch.
 """
 
 from __future__ import annotations
@@ -146,6 +157,60 @@ def _estado_silencio(
         return None
     horas = int(transcurrido // datetime.timedelta(hours=1))
     return desde, horas
+
+
+def _proveedor_sin_cambios(directorio_fuente: str) -> bool:
+    """Whether every folder this source reads has the exact same UIDNEXT
+    now as it did at the start of the current silence window (BUZON-
+    SILENCIO-SIN-CORREO-NUEVO-1) -- `True` only when both maps exist and
+    are equal (same folders, same UIDNEXTs: nothing new has reached the
+    provider at all). `False` whenever either map is missing (no IMAP
+    folder concept for this source, e.g. Microsoft/Graph, or no pass has
+    recorded one yet) or the maps differ (the provider moved, a folder was
+    added or removed, or anything else this comparison cannot vouch for)
+    -- "could not measure" and "the provider moved" both fall back to
+    today's ALERTA, never to "nothing to check"."""
+    base = modulo_alerta.cargar_carpetas_base(directorio_fuente)
+    actual = modulo_alerta.cargar_carpetas_actual(directorio_fuente)
+    if base is None or actual is None:
+        return False
+    return base == actual
+
+
+def _entrada_silencio(
+    config: Config, fuente: FuenteConfig, ahora: datetime.datetime
+) -> dict[str, object] | None:
+    """The one shared silence entry `estado` and `alertas --json` both
+    build from (BUZON-SILENCIO-SIN-CORREO-NUEVO-1) -- `None` when this
+    source is not past its own silence threshold, otherwise a dict whose
+    `tipo` carries the split:
+      - `"silencio_info"`: every read folder's own UIDNEXT is unchanged
+        since the window started -- nothing new ever reached the
+        provider, so there is nothing in Buzon's own reach to check;
+        `remedio` is `None`.
+      - `"silencio"`: the provider moved (or its own folder data could not
+        be measured) while Buzon forwarded nothing -- today's alert, with
+        its own remedy."""
+    en_silencio = _estado_silencio(config, fuente, ahora)
+    if en_silencio is None:
+        return None
+    desde, horas = en_silencio
+    directorio = str(modulo_fuentes.directorio_fuente(config.directorio_datos, fuente.id))
+    if _proveedor_sin_cambios(directorio):
+        return {
+            "fuente": fuente.id,
+            "tipo": "silencio_info",
+            "desde": registro.formato_fecha_utc(desde),
+            "horas": horas,
+            "remedio": None,
+        }
+    return {
+        "fuente": fuente.id,
+        "tipo": "silencio",
+        "desde": registro.formato_fecha_utc(desde),
+        "horas": horas,
+        "remedio": _remedio_silencio(fuente),
+    }
 
 
 def _remedio_silencio(fuente: FuenteConfig) -> str:
@@ -451,6 +516,19 @@ def _ejecutar_una_fuente(
     # SINCE fallback deliberately skipped. Microsoft and Gmail have no such
     # concept, so this reports 0 for them -- never a guess.
     omitidos_fecha_proveedor = getattr(proveedor, "omitidos_por_fecha_proveedor", 0)
+    # `carpetas_uidnext` is `ClienteImap`'s own per-folder map (BUZON-
+    # SILENCIO-SIN-CORREO-NUEVO-1), absent for every other provider (no
+    # IMAP folder concept) -- this reports nothing for them rather than
+    # guessing, so `_proveedor_sin_cambios` always reads their data as
+    # missing and never calls them silently fine.
+    carpetas_uidnext = getattr(proveedor, "carpetas_uidnext", None)
+    if carpetas_uidnext:
+        modulo_alerta.marcar_carpetas_actual(directorio, carpetas_uidnext)
+        # The baseline restarts whenever this pass saw mail, or is set
+        # once when none has ever existed -- never on every silent pass,
+        # exactly like `ultimo_visto_en`/`primera_pasada_en` above.
+        if resultado.contadores.vistos > 0 or modulo_alerta.cargar_carpetas_base(directorio) is None:
+            modulo_alerta.marcar_carpetas_base(directorio, carpetas_uidnext)
     momento = _ahora()
     if resultado.contadores.vistos > 0:
         # BUZON-ALERTA-SILENCIO-1 -- this source's mailbox had mail THIS
@@ -798,14 +876,23 @@ def comando_estado(config: Config, *, pasadas: int | None = None) -> int:
             # Checked only when there is no auth alert already, same
             # priority `comando_alertas` already gives the two (an auth
             # failure already explains the silence).
-            en_silencio = _estado_silencio(config, fuente, _ahora())
-            if en_silencio is not None:
-                desde, horas = en_silencio
-                print(
-                    f"fuente={fuente.id} ALERTA silencio desde "
-                    f"{registro.formato_fecha_utc(desde)} ({horas} h) -- "
-                    f"{_remedio_silencio(fuente)}"
-                )
+            # BUZON-SILENCIO-SIN-CORREO-NUEVO-1 -- split in two: the
+            # provider itself having nothing new is not something to
+            # revise, so it never prints as "ALERTA".
+            entrada_silencio = _entrada_silencio(config, fuente, _ahora())
+            if entrada_silencio is not None:
+                if entrada_silencio["tipo"] == "silencio_info":
+                    print(
+                        f"fuente={fuente.id} sin correo nuevo en el proveedor desde "
+                        f"{entrada_silencio['desde']} ({entrada_silencio['horas']} h): "
+                        "nada que revisar en Buzon"
+                    )
+                else:
+                    print(
+                        f"fuente={fuente.id} ALERTA silencio desde "
+                        f"{entrada_silencio['desde']} ({entrada_silencio['horas']} h) -- "
+                        f"{entrada_silencio['remedio']}"
+                    )
 
         _imprimir_historial(fuente.id, directorio, limite_pasadas)
 
@@ -817,10 +904,15 @@ def comando_alertas(config: Config) -> int:
     threshold (BUZON-ALERTA-AUTH-1), OR -- when it is not already an auth
     alert, the auth failure already explains the silence -- past its own
     mail-silence threshold (BUZON-ALERTA-SILENCIO-1), as a JSON list --
-    `[]` when none. Read-only, exits 0 either way: Main's own
-    session-start hub check reads this through `duna-deploy-buzon alertas`
-    to relay a dead credential or a gone-quiet source to the desk, never a
-    token, password or address beyond the source's own id."""
+    `[]` when none. A silence entry's own `tipo` (BUZON-SILENCIO-SIN-
+    CORREO-NUEVO-1) is `"silencio_info"` when the provider itself has
+    nothing new (no action needed) or `"silencio"` when it moved while
+    Buzon forwarded nothing -- `_entrada_silencio` is the one place that
+    decides, shared with `estado`'s own printed line, so both always agree.
+    Read-only, exits 0 either way: Main's own session-start hub check reads
+    this through `duna-deploy-buzon alertas` to relay a dead credential or
+    a genuinely gone-quiet source to the desk, never a token, password or
+    address beyond the source's own id."""
     _migrar_si_necesario(config)
     todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
     ahora = _ahora()
@@ -839,19 +931,10 @@ def comando_alertas(config: Config) -> int:
                 }
             )
             continue
-        en_silencio = _estado_silencio(config, fuente, ahora)
-        if en_silencio is None:
+        entrada_silencio = _entrada_silencio(config, fuente, ahora)
+        if entrada_silencio is None:
             continue
-        desde, horas = en_silencio
-        alertas.append(
-            {
-                "fuente": fuente.id,
-                "tipo": "silencio",
-                "desde": registro.formato_fecha_utc(desde),
-                "horas": horas,
-                "remedio": _remedio_silencio(fuente),
-            }
-        )
+        alertas.append(entrada_silencio)
     print(json.dumps(alertas))
     return 0
 

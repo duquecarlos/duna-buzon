@@ -714,6 +714,14 @@ class ClienteImap:
         # VISIBLE-1). Counted here so it never disappears as a bare
         # `continue`.
         self.omitidos_por_fecha_proveedor: int = 0
+        # Public, read the same way (`cli.py`'s own `getattr(proveedor,
+        # ...)`) -- every folder THIS pass successfully examined, with its
+        # own UIDNEXT as the server just reported it (BUZON-SILENCIO-SIN-
+        # CORREO-NUEVO-1). A folder whose own `EXAMINE`/`SEARCH` failed this
+        # pass is simply absent here, never a stale or guessed value, so a
+        # caller comparing this against an earlier snapshot never mistakes
+        # "could not measure" for "unchanged".
+        self.carpetas_uidnext: dict[str, int] = {}
         self._construir_conexion = construir_conexion
         self._conexion: ConexionImapProtocolo | None = None
         self._carpeta_actual: str | None = None
@@ -944,6 +952,9 @@ class ClienteImap:
                 # the next time this folder's own problem clears.
                 self.omitidos_por_error_proveedor += 1
                 continue
+
+            if uidnext is not None:
+                self.carpetas_uidnext[nombre_carpeta] = uidnext
 
             # Whether THIS folder's own search just now resumed from its
             # stored UID watermark (a genuine resume -- every candidate UID

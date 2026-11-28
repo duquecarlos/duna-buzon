@@ -79,6 +79,15 @@ fuentes/<id>/primera_pasada.json    -- the UTC instant of the FIRST pass this co
                                        fallback for a source that has NEVER once seen mail, so it still raises
                                        past the threshold instead of staying invisible forever -- see
                                        `alerta.py` and BUZON-CARPETAS-CONTEO-1
+fuentes/<id>/carpetas_actual.json  -- ABSENT for a source with no IMAP folder concept, or until its first
+                                       pass with folder data: `{carpeta: uidnext}` as of the MOST RECENT
+                                       pass, overwritten every time. See `alerta.py` and
+                                       BUZON-SILENCIO-SIN-CORREO-NUEVO-1
+fuentes/<id>/carpetas_base.json    -- same shape, frozen at the START of the current silence window:
+                                       overwritten when a pass sees mail, or once when no map existed yet.
+                                       Compared against the one above to tell "the provider has nothing
+                                       new" apart from "something is wrong" -- see `alerta.py` and
+                                       BUZON-SILENCIO-SIN-CORREO-NUEVO-1
 ```
 
 `host`/`port` are only set for `proveedor == "imap"` (`None` otherwise).
@@ -205,13 +214,14 @@ The commands:
   no env file sourced (see `deploy/host/README.md`).
 - `alertas [--json]` -- read-only, machine-readable: every source currently past its own auth-failure
   threshold (`"tipo": "auth"`, `BUZON-ALERTA-AUTH-1`), OR -- when it is not already an auth alert -- past
-  its own mail-silence threshold (`"tipo": "silencio"`, `BUZON-ALERTA-SILENCIO-1`, see below), as a JSON
+  its own mail-silence threshold (`"tipo": "silencio"` or `"silencio_info"`, `BUZON-ALERTA-SILENCIO-1`/
+  `BUZON-SILENCIO-SIN-CORREO-NUEVO-1`, see below), as a JSON
   list, `[]` when none, exit 0 either way. Each entry is
-  `{"fuente": <id>, "tipo": "auth"|"silencio", "desde": <ts>, "horas": <n>, "remedio": <how>}` -- never a
-  token, password or address beyond the source's own id. The host entry script's own `alertas` subcommand
-  runs this, as `duna`, the same way `status` runs `estado`; Main's own session-start hub check reads it
-  over `sudo -n` to relay a dead credential or a gone-quiet source to the desk (a console line for the
-  admin UI is a named follow-up, not built by this slice).
+  `{"fuente": <id>, "tipo": "auth"|"silencio"|"silencio_info", "desde": <ts>, "horas": <n>, "remedio": <how|null>}`
+  -- never a token, password or address beyond the source's own id. The host entry script's own `alertas`
+  subcommand runs this, as `duna`, the same way `status` runs `estado`; Main's own session-start hub check
+  reads it over `sudo -n` to relay a dead credential or a genuinely gone-quiet source to the desk (a console
+  line for the admin UI is a named follow-up, not built by this slice).
 
 ### A dead credential becomes visible (BUZON-ALERTA-AUTH-1)
 
@@ -267,6 +277,29 @@ the very first pass stayed invisible forever, exactly the blind spot this alert 
 pass this connector ever attempted for this source, set once and kept forever after. A source with neither
 marker has never even attempted a pass yet, and stays un-alerted -- there is nothing to measure silence
 from.
+
+#### Telling "nothing to check" apart from "something is wrong" (BUZON-SILENCIO-SIN-CORREO-NUEVO-1)
+
+The silence alert above is TRUE the moment a source's marker is old enough, whether or not there is
+anything to actually go check: a low-volume mailbox with nothing arriving for a couple of days raises it
+exactly the same way a mailbox-side rule or an excluding `reglas.json` would, and an alert that cries wolf
+on an ordinary quiet mailbox stops being read.
+
+Every pass now also records, per IMAP source, each read folder's own UIDNEXT as the server just reported it
+(`fuentes/<id>/carpetas_actual.json`, `ClienteImap.carpetas_uidnext`) -- a Microsoft/Graph source has no
+such concept and simply has none of this. A second file, `fuentes/<id>/carpetas_base.json`, holds the same
+shape but frozen at the START of the current silence window: it is overwritten whenever a pass sees mail
+(the window restarts) or, once, the very first time any folder map at all becomes available for this
+source. `estado`/`alertas --json` compare the two:
+
+- Equal (same folders, same UIDNEXTs) -- nothing has reached the provider since the window started, so
+  there is nothing in Buzón's own reach to check. `estado` prints an INFO line (`fuente=<id> sin correo
+  nuevo en el proveedor desde <fecha> (<n> h): nada que revisar en Buzon`, never `ALERTA`), and
+  `alertas --json` lists it as `"tipo": "silencio_info"` with `"remedio": null`.
+- Different, or either map missing at all (no folder concept for this source, or no pass has recorded one
+  yet) -- the provider moved while Buzón forwarded nothing, or this cannot be measured at all; either way
+  this keeps today's `ALERTA silencio` / `"tipo": "silencio"`, with its own remedy, exactly as before this
+  slice. This never claims "nothing to check" without the measurement to back it.
 
 ### Narrowing an IMAP source to specific folders (BUZON-IMAP-CARPETAS-INCLUIDAS-1)
 

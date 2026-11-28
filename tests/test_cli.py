@@ -493,6 +493,19 @@ class _ProveedorFalso:
         pass
 
 
+class _ProveedorFalsoConCarpetas:
+    """BUZON-SILENCIO-SIN-CORREO-NUEVO-1 -- stands in for `ClienteImap`
+    whenever a test needs `_ejecutar_una_fuente` to see a per-folder
+    UIDNEXT map after the pass, the same way `_ProveedorFalso` stands in
+    for a provider with no such concept at all."""
+
+    def __init__(self, carpetas_uidnext: dict[str, int]) -> None:
+        self.carpetas_uidnext = carpetas_uidnext
+
+    def cerrar(self) -> None:
+        pass
+
+
 @pytest.mark.parametrize(
     "resultado_falso_kwargs,motivo_esperado",
     [
@@ -3297,3 +3310,198 @@ def test_estado_nunca_imprime_el_token_finanzas_con_silencio(
 
     assert cli.comando_estado(config) == 0
     assert secreto not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# BUZON-SILENCIO-SIN-CORREO-NUEVO-1 -- the silence alert split in two:
+# "the provider itself has nothing new" (every read folder's own UIDNEXT
+# unchanged since the window started) prints INFO, never ALERTA; "the
+# provider moved while Buzon forwarded nothing", or its own folder data
+# could not be measured at all, keeps today's ALERTA.
+# ---------------------------------------------------------------------------
+
+
+def test_pasada_con_carpetas_uidnext_guarda_actual_y_base_la_primera_vez(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli,
+        "construir_proveedor",
+        lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalsoConCarpetas({"INBOX": 36}),
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores()))
+
+    assert cli.comando_sincronizar(config) == 0
+    assert modulo_alerta.cargar_carpetas_actual(str(directorio)) == {"INBOX": 36}
+    assert modulo_alerta.cargar_carpetas_base(str(directorio)) == {"INBOX": 36}
+
+
+def test_pasada_sin_vistos_nunca_sobrescribe_una_base_de_carpetas_ya_existente(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The provider moved (UIDNEXT 36 -> 40) on a silent pass -- `actual`
+    # follows it, but `base` stays at the window's own starting point, so
+    # the comparison can still see that something changed.
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    modulo_alerta.marcar_carpetas_base(str(directorio), {"INBOX": 36})
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli,
+        "construir_proveedor",
+        lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalsoConCarpetas({"INBOX": 40}),
+    )
+    monkeypatch.setattr(cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores()))
+
+    assert cli.comando_sincronizar(config) == 0
+    assert modulo_alerta.cargar_carpetas_actual(str(directorio)) == {"INBOX": 40}
+    assert modulo_alerta.cargar_carpetas_base(str(directorio)) == {"INBOX": 36}
+
+
+def test_pasada_con_vistos_reinicia_la_base_de_carpetas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config(tmp_path)
+    directorio = _escribir_fuente_y_reglas(tmp_path)
+    modulo_alerta.marcar_carpetas_base(str(directorio), {"INBOX": 36})
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio_fuente: "token-falso")
+    monkeypatch.setattr(
+        cli,
+        "construir_proveedor",
+        lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalsoConCarpetas({"INBOX": 40}),
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1, reenviados=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    assert modulo_alerta.cargar_carpetas_base(str(directorio)) == {"INBOX": 40}
+
+
+def test_estado_silencio_uidnext_sin_cambios_es_info_nunca_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 26, 10, 10, 2, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    modulo_alerta.marcar_carpetas_base(str(directorio), {"INBOX": 36, "Newsletter": 2})
+    modulo_alerta.marcar_carpetas_actual(str(directorio), {"INBOX": 36, "Newsletter": 2})
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=41))
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "ALERTA" not in salida
+    assert (
+        "fuente=hotmail-carlos sin correo nuevo en el proveedor desde "
+        "2026-11-26T10:10:02Z (41 h): nada que revisar en Buzon" in salida
+    )
+
+
+def test_estado_silencio_uidnext_avanzo_sigue_siendo_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    modulo_alerta.marcar_carpetas_base(str(directorio), {"INBOX": 36})
+    modulo_alerta.marcar_carpetas_actual(str(directorio), {"INBOX": 40})
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=25))
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "fuente=hotmail-carlos ALERTA silencio desde 2026-11-19T08:00:00Z (25 h)" in salida
+    assert cli._remedio_silencio(cargar_fuente(str(tmp_path), "hotmail-carlos")) in salida
+
+
+def test_estado_silencio_sin_datos_de_carpetas_sigue_siendo_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Neither `carpetas_actual.json` nor `carpetas_base.json` exists at all
+    # (a Microsoft/Graph source, or an IMAP source with no folder data yet)
+    # -- never claims "nothing to check" without the measurement.
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=25))
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "fuente=hotmail-carlos ALERTA silencio desde 2026-11-19T08:00:00Z (25 h)" in salida
+
+
+def test_alertas_json_silencio_info_cuando_el_proveedor_no_tiene_nada_nuevo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    modulo_alerta.marcar_carpetas_base(str(directorio), {"INBOX": 36})
+    modulo_alerta.marcar_carpetas_actual(str(directorio), {"INBOX": 36})
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=25))
+
+    assert cli.comando_alertas(config) == 0
+    salida = json.loads(capsys.readouterr().out)
+    assert salida == [
+        {
+            "fuente": "hotmail-carlos",
+            "tipo": "silencio_info",
+            "desde": "2026-11-19T08:00:00Z",
+            "horas": 25,
+            "remedio": None,
+        }
+    ]
+
+
+def test_alertas_json_silencio_alerta_cuando_el_proveedor_avanzo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    modulo_alerta.marcar_carpetas_base(str(directorio), {"INBOX": 36})
+    modulo_alerta.marcar_carpetas_actual(str(directorio), {"INBOX": 40})
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=25))
+
+    assert cli.comando_alertas(config) == 0
+    salida = json.loads(capsys.readouterr().out)
+    assert salida == [
+        {
+            "fuente": "hotmail-carlos",
+            "tipo": "silencio",
+            "desde": "2026-11-19T08:00:00Z",
+            "horas": 25,
+            "remedio": cli._remedio_silencio(cargar_fuente(str(tmp_path), "hotmail-carlos")),
+        }
+    ]
+
+
+def test_alertas_json_auth_tiene_prioridad_sobre_silencio_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An auth failure already explains the silence, whatever the provider's
+    # own folder data says -- never a redundant "silencio_info" alongside it.
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), desde)
+    modulo_alerta.marcar_carpetas_base(str(directorio), {"INBOX": 36})
+    modulo_alerta.marcar_carpetas_actual(str(directorio), {"INBOX": 36})
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=30))
+
+    assert cli.comando_alertas(config) == 0
+    salida = json.loads(capsys.readouterr().out)
+    assert [entrada["tipo"] for entrada in salida] == ["auth"]
