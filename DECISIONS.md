@@ -3751,3 +3751,142 @@ authorize merging on green without waiting.
 
 Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): observability only, no behaviour
 change, no secret printed -- exactly the approval's own words, nothing wider.
+
+---
+
+## BUZON-ESTADO-ALERTA-SILENCIO-1 -- `estado` finally shows the silence alert too (2026-11-28)
+
+### Why
+
+Carlos's own overnight direction (via the desk, `ORCH-CARLOS-DELEGATES-TIER-1-1`, relayed through dispatch
+`BUZON-SIGUIENTE-SEGUIMIENTO-2026-11-28-A`): pick the most valuable OPEN follow-up this repository's own
+ledger and worker reports name, preferring a real defect in mail delivery over hygiene. Re-verified against
+the code, this ledger's own most recent ranked list (`BUZON-IMAP-BODYSTRUCTURE-CACHE-1`, above) was correct
+that every previously-named follow-up is closed or cross-repo (`BUZON-ALERTA-CONSOLE-LINE-1`, still the only
+one open, needs a Buzón-to-console wire that does not exist, out of this repository's own `touches:`); the
+newly-named cross-repo anomaly this dispatch itself flagged (Cuenta's own pull reading `fuentes=0` against
+Buzón's 3 sources, `CUENTA-BUZON-FUENTE-MATCH-KEY-INV-1`) is explicitly not this slice either. With the named
+list exhausted, this slice re-read every module fresh against this repository's invariants and Carlos's own
+standing default ("anything off the normal flow raises a flag") and found the one real, reversible gap that
+turned up: `comando_estado` -- what `duna-deploy-buzon status` actually runs as its health check -- never
+checked the silence alert at all.
+
+### The gap, verified against the code and the tests
+
+`_estado_alerta` (the auth-failure check) and `_estado_silencio` (the mail-silence check,
+`BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1`) are two separate functions, by design, each with its own threshold and
+marker. `comando_alertas` (the machine-readable `alertas --json` Main's own hub check reads) calls BOTH,
+auth first, falling back to silence only when the source is not already in an auth alert -- confirmed by
+reading its own body and by every `test_alertas_json_*silencio*` test in `tests/test_cli.py`. `comando_estado`
+(the human-readable command, printed over SSH, and the one `deploy/host/duna-deploy-buzon status` already
+runs as `python -m duna_buzon estado`) called only `_estado_alerta` in its own per-source loop -- confirmed by
+reading that loop (no `_estado_silencio` call existed in it) and by the fact that every `silencio`-related
+test in `tests/test_cli.py` before this slice (`test_alertas_json_lista_la_fuente_en_silencio` and its
+siblings, `test_estado_y_alertas_nunca_imprimen_el_token_finanzas_con_silencio`) only ever called
+`cli.comando_alertas`, never `cli.comando_estado`. A source that had gone quiet -- the exact "silently sees
+nothing" shape this dispatch's own spec named as the preferred kind of defect -- would already be flagged by
+`alertas --json`, but `estado`, and therefore `duna-deploy-buzon status`, would read entirely clean for it.
+`README.md`'s own "A mailbox gone quiet becomes visible" section already documented this asymmetry honestly
+(it only ever claimed `alertas --json` shows the silence entry, never `estado`), so this was not a docs/code
+mismatch -- it was a real, verifiable gap between the two alert types' own visibility, on the one surface
+Carlos and Main actually read first.
+
+### What changed
+
+`comando_estado`'s own per-source loop (`cli.py`) now also calls `_estado_silencio`, exactly when that
+source is NOT already showing the `ALERTA credencial caida` line -- the same priority `comando_alertas`
+already gives the two kinds, so a source already explained by an auth failure never also gets a redundant
+silence line here either. When it finds one, it prints:
+
+    fuente=<id> ALERTA silencio desde <ts> (<n> h) -- <remedio>
+
+using the SAME `_estado_silencio`/`_remedio_silencio` helpers `comando_alertas` already calls -- no new
+function, no new marker file, no new persisted state. `README.md` updated in both places that described this
+asymmetry (the `estado` subcommand's own bullet, and the dedicated "A mailbox gone quiet becomes visible"
+section) to say `estado` now shows this too.
+
+### Tests, measured
+
+4 new `def test_` in `tests/test_cli.py` (`git diff main~1 main -- tests/ | grep -c '^+def test_'`), mirroring
+the existing auth-alert-in-`estado` trio and the existing silence-priority test in `comando_alertas`:
+`test_estado_silencio_sin_pasar_el_umbral_no_muestra_alerta` (no line under the threshold),
+`test_estado_silencio_pasado_el_umbral_muestra_alerta_con_remedio` (the exact line and remedy once past it),
+`test_estado_auth_tiene_prioridad_sobre_silencio_en_la_linea_alerta` (an auth alert suppresses the silence
+line, in `estado`, the same way it already does in `alertas --json`), and
+`test_estado_nunca_imprime_el_token_finanzas_con_silencio` (the `estado` twin of the existing `alertas`-only
+secrecy test, so the new line is proven never to leak the Finanzas token either).
+
+### Gate, measured
+
+`uv run pytest -q` on this slice's own final tree (merge commit `82e05ccfddc990a82a1c4a8dca4bf02216e576f0`,
+tree `e1e485088ebf7a62b7c763b42133ceabb601df2c`), run once in the foreground:
+
+    770 collected (uv run pytest --collect-only -q)
+    761 passed, 9 skipped in 45.97s
+
+761 + 9 = 770, matching the collected count exactly. Reconciled against this slice's own base
+(`main` at `e0ded412dfab8e96c224f45bb28b4cc3c82c1a84`, 766 collected / 757 passed + 9 skipped per
+`BUZON-CUENTA-PULL-VISIBLE-1`'s own recorded figure): 770 - 766 = 4 new collected items and 761 - 757 = 4 new
+passed, both matching the 4 new `def test_` lines above exactly -- no drift, nothing pre-existing broke. The 9
+skips are the same pre-existing Windows file-mode skips every earlier slice in this ledger has recorded; none
+are new.
+
+Tree identity proven before writing this entry, so the gate above was not re-run for the merge: merge commit
+`82e05ccfddc990a82a1c4a8dca4bf02216e576f0` has tree `e1e485088ebf7a62b7c763b42133ceabb601df2c`, IDENTICAL to
+the slice branch `feat/buzon-siguiente-seguimiento-2026-11-28-a`'s own tree at commit
+`a8214c396b85a8eb1fe974b2b8e6bbf51bba299d`, and `git diff HEAD feat/buzon-siguiente-seguimiento-2026-11-28-a
+--stat` against the merge commit was empty.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, and no new on-disk file layout was added: the new
+code path only reads `fuentes/<id>/visto.json` and `primera_pasada.json`, both already written by
+`BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1`/`BUZON-CARPETAS-CONTEO-1`. No cross-repo contract or DTO change --
+nothing here touches the Finanzas or Cuenta Duna wire; this diff is entirely local to `comando_estado`'s own
+printed output. Customer-facing bytes DID change, on the SAME broader reading `BUZON-ALERTA-AUTH-1` and
+`BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1` already used rather than the narrower one earlier entries chose: the new
+`ALERTA silencio` line in `estado`'s own per-source output is bytes an OPERATOR reads (Carlos over SSH, Main
+and the desk over `sudo -n` via `duna-deploy-buzon status`) -- never a customer of a Duna product, and never
+a NEW kind of alert line either, since `alertas --json` has printed the identical fact in its own shape since
+`BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1`; this only makes an EXISTING alert visible on a second, already-existing
+surface. This dispatch's own body says, in words, to "Build it with tests, full gate GREEN, merge to main,
+write the ledger entry, leave the repo on main" -- an explicit instruction to merge once the gate is green,
+not conditioned on this classification -- so this slice merges without waiting, on the broader reading of
+this one condition rather than a claim that it did not trip.
+
+### Why this was the right follow-up to build, over the alternatives read and set aside
+
+`BUZON-ALERTA-CONSOLE-LINE-1`: still cross-repo, still needs a wire this repository does not own either side
+of -- unchanged from every prior slice's own reasoning. The `CUENTA-BUZON-FUENTE-MATCH-KEY-INV-1` anomaly this
+dispatch itself named (`fuentes=0` on a live Cuenta pull): this dispatch's own spec text names it as that
+cross-repo investigation's own question, not this slice's, and building anything that changes what a pull
+returns would also risk this slice's own constraint against touching a live mailbox or changing outward
+behaviour -- correctly set aside, not investigated further here. Every module this slice read fresh
+(`reglas.py`, `sincronizar.py`, `adjuntos.py`, `cursor.py`, `alerta.py`, `proveedor.py`, `gmail.py`) matched
+its own invariants and its own tests; the one real inconsistency found was the asymmetry between the two
+alert types' own visibility on `estado`, which is also the one candidate that is a pure, reversible
+observability addition -- no rule, no wire shape, no forwarding decision touched, exactly this dispatch's own
+boundary.
+
+### Attribution
+
+Carlos, through Main, delegated Tier 1 work under `ORCH-CARLOS-DELEGATES-TIER-1-1`. This slice re-verified
+every previously-named follow-up against the code (all closed or cross-repo), read every module fresh per
+this ledger's own established practice when the named list comes up empty, and built the one real gap that
+turned up: `comando_estado` now shows the silence alert the same way it has long shown the auth alert.
+
+### Open follow-ups, ranked
+
+1. **`BUZON-ALERTA-CONSOLE-LINE-1`** (named by `BUZON-ALERTA-AUTH-1`, still open, covering both the `"auth"`
+   and `"silencio"` alert types): a console line surfacing a source's own alert in the admin UI, needing a
+   Buzón-to-console wire that does not exist yet -- cross-repo, outside this repository's own `touches:`.
+   Still the only follow-up with a clear owner (the console/admin-ui repository) yet to build its half.
+2. **`CUENTA-BUZON-FUENTE-MATCH-KEY-INV-1`** (named by this dispatch's own spec, not by an earlier ledger
+   entry): the host-observed anomaly where a live Cuenta pull returns `fuentes=0` while Buzón itself runs 3
+   sources. A cross-repo contract question (what key Cuenta and Buzón each use to identify a "fuente"), not
+   investigated further by this slice -- the dispatch's own spec named it explicitly out of scope.
+3. A source already in a silence alert that THEN also starts failing auth still reports only `"tipo": "auth"`
+   until auth clears -- recorded by `BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1` as CORRECT behavior, not a bug; kept
+   here only so a future reader does not have to re-derive that.
+4. Every other follow-up this ledger ever named before this entry is closed by a later slice, re-verified
+   against the code while compiling this list.
