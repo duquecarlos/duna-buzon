@@ -529,6 +529,18 @@ def _ejecutar_una_fuente(
         # exactly like `ultimo_visto_en`/`primera_pasada_en` above.
         if resultado.contadores.vistos > 0 or modulo_alerta.cargar_carpetas_base(directorio) is None:
             modulo_alerta.marcar_carpetas_base(directorio, carpetas_uidnext)
+    elif carpetas_uidnext is not None:
+        # This IS an IMAP-like source (the attribute exists, unlike
+        # Microsoft/Gmail), yet it came back EMPTY -- every included
+        # folder's own `EXAMINE`/`SEARCH` failed this pass
+        # (BUZON-IMAP-MENSAJE-AISLADO-1), or none is included at all.
+        # Leaving an earlier pass's `carpetas_actual.json` in place would
+        # let `_proveedor_sin_cambios` compare that STALE map against the
+        # frozen baseline and read "nothing new reached the provider" --
+        # a measurement THIS pass never made. Clearing it instead makes
+        # the comparison read as "could not measure", which already falls
+        # back to today's ALERTA, never to a false "nothing to check".
+        modulo_alerta.borrar_carpetas_actual(directorio)
     momento = _ahora()
     if resultado.contadores.vistos > 0:
         # BUZON-ALERTA-SILENCIO-1 -- this source's mailbox had mail THIS
