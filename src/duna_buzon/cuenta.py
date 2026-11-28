@@ -54,7 +54,10 @@ ProveedorEstadoWire = Literal["microsoft", "google", "zoho", "imap"]
 OrigenEstadoWire = Literal["cuenta", "buzon"]
 AlertaEstadoWire = Literal["reingreso_requerido", "error"]
 
-_ESTADO_HTTP_OK = 204
+# Public (not module-private) because `cli.py`'s own success log
+# (BUZON-CUENTA-PULL-VISIBLE-1) names this exact code -- the wire's only
+# success status, never guessed or duplicated as a literal there.
+ESTADO_HTTP_OK = 204
 
 
 class CuentaPullError(Exception):
@@ -196,5 +199,5 @@ class CuentaClient:
             respuesta = self._cliente.post(RUTA_SERVICIO_ESTADO.format(sub=self._sub), json=cuerpo)
         except httpx.TransportError as exc:
             raise CuentaPullError(paso="estado", clase_excepcion=type(exc).__name__) from exc
-        if respuesta.status_code != _ESTADO_HTTP_OK:
+        if respuesta.status_code != ESTADO_HTTP_OK:
             raise CuentaPullError(paso="estado", http_status=respuesta.status_code)
