@@ -42,23 +42,19 @@ def cargar_cursor(directorio_datos: str, *, valor_inicial: datetime.datetime) ->
     return datetime.datetime.fromisoformat(datos["cursor"])
 
 
-def guardar_cursor(directorio_datos: str, momento: datetime.datetime) -> None:
-    cripto.asegurar_directorio_datos(Path(directorio_datos))
-    contenido = json.dumps({"cursor": momento.isoformat()}).encode("utf-8")
-    cripto.escribir_archivo_sensible(_ruta(directorio_datos), contenido)
-
-
-def guardar_cursor_atomico(directorio_datos: str, momento: datetime.datetime) -> None:
-    """Like `guardar_cursor`, but via a temp file in the SAME directory
+def _escribir_json_atomico(ruta: Path, contenido: bytes) -> None:
+    """Writes `contenido` to `ruta` via a temp file in the SAME directory
     followed by `os.replace` -- never a window where a reader (or a
     concurrent `sincronizar` pass) could see a truncated or half-written
-    `cursor.json`. `rebobinar-cursor --aplicar` (BUZON-CURSOR-REBOBINAR-
-    CLI-1) uses this; every other caller keeps `guardar_cursor`'s own
-    truncate-in-place write, unchanged -- the same convention
+    file, and a crash or kill mid-write leaves the OLD file exactly as it
+    was rather than a corrupt one `cargar_cursor`/`cargar_cursor_proveedor`
+    cannot parse (BUZON-SIGUIENTE-SEGUIMIENTO-2026-11-28-C: a truncated
+    `cursor.json` raises uncaught out of `cargar_cursor`, which
+    `comando_sincronizar`'s own `for fuente in activas:` loop does not
+    wrap per source -- one corrupted file stops every source still to run
+    that pass, not only its own). The same shape
     `fuentes.guardar_fuente_atomico` already set for `fuente.json`."""
-    ruta = _ruta(directorio_datos)
-    contenido = json.dumps({"cursor": momento.isoformat()}).encode("utf-8")
-    cripto.asegurar_directorio_datos(ruta.parent)
+    ruta.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporal = tempfile.mkstemp(dir=str(ruta.parent), prefix=".cursor-", suffix=".tmp")
     try:
         with os.fdopen(descriptor, "wb") as archivo:
@@ -70,6 +66,23 @@ def guardar_cursor_atomico(directorio_datos: str, momento: datetime.datetime) ->
         with contextlib.suppress(OSError):
             os.remove(temporal)
         raise
+
+
+def guardar_cursor(directorio_datos: str, momento: datetime.datetime) -> None:
+    """Writes `cursor.json` atomically (see `_escribir_json_atomico`) --
+    every caller gets the same crash-safety, not only the operator-
+    triggered `rebobinar-cursor --aplicar` path below."""
+    cripto.asegurar_directorio_datos(Path(directorio_datos))
+    contenido = json.dumps({"cursor": momento.isoformat()}).encode("utf-8")
+    _escribir_json_atomico(_ruta(directorio_datos), contenido)
+
+
+def guardar_cursor_atomico(directorio_datos: str, momento: datetime.datetime) -> None:
+    """Kept as its own name for `rebobinar-cursor --aplicar`'s own call
+    site (BUZON-CURSOR-REBOBINAR-CLI-1) and its own tests -- `guardar_cursor`
+    itself now writes atomically too, so this is an explicit alias, not a
+    second implementation."""
+    guardar_cursor(directorio_datos, momento)
 
 
 def cargar_cursor_proveedor(directorio_datos: str) -> str | None:
@@ -85,9 +98,11 @@ def cargar_cursor_proveedor(directorio_datos: str) -> str | None:
 
 
 def guardar_cursor_proveedor(directorio_datos: str, valor: str) -> None:
+    """Writes `cursor_proveedor.json` atomically, for the same reason as
+    `guardar_cursor` above."""
     cripto.asegurar_directorio_datos(Path(directorio_datos))
     contenido = json.dumps({"cursor_proveedor": valor}).encode("utf-8")
-    cripto.escribir_archivo_sensible(_ruta_proveedor(directorio_datos), contenido)
+    _escribir_json_atomico(_ruta_proveedor(directorio_datos), contenido)
 
 
 def borrar_cursor_proveedor(directorio_datos: str) -> None:
