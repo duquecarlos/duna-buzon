@@ -789,6 +789,23 @@ def comando_estado(config: Config, *, pasadas: int | None = None) -> int:
                 f"{registro.formato_fecha_utc(desde)} ({horas} h) -- "
                 f"reconectar: {_remedio_credencial(fuente)}"
             )
+        else:
+            # BUZON-ESTADO-ALERTA-SILENCIO-1 -- `comando_alertas` has shown
+            # a silence alert since BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1, but
+            # `estado` (what `duna-deploy-buzon status` actually runs) never
+            # printed its twin: a source gone quiet read exactly like one
+            # that is fine, right here, where Carlos and Main actually look.
+            # Checked only when there is no auth alert already, same
+            # priority `comando_alertas` already gives the two (an auth
+            # failure already explains the silence).
+            en_silencio = _estado_silencio(config, fuente, _ahora())
+            if en_silencio is not None:
+                desde, horas = en_silencio
+                print(
+                    f"fuente={fuente.id} ALERTA silencio desde "
+                    f"{registro.formato_fecha_utc(desde)} ({horas} h) -- "
+                    f"{_remedio_silencio(fuente)}"
+                )
 
         _imprimir_historial(fuente.id, directorio, limite_pasadas)
 

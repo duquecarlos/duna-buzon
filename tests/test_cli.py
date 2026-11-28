@@ -2778,6 +2778,56 @@ def test_estado_en_el_umbral_exacto_muestra_alerta(
     assert "ALERTA" in capsys.readouterr().out
 
 
+def test_estado_silencio_sin_pasar_el_umbral_no_muestra_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=23))
+
+    assert cli.comando_estado(config) == 0
+    assert "ALERTA" not in capsys.readouterr().out
+
+
+def test_estado_silencio_pasado_el_umbral_muestra_alerta_con_remedio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # BUZON-ESTADO-ALERTA-SILENCIO-1 -- `alertas --json` has shown a
+    # silence entry since BUZON-IMAP-FECHA-DROP-Y-SILENCIO-1; `estado`
+    # (what `duna-deploy-buzon status` actually runs) must show its own
+    # twin, the same way it already shows an auth alert.
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=25))
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "fuente=hotmail-carlos ALERTA silencio desde 2026-11-19T08:00:00Z (25 h)" in salida
+    assert cli._remedio_silencio(cargar_fuente(str(tmp_path), "hotmail-carlos")) in salida
+
+
+def test_estado_auth_tiene_prioridad_sobre_silencio_en_la_linea_alerta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A source already failing auth never also gets a redundant "silencio"
+    # line for the same underlying cause -- same priority `alertas --json`
+    # already gives the two.
+    config = _config(tmp_path)
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_auth_fallando(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=30))
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr().out
+    assert "ALERTA credencial caida" in salida
+    assert "ALERTA silencio" not in salida
+
+
 def test_estado_umbral_personalizado_via_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3224,4 +3274,26 @@ def test_estado_y_alertas_nunca_imprimen_el_token_finanzas_con_silencio(
     monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=30))
 
     assert cli.comando_alertas(config) == 0
+    assert secreto not in capsys.readouterr().out
+
+
+def test_estado_nunca_imprime_el_token_finanzas_con_silencio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secreto = "TOKEN-FINANZAS-SECRETO-NO-DEBE-APARECER"
+    config = Config.desde_entorno(
+        {
+            "BUZON_GRAPH_CLIENT_ID": "cliente",
+            "BUZON_CLAVE_CIFRADO": CLAVE_VALIDA_BASE64,
+            "FINANZAS_BUZON_TOKEN": secreto,
+            "BUZON_DATOS": str(tmp_path),
+            "BUZON_FINANZAS_URL": "http://127.0.0.1:8010",
+        }
+    )
+    directorio = _escribir_fuente(tmp_path)
+    desde = datetime.datetime(2026, 11, 19, 8, 0, tzinfo=datetime.UTC)
+    modulo_alerta.marcar_ultimo_visto(str(directorio), desde)
+    monkeypatch.setattr(cli, "_ahora", lambda: desde + datetime.timedelta(hours=30))
+
+    assert cli.comando_estado(config) == 0
     assert secreto not in capsys.readouterr().out
