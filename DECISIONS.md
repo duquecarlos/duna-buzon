@@ -3674,3 +3674,80 @@ authorizes merging without waiting.
 Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): one allowlist entry for an existing
 on/off switch, turned on only once its receiver is confirmed live -- exactly the contract's own
 instruction, nothing wider.
+
+---
+
+## BUZON-CUENTA-PULL-VISIBLE-1 -- a successful Cuenta pull or heartbeat finally leaves a trace (2026-11-27)
+
+### Why
+
+Carlos linked Buzón to Cuenta on 27 Nov 2026 (`CUENTA-HOST-ENLAZAR-BUZON-1`): all five
+`BUZON_CUENTA_*`/`BUZON_ENVIAR_ESTADO_CUENTA` values read `definida`, and every 10-minute pass since has
+finished with `errors=-`. But nothing on the host proved either call actually ran: `_pull_fuentes_cuenta`
+and `_enviar_estado_a_cuenta` (`cli.py`) only ever printed a line on FAILURE (`cuenta: <motivo>`); a
+success was silent, and Cuenta's own log showed no request line either. `duna-deploy-buzon status` could
+not tell "linked and working" apart from "never called".
+
+### What changed
+
+A successful pull or push now prints its own count-only line, the success twin of the existing failure
+line:
+
+    cuenta: pull ok fuentes=<n> inactivadas=<m>
+    cuenta: estado enviado fuentes=<n> http=<code>
+
+Never a URL, a sub, an email, a token or a source address -- only counts and the HTTP code (always 204,
+`cuenta.ESTADO_HTTP_OK`, the only code `enviar_estado` ever returns on without raising; renamed from
+`_ESTADO_HTTP_OK` so `cli.py` can name it instead of repeating the literal). A failed or unconfigured
+pull/push is byte-for-byte unchanged: no new line, no new persisted fact.
+
+The same two facts, each with its own timestamp, are persisted into a new `cuenta_estado.json` directly
+under `config.directorio_datos` (never per-source: both calls are one per pass, covering every source at
+once) -- `{"ultimo_pull": {"en", "fuentes", "inactivadas"}, "ultimo_estado": {"en", "fuentes", "http"}}`,
+written with the same `cripto.asegurar_directorio_datos`/`escribir_archivo_sensible` discipline as every
+other file under that directory, and read back with a plain `json.loads` that treats a missing or corrupt
+file as "nothing yet" rather than raising. `comando_estado` (the `estado` subcommand) now reads this file
+first and, when it holds either key, prints `cuenta: ultimo pull ...`/`cuenta: ultimo estado ...` before
+the per-source report -- nothing at all when the file does not exist (Cuenta never configured, or
+configured but never once successful).
+
+**No change to `deploy/host/duna-deploy-buzon` was needed.** `duna-deploy-buzon status` already runs
+`python -m duna_buzon estado` as its own health check (`_desc_estado_health`/`_chequear_salud`), so
+extending what `comando_estado` prints was enough to make it show up there too -- confirmed by reading the
+entry script before writing anything (CLAUDE.md's Tier 1 list names `deploy/host/` but not this read-only
+confirmation that it needed no edit).
+
+### Tests, measured
+
+8 new `def test_` in `tests/test_cli.py` (`git diff main~1 main -- tests/ | grep -c '^+def test_'`): a
+success prints its line and leaves no secret in stdout or in `cuenta_estado.json` (pull and push, each its
+own pair of tests); a failure prints neither the new line nor anything new in the persisted file (pull and
+push, each its own test); `estado` prints both facts when the file holds them, verbatim, and prints
+nothing `cuenta:`-prefixed when the file is absent.
+
+Gate, `uv run pytest`, run once on the final tree (merge tree `e1b46e19c59f7f28b1cc492ca0c7f540ed17f8b9`,
+proven identical to the slice branch's own tree -- `git diff HEAD feat/buzon-cuenta-pull-visible-1` empty):
+
+    uv run pytest -q
+    757 passed, 9 skipped in 49.48s
+
+766 collected (`uv run pytest --collect-only -q`) = 757 + 9, and 749 (the prior slice's own collected
+total) + 8 new = 757 passed -- no drift, nothing pre-existing broke.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database, and `cuenta_estado.json` is a plain counts
+file, not a schema. No cross-repo contract change -- nothing new goes over any wire; `cuenta.py`'s own
+`CuentaClient.enviar_estado` call is unchanged, only what `cli.py` does with its own success is new. Bytes
+a customer reads: none, this connector has no customer-facing surface at all. Bytes an OPERATOR reads:
+yes -- the two new log lines and the `estado` output are read by Carlos himself (over SSH or
+`duna-deploy-buzon status`) and by Main's own hub checks, same as every other `estado`/`alertas` line this
+repository already prints; same classification the prior slice gave its own operator-only README/allowlist
+change. The spec's own approval ("MERGE IS APPROVED on GREEN.") and its approval-reason
+(`ORCH-CARLOS-DELEGATES-TIER-1-1`, naming exactly "one count-only log line per pass and one status line")
+authorize merging on green without waiting.
+
+### Attribution
+
+Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): observability only, no behaviour
+change, no secret printed -- exactly the approval's own words, nothing wider.
