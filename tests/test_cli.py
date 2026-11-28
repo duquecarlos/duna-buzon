@@ -2129,6 +2129,195 @@ def test_estado_cuenta_falla_nunca_falla_la_pasada(
 
 
 # ---------------------------------------------------------------------------
+# A successful pull/push is now VISIBLE (BUZON-CUENTA-PULL-VISIBLE-1)
+# ---------------------------------------------------------------------------
+
+
+def test_pull_exitoso_imprime_linea_de_conteo_sin_secretos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta(tmp_path)
+    _escribir_reglas_vacias_en(tmp_path / "fuentes" / "cuenta-abc123")
+
+    fuente_cuenta = FuenteCuenta(
+        id="abc123",
+        proveedor="google",
+        direccion="carlos@gmail.com",
+        access_token="token-cuenta-secreto",
+        expira_en_segundos=3600,
+    )
+    monkeypatch.setattr(cli, "CuentaClient", lambda **kw: _CuentaClienteFalso([fuente_cuenta]))
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    salida = capsys.readouterr()
+    assert "cuenta: pull ok fuentes=1 inactivadas=0" in salida.out
+    assert "cuenta.duna.internal" not in salida.out
+    assert "sub-carlos" not in salida.out
+    assert "token-cuenta-secreto" not in salida.out
+
+
+def test_pull_exitoso_persiste_cuenta_estado_json_sin_secretos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta(tmp_path)
+    _escribir_reglas_vacias_en(tmp_path / "fuentes" / "cuenta-abc123")
+
+    fuente_cuenta = FuenteCuenta(
+        id="abc123",
+        proveedor="google",
+        direccion="carlos@gmail.com",
+        access_token="token-cuenta-secreto",
+        expira_en_segundos=3600,
+    )
+    monkeypatch.setattr(cli, "CuentaClient", lambda **kw: _CuentaClienteFalso([fuente_cuenta]))
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+
+    ruta = tmp_path / "cuenta_estado.json"
+    texto = ruta.read_text(encoding="utf-8")
+    assert "cuenta.duna.internal" not in texto
+    assert "sub-carlos" not in texto
+    assert "token-cuenta-secreto" not in texto
+
+    contenido = json.loads(texto)
+    assert contenido["ultimo_pull"]["fuentes"] == 1
+    assert contenido["ultimo_pull"]["inactivadas"] == 0
+    assert "en" in contenido["ultimo_pull"]
+
+
+def test_pull_fallido_no_persiste_ni_imprime_la_linea_de_exito(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+
+    monkeypatch.setattr(cli, "CuentaClient", lambda **kw: _CuentaClienteFalso(CuentaPullError(http_status=404)))
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    salida = capsys.readouterr()
+    assert "cuenta: pull ok" not in salida.out
+    assert "cuenta: cuenta fuentes http=404" in salida.err
+    assert not (tmp_path / "cuenta_estado.json").exists()
+
+
+def test_estado_cuenta_exitoso_imprime_linea_de_conteo_sin_secretos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _correr_pasada_local_con_estado(tmp_path, monkeypatch)
+    salida = capsys.readouterr()
+    assert "cuenta: estado enviado fuentes=1 http=204" in salida.out
+    assert "cuenta.duna.internal" not in salida.out
+    assert "sub-carlos" not in salida.out
+    assert "secreto-cuenta" not in salida.out
+
+
+def test_estado_cuenta_exitoso_persiste_cuenta_estado_json_sin_secretos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _correr_pasada_local_con_estado(tmp_path, monkeypatch, vistos=5, reenviados=1)
+
+    ruta = tmp_path / "cuenta_estado.json"
+    texto = ruta.read_text(encoding="utf-8")
+    assert "cuenta.duna.internal" not in texto
+    assert "sub-carlos" not in texto
+    assert "secreto-cuenta" not in texto
+
+    contenido = json.loads(texto)
+    assert contenido["ultimo_estado"]["fuentes"] == 1
+    assert contenido["ultimo_estado"]["http"] == 204
+    assert "en" in contenido["ultimo_estado"]
+    # the pull `_correr_pasada_local_con_estado` always attempts (Cuenta is
+    # configured) also succeeded (0 fuentes pulled) and left its own key.
+    assert contenido["ultimo_pull"]["fuentes"] == 0
+
+
+def test_estado_cuenta_fallido_no_persiste_ni_imprime_su_linea_de_exito(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from duna_buzon.sincronizar import Contadores, ResultadoPasada
+
+    config = _config_con_cuenta_y_estado(tmp_path)
+    _escribir_fuente_y_reglas(tmp_path)
+
+    def fabrica(**kw: object) -> _CuentaClienteEstadoFalso:
+        return _CuentaClienteEstadoFalso(estado_resultado=CuentaPullError(paso="estado", http_status=500))
+
+    monkeypatch.setattr(cli, "CuentaClient", fabrica)
+    monkeypatch.setattr(auth, "obtener_token", lambda cfg, directorio: "token-falso")
+    monkeypatch.setattr(
+        cli, "construir_proveedor", lambda fuente, token, cursor_proveedor_inicial=None: _ProveedorFalso()
+    )
+    monkeypatch.setattr(
+        cli, "ejecutar_pasada", lambda **kwargs: ResultadoPasada(contadores=Contadores(vistos=1))
+    )
+
+    assert cli.comando_sincronizar(config) == 0
+    salida = capsys.readouterr()
+    assert "cuenta: estado enviado" not in salida.out
+    assert "cuenta: cuenta estado http=500" in salida.err
+
+    contenido = json.loads((tmp_path / "cuenta_estado.json").read_text(encoding="utf-8"))
+    assert "ultimo_estado" not in contenido  # the push failed -- only the pull's own success is there
+
+
+def test_comando_estado_muestra_ultimo_pull_y_estado_cuando_existen(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _config(tmp_path)
+    cripto.asegurar_directorio_datos(tmp_path)
+    (tmp_path / "cuenta_estado.json").write_text(
+        json.dumps(
+            {
+                "ultimo_pull": {"en": "2026-11-27T10:00:00Z", "fuentes": 2, "inactivadas": 1},
+                "ultimo_estado": {"en": "2026-11-27T10:00:05Z", "fuentes": 3, "http": 204},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr()
+    assert "cuenta: ultimo pull en=2026-11-27T10:00:00Z fuentes=2 inactivadas=1" in salida.out
+    assert "cuenta: ultimo estado en=2026-11-27T10:00:05Z fuentes=3 http=204" in salida.out
+
+
+def test_comando_estado_sin_cuenta_estado_no_imprime_nada_nuevo(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Cuenta never configured (or configured but never once successful) --
+    no `cuenta_estado.json` at all, so `estado` prints nothing new."""
+    config = _config(tmp_path)
+    assert cli.comando_estado(config) == 0
+    salida = capsys.readouterr()
+    assert "cuenta:" not in salida.out
+
+
+# ---------------------------------------------------------------------------
 # `rebobinar-cursor <fuente> <fecha> [--aplicar]` (BUZON-CURSOR-REBOBINAR-CLI-1)
 # ---------------------------------------------------------------------------
 

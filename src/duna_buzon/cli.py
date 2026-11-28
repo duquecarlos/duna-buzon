@@ -19,6 +19,16 @@ reaches the person's books, with where it is connected. Off by default
 (`Config.enviar_estado_cuenta`, `BUZON_ENVIAR_ESTADO_CUENTA`) until
 Cuenta's own receiver is live; a failed or unconfigured push is, like the
 pull above, never an error for the pass.
+
+A SUCCESSFUL pull or push now also prints one count-only line of its own
+(`BUZON-CUENTA-PULL-VISIBLE-1`) -- `cuenta: pull ok fuentes=<n>
+inactivadas=<m>` / `cuenta: estado enviado fuentes=<n> http=<code>` --
+never a URL, a sub, an email, a token or a source address, and persists the
+same facts with their timestamp into `cuenta_estado.json` (directly under
+`config.directorio_datos`, never per-source). `comando_estado` reads that
+file back, so `duna-deploy-buzon status` (which already runs `python -m
+duna_buzon estado`) can finally tell "linked and working" from "never
+called", without any change to the entry script itself.
 """
 
 from __future__ import annotations
@@ -37,7 +47,7 @@ from duna_buzon import historial as modulo_historial
 from duna_buzon import registro
 from duna_buzon.cliente_imap import ClienteImap, ClienteImapError, ClienteImapErrorTransitorio
 from duna_buzon.config import Config
-from duna_buzon.cuenta import CuentaClient, CuentaPullError, FuenteEstadoWire
+from duna_buzon.cuenta import ESTADO_HTTP_OK, CuentaClient, CuentaPullError, FuenteEstadoWire
 from duna_buzon.finanzas import FinanzasClient
 from duna_buzon.fuentes import FuenteConfig, FuenteInvalidaError
 from duna_buzon.graph import GraphClient, GraphError
@@ -48,6 +58,16 @@ from duna_buzon.sincronizar import Contadores, ejecutar_pasada
 
 NOMBRE_ARCHIVO_REGLAS = "reglas.json"
 NOMBRE_ARCHIVO_ESTADO = "estado.json"
+
+# BUZON-CUENTA-PULL-VISIBLE-1 -- one file, directly under
+# `config.directorio_datos` (never per-source: the pull and the heartbeat
+# are each ONE call per pass, covering every source at once), holding only
+# the two keys `_actualizar_cuenta_estado` ever writes -- a timestamp and
+# plain counts, never a URL, a sub, an email or a token. `duna-deploy-buzon
+# status` already runs `python -m duna_buzon estado`, so `comando_estado`
+# reading this file is enough to make it visible there too; no change to
+# the entry script itself.
+NOMBRE_ARCHIVO_CUENTA_ESTADO = "cuenta_estado.json"
 
 # `estado`'s own default when `--pasadas` is not given -- enough to see a
 # trend without flooding a normal terminal; `--pasadas N` widens this, up to
@@ -136,6 +156,59 @@ def _remedio_silencio(fuente: FuenteConfig) -> str:
         f"revise la fuente {fuente.id!r}: confirme que la cuenta sigue recibiendo correo "
         "y que sus reglas no estan excluyendolo todo"
     )
+
+
+def _ruta_cuenta_estado(config: Config) -> Path:
+    return Path(config.directorio_datos) / NOMBRE_ARCHIVO_CUENTA_ESTADO
+
+
+def _leer_cuenta_estado(config: Config) -> dict[str, object]:
+    """`{}` when the file does not exist yet (Cuenta never configured, or
+    configured but never once pulled/pushed successfully) or cannot be
+    parsed -- never raises: this is a status read, not a critical path."""
+    ruta = _ruta_cuenta_estado(config)
+    if not ruta.is_file():
+        return {}
+    try:
+        datos = json.loads(ruta.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return datos if isinstance(datos, dict) else {}
+
+
+def _actualizar_cuenta_estado(config: Config, clave: str, valor: dict[str, object]) -> None:
+    """Read-modify-write of exactly one top-level key (`"ultimo_pull"` or
+    `"ultimo_estado"`) -- the pull and the push happen at different points
+    of the same pass (or only one of them, when the other failed or is
+    unconfigured), so each must leave the other's last recorded success
+    untouched."""
+    datos = _leer_cuenta_estado(config)
+    datos[clave] = valor
+    ruta = _ruta_cuenta_estado(config)
+    cripto.asegurar_directorio_datos(ruta.parent)
+    cripto.escribir_archivo_sensible(ruta, json.dumps(datos).encode("utf-8"))
+
+
+def _imprimir_estado_cuenta(config: Config) -> None:
+    """The `estado` command's own read of `_actualizar_cuenta_estado`'s
+    file -- so `duna-deploy-buzon status` (which already runs `python -m
+    duna_buzon estado`) shows the last successful Cuenta pull and
+    heartbeat, with their own timestamp. Prints nothing at all when the
+    file does not exist (BUZON-CUENTA-PULL-VISIBLE-1: an unconfigured or
+    never-yet-successful deployment shows nothing new)."""
+    datos = _leer_cuenta_estado(config)
+    pull = datos.get("ultimo_pull")
+    if isinstance(pull, dict):
+        print(
+            f"cuenta: ultimo pull en={pull.get('en')} fuentes={pull.get('fuentes')} "
+            f"inactivadas={pull.get('inactivadas')}"
+        )
+    estado = datos.get("ultimo_estado")
+    if isinstance(estado, dict):
+        print(
+            f"cuenta: ultimo estado en={estado.get('en')} fuentes={estado.get('fuentes')} "
+            f"http={estado.get('http')}"
+        )
 
 
 def _migrar_si_necesario(config: Config) -> None:
@@ -467,9 +540,27 @@ def _pull_fuentes_cuenta(config: Config) -> dict[str, str] | None:
             ),
         )
 
+    inactivadas = 0
     for existente in modulo_fuentes.listar_fuentes(config.directorio_datos):
         if existente.origen == "cuenta" and existente.activa and existente.id not in presentes:
             modulo_fuentes.guardar_fuente(config.directorio_datos, dataclasses.replace(existente, activa=False))
+            inactivadas += 1
+
+    # BUZON-CUENTA-PULL-VISIBLE-1 -- count-only, never a URL, a sub, an
+    # email or a token: the one line that tells a successful pull apart
+    # from one that never happened. A failed pull already has its own
+    # line above (`cuenta: {exc.motivo}`); this is the success twin.
+    momento = _ahora()
+    print(f"cuenta: pull ok fuentes={len(fuentes_pulladas)} inactivadas={inactivadas}")
+    _actualizar_cuenta_estado(
+        config,
+        "ultimo_pull",
+        {
+            "en": registro.formato_fecha_utc(momento),
+            "fuentes": len(fuentes_pulladas),
+            "inactivadas": inactivadas,
+        },
+    )
 
     return tokens
 
@@ -562,6 +653,22 @@ def _enviar_estado_a_cuenta(config: Config) -> None:
         cliente.enviar_estado(fuentes_wire, enviado_en=ahora)
     except CuentaPullError as exc:
         print(f"cuenta: {exc.motivo}", file=sys.stderr)
+    else:
+        # BUZON-CUENTA-PULL-VISIBLE-1 -- count-only, never a URL, a sub, an
+        # email or a token: the success twin of the failure line above.
+        # `enviar_estado` only ever returns (never raises) on
+        # `cuenta.ESTADO_HTTP_OK`, so that is the one code a success line
+        # can ever report.
+        print(f"cuenta: estado enviado fuentes={len(fuentes_wire)} http={ESTADO_HTTP_OK}")
+        _actualizar_cuenta_estado(
+            config,
+            "ultimo_estado",
+            {
+                "en": registro.formato_fecha_utc(ahora),
+                "fuentes": len(fuentes_wire),
+                "http": ESTADO_HTTP_OK,
+            },
+        )
     finally:
         cliente.cerrar()
 
@@ -632,6 +739,7 @@ def _imprimir_historial(id_fuente: str, directorio: str, limite: int) -> None:
 
 def comando_estado(config: Config, *, pasadas: int | None = None) -> int:
     _migrar_si_necesario(config)
+    _imprimir_estado_cuenta(config)
     todas = modulo_fuentes.listar_fuentes(config.directorio_datos)
     if not todas:
         print("cursor=none")
