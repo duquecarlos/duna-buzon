@@ -4189,3 +4189,117 @@ that could not measure any folder at all.
    built.
 4. Every other follow-up this ledger ever named before this entry is closed by a later slice, re-verified
    against the code while compiling this list.
+
+## CUENTA-BUZON-FUENTE-ID-ECO-2 -- echo Cuenta's own `fuente_conectada_id` on the heartbeat (2026-11-28)
+
+### Why
+
+Dispatched by `ORCH-CARLOS-DELEGATES-TIER-1-1`, the Buzón half of three: `CUENTA-BUZON-FUENTE-ID-ECO-1`
+landed in `duna-cuenta-api` (merged `8b111e9`, ledger `3df8234`, deployed 28 Nov, migration `6a12858ac725`),
+adding an OPTIONAL `fuente_conectada_id` (uuid|null) Cuenta accepts on each entry of its own `POST
+/servicio/buzon/estado/{sub}`. The echo rule, verbatim from `duna-cuenta-api` `docs/buzon-estado.md:49` and
+`docs/fuentes-conectadas.md`: when `origen == "cuenta"`, Buzón sends back the exact `id` it received for
+this mailbox from `GET /servicio/fuentes/{sub}`, under this same field name. `-3` (cuenta-ui) is the third
+and is out of this repository's own `touches:`.
+
+### What changed
+
+`fuentes.py`: `FuenteConfig` gains `id_fuente_conectada: str | None = None`, round-tripped through
+`fuente.json` (`_fuente_desde_json`/`_contenido_fuente_json`) like every other optional field, absent and
+reading as `None` on a `fuente.json` written before this slice. A new `id_fuente_conectada_efectiva(fuente)`
+-- the ONE place this repository parses a Cuenta id back out of a local id -- returns the field when set,
+else, for `origen == "cuenta"` only, recovers it from the `cuenta-` prefix `id_fuente_cuenta` itself writes;
+`None` for any local source.
+
+`cli.py`: `_pull_fuentes_cuenta` now writes `id_fuente_conectada=pullada.id` into every `fuente.json` it
+refreshes on a pull -- the exact id Cuenta Duna returned for that mailbox, not re-derived. `_estado_wire_para`
+sets `FuenteEstadoWire.fuente_conectada_id` to `fuentes.id_fuente_conectada_efectiva(fuente)` unconditionally
+(that function already returns `None` for a local source, so no extra `origen` check is needed at the call
+site) -- this covers an INACTIVE `origen="cuenta"` source too (the `reingreso_requerido` row), since the
+function never looks at `activa`.
+
+`cuenta.py`: `FuenteEstadoWire` gains `fuente_conectada_id: str | None = None`. `_fuente_estado_a_wire` now
+emits a tenth field, `fuente_conectada_id`, run through a new `_id_fuente_conectada_valido_para_wire` --
+`uuid.UUID(valor)` under a `try`/`except`, `None` on anything that is not `None` and does not parse. Before
+POSTing, `CuentaClient.enviar_estado` counts how many of the batch's own non-`None` ids failed that check and,
+only when `> 0`, prints one line, `cuenta: fuente_conectada_id invalido omitidos=<n>`, to stderr -- never the
+id itself, matching this repository's own `registro.py` invariant (counts, never content) even though this
+line is printed from `cuenta.py` rather than through `registro`.
+
+`README.md`: the `fuentes/<id>/fuente.json` field list and the `BUZON_ENVIAR_ESTADO_CUENTA` heartbeat
+paragraph both now name `fuente_conectada_id` and its local uuid check.
+
+### Tests, measured
+
+14 new `def test_` (`git diff main...feat/cuenta-buzon-fuente-id-eco-2 -- tests/ | grep -c '^+def test_'`):
+- `tests/test_fuentes.py` (5): default is `None`; a `cuenta`-origin `fuente.json` with `id_fuente_conectada`
+  set round-trips; `id_fuente_conectada_efectiva` prefers the field when present; the same function recovers
+  the id from the `cuenta-` prefix when the field is absent (the legacy-`fuente.json` case); the same
+  function returns `None` for a local source.
+- `tests/test_cli.py` (5), all calling `cli._estado_wire_para` directly against a `FuenteConfig` and a
+  one-row `historial.jsonl`: a `cuenta`-origin source with the field set sends its own uuid; a `local` source
+  sends `None`; a `cuenta`-origin source with NO `id_fuente_conectada` field (the legacy case) still echoes
+  the id recovered from the prefix; an INACTIVE `cuenta`-origin source still echoes its id (alongside
+  `alerta="reingreso_requerido"`); a malformed `id_fuente_conectada` passes through `_estado_wire_para`
+  unchanged and raises nothing -- `CuentaClient.enviar_estado` is the one place that nulls it, confirmed
+  below.
+- `tests/test_cuenta.py` (4): a local source's `None` serializes as `null`; a malformed id serializes as
+  `null` without raising; that same malformed-id call prints the one count-only line and never the id itself
+  (`"no-es-un-uuid-secreto" not in salida.err`); a valid uuid prints nothing. The pre-existing
+  `test_enviar_estado_el_cuerpo_tiene_exactamente_los_campos_del_contrato` was updated in place (a real uuid
+  added to its fixture, the expected field set and dict both gained `fuente_conectada_id`) since it already
+  asserted the wire's own EXACT field set and so is the one place that needed to change, not a new test; the
+  existing `test_estado_cuenta_nunca_manda_mas_que_los_campos_enumerados` (`test_cli.py`) was updated the same
+  way, for the same reason.
+
+### Gate, measured
+
+`uv run pytest`, run once on this slice's own final tree before the merge (branch tip
+`b57cfc6398074ccbfee3281371345fba1493f863`, tree `000998eca70cad39490c1b46d51e9c62f105a38c`):
+
+    805 tests collected in 0.72s (--collect-only -q)
+    796 passed, 9 skipped in 44.31s
+
+796 + 9 = 805, matching the collected count exactly. Reconciled against this slice's own base (`main` at
+`cf1f6611197b808f35c0b8da8f29e2860f206bd7`, 791 collected / 782 passed + 9 skipped per
+`BUZON-SIGUIENTE-SEGUIMIENTO-2026-11-28-B`'s own recorded figure): 805 - 791 = 14 new collected and
+796 - 782 = 14 new passed, both matching the 14 new `def test_` lines above exactly -- no drift, nothing
+pre-existing broke. The 9 skips are the same pre-existing Windows file-mode skips every earlier slice in
+this ledger has recorded; none are new.
+
+Tree identity proven before writing this entry, so the gate above was not re-run a second time for the
+merge: merge commit `ef6cad3130d722773de88a0454bf2893be5feb23` has tree
+`000998eca70cad39490c1b46d51e9c62f105a38c`, IDENTICAL to the slice branch
+`feat/cuenta-buzon-fuente-id-eco-2`'s own tree at commit `b57cfc6398074ccbfee3281371345fba1493f863`, and
+`git diff HEAD feat/cuenta-buzon-fuente-id-eco-2 --stat` against the merge commit was empty.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- this repository has no database; the only on-disk shape change is one new,
+optional key in `fuente.json`, read as `None` when absent, which is additive and never breaks an older
+`fuente.json`. No customer-facing bytes -- every changed byte here is either a mailbox operator's own
+`fuente.json`/README, or a field inside a machine-to-machine heartbeat POST; no text a customer or operator
+reads changed. Cross-repo contract or DTO change DID trip -- `FuenteEstadoWire`/`_fuente_estado_a_wire` now
+sends one new field to Cuenta Duna's own `POST /servicio/buzon/estado/{sub}` -- but this dispatch's own spec
+body says, in words, "MERGE IS APPROVED on GREEN", an explicit instruction to merge once the gate is green
+rather than stop with `AWAITING_APPROVAL`, and its own `approval-reason` names this as "the direct form of
+the ECO-1 contract Cuenta already ships. Additive, and older Cuenta builds ignore the field." So this slice
+merges without waiting, on the DTO-change reading rather than a claim that it did not trip.
+
+### Attribution
+
+Carlos, through Main, delegated Tier 2 work under `ORCH-CARLOS-DELEGATES-TIER-1-1`, the Buzón half of a
+three-repository echo rule whose Cuenta half (`CUENTA-BUZON-FUENTE-ID-ECO-1`) was already live. This slice
+verified every claim the spec made about the current code (`fuentes.id_fuente_cuenta` at `fuentes.py:331`,
+`cli._estado_wire_para` at `cli.py:658`, `FuenteConfig`/`FuenteEstadoWire`'s own current fields) before
+writing anything, then added the one new field end to end: stored, recovered for a pre-existing install,
+echoed, and locally validated before it ever reaches the wire.
+
+### Open follow-ups, ranked
+
+1. **cuenta-ui half (`-3`)**: named by this slice's own spec as the third of three, explicitly out of this
+   repository's own `touches:` -- showing `fuente_conectada_id` (now flowing end to end from Buzón) in
+   Cuenta's own UI is a separate repository's own work.
+2. Every follow-up this ledger ranked before this entry (`BUZON-ALERTA-CONSOLE-LINE-1`,
+   `CUENTA-BUZON-FUENTE-MATCH-KEY-INV-1`, the Graph/Gmail `"silencio_info"` gap) is unchanged by this slice,
+   which touched none of that code.
