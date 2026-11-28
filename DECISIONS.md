@@ -3890,3 +3890,137 @@ turned up: `comando_estado` now shows the silence alert the same way it has long
    here only so a future reader does not have to re-derive that.
 4. Every other follow-up this ledger ever named before this entry is closed by a later slice, re-verified
    against the code while compiling this list.
+
+---
+
+## BUZON-SILENCIO-SIN-CORREO-NUEVO-1 -- the silence alert split in two (2026-11-27)
+
+### Why
+
+`BUZON-ESTADO-ALERTA-SILENCIO-1` (above, `0563e43`, deployed 28 Nov) made `duna-deploy-buzon status` print
+`fuente=duna-zoho ALERTA silencio desde 2026-11-26T10:10:02Z (41 h) -- revise la fuente ... confirme que la
+cuenta sigue recibiendo correo y que sus reglas no estan excluyendolo todo`. Main then ran
+`duna-deploy-buzon carpetas duna-zoho` on the host and measured: `INBOX mensajes=35 uidnext=36 marca=1:35
+nuevos=0`, `Newsletter 1/1 nuevos=0`, `Notification 28/28 nuevos=0` -- every read folder fully read, NOTHING
+new at the provider. The alert was true but pointed the reader at a fault that was not there. Carlos
+delegated this under `ORCH-CARLOS-DELEGATES-TIER-1-1`, scoped explicitly to "observability wording and
+classification only; no change to which mail is read or forwarded."
+
+### What changed
+
+`ClienteImap` (`cliente_imap.py`) now exposes `carpetas_uidnext: dict[str, int]`, filled as `listar_mensajes`
+examines each included folder this pass -- the server's own UIDNEXT, read the same way `carpetas <id>`'s
+`diagnosticar_carpeta` already does, but now on every live pass, not only on demand. A folder whose own
+`EXAMINE`/`SEARCH` failed this pass is simply absent from it, never a stale or guessed value.
+
+`alerta.py` gained two new per-source files, the same `{carpeta: uidnext}` shape, following the exact
+`marcar_ultimo_visto`/`marcar_primera_pasada` pattern already there:
+- `carpetas_actual.json` -- the MOST RECENT pass's own map, overwritten every pass that has one.
+- `carpetas_base.json` -- the map frozen at the START of the current silence window: `cli.py`'s
+  `_ejecutar_una_fuente` overwrites it whenever a pass sees mail (`vistos>0`, the window restarts) or, once,
+  the very first time any map at all becomes available for this source (so a source that has never once
+  seen mail still gets a baseline instead of none).
+
+`cli.py` gained one shared classification, `_entrada_silencio`, now the ONE place `comando_estado` and
+`comando_alertas` both build a silence entry from (replacing each one's own separate call to
+`_estado_silencio`): it calls the existing `_estado_silencio` for `(desde, horas)`, then
+`_proveedor_sin_cambios` (new) compares `carpetas_base`/`carpetas_actual` --
+- Both present and EQUAL (same folders, same UIDNEXTs) -> `"tipo": "silencio_info"`, `"remedio": null`;
+  `estado` prints `fuente=<id> sin correo nuevo en el proveedor desde <fecha> (<n> h): nada que revisar en
+  Buzon` -- never `ALERTA`.
+- Either map MISSING (no IMAP folder concept for this source, e.g. Microsoft/Graph, or no pass has recorded
+  one yet) or the maps DIFFER (the provider moved, or a folder was added/removed) -> `"tipo": "silencio"`,
+  today's `ALERTA silencio ... -- <remedio>` line, unchanged. "Could not measure" and "the provider moved"
+  both fall back to the ALERTA; only an exact, measured match ever prints the INFO line -- never claims
+  "nothing to check" without the measurement, per the dispatch's own wording.
+
+The auth alert's own priority is untouched: `_entrada_silencio` is only ever reached after `_estado_alerta`
+returns `None`, exactly as `_estado_silencio` was reached before this slice.
+
+`README.md` updated in three places: the `fuentes/<id>/...` file layout (the two new files), the `alertas`
+subcommand's own bullet (the new `"silencio_info"` tipo and nullable `remedio`), and a new subsection under
+"A mailbox gone quiet becomes visible" describing the split.
+
+### Tests, measured
+
+17 new `def test_` (`git diff main~1 main -- tests/ | grep -c '^+def test_'`, confirmed against the actual
+diff):
+- `tests/test_cliente_imap.py` (2): `test_listar_mensajes_expone_uidnext_por_carpeta_examinada` (the new
+  attribute's own shape across two folders with different UIDVALIDITY/UIDNEXT), and
+  `test_carpeta_cuyo_examine_falla_nunca_aparece_en_carpetas_uidnext` (a folder whose own `EXAMINE` failed
+  stays absent, never a stale guess, while a healthy sibling folder still reports).
+- `tests/test_alerta.py` (6): load/save round-trips for `carpetas_actual`/`carpetas_base`, mirroring the
+  existing `ultimo_visto`/`primera_pasada` tests -- including that `marcar_carpetas_base` always overwrites
+  (unlike `marcar_primera_pasada`'s set-once marker), since deciding WHEN to call it is `cli.py`'s job, not
+  this function's.
+- `tests/test_cli.py` (9): `test_pasada_con_carpetas_uidnext_guarda_actual_y_base_la_primera_vez` (both files
+  written on the first pass with folder data), `test_pasada_sin_vistos_nunca_sobrescribe_una_base_de_carpetas_ya_existente`
+  (a silent pass moves `actual` but leaves `base` alone, even though the provider moved),
+  `test_pasada_con_vistos_reinicia_la_base_de_carpetas` (a pass that sees mail resets the baseline to now),
+  `test_estado_silencio_uidnext_sin_cambios_es_info_nunca_alerta` (the exact INFO line, reproducing the 28 Nov
+  `duna-zoho` measurement's own timestamp/hours), `test_estado_silencio_uidnext_avanzo_sigue_siendo_alerta`
+  and `test_estado_silencio_sin_datos_de_carpetas_sigue_siendo_alerta` (both keep the ALERTA),
+  `test_alertas_json_silencio_info_cuando_el_proveedor_no_tiene_nada_nuevo` and
+  `test_alertas_json_silencio_alerta_cuando_el_proveedor_avanzo` (the JSON shape for each tipo), and
+  `test_alertas_json_auth_tiene_prioridad_sobre_silencio_info` (the auth alert still suppresses the silence
+  entry entirely, even an INFO one).
+
+Every pre-existing `*silencio*` test in `tests/test_cli.py` (8 of them, predating this slice) continues to
+pass UNCHANGED: none of them ever write `carpetas_actual.json`/`carpetas_base.json`, so `_proveedor_sin_cambios`
+reads both as missing and `_entrada_silencio` returns `"tipo": "silencio"` exactly as `_estado_silencio` alone
+did before -- the split is additive, never a behaviour change for a source with no folder data.
+
+### Gate, measured
+
+`uv run pytest` is `.venv/Scripts/python.exe -m pytest` in this environment. Run once on this slice's own
+final tree (merge commit `eea5797fa3ce6ec04bd4dd1b98ffc3ab1eb195aa`, tree
+`f54764a3f43fbb6df9b8b4aa371001418bdbd3cc`):
+
+    787 tests collected in 0.76s (--collect-only -q)
+    778 passed, 9 skipped in 46.10s
+
+778 + 9 = 787, matching the collected count exactly. Reconciled against this slice's own base (`main` at
+`0563e43f66709db2942b009ed6dfc4f5fe1f56a9`, 770 collected / 761 passed + 9 skipped per
+`BUZON-ESTADO-ALERTA-SILENCIO-1`'s own recorded figure, re-measured here before branching and unchanged):
+787 - 770 = 17 new collected and 778 - 761 = 17 new passed, both matching the 17 new `def test_` lines above
+exactly -- no drift, nothing pre-existing broke. The 9 skips are the same pre-existing Windows file-mode
+skips every earlier slice in this ledger has recorded; none are new.
+
+Tree identity proven before writing this entry, so the gate above was not re-run a second time for the
+merge: merge commit `eea5797fa3ce6ec04bd4dd1b98ffc3ab1eb195aa` has tree
+`f54764a3f43fbb6df9b8b4aa371001418bdbd3cc`, IDENTICAL to the slice branch
+`feat/buzon-silencio-sin-correo-nuevo-1`'s own tree at commit `b826597a7be1aac957d165777ec709e134a07bc3`, and
+`git diff HEAD feat/buzon-silencio-sin-correo-nuevo-1 --stat` against the merge commit was empty.
+
+### Merge-policy-A classification, made by this slice
+
+No schema or migration -- no database, no new on-disk file layout beyond two more small per-source JSON
+files following the exact shape and lifecycle every earlier alert marker already uses. No cross-repo
+contract or DTO change -- nothing here touches the Finanzas or Cuenta Duna wire; this diff is entirely local
+to `ClienteImap`'s own live pass and `cli.py`'s printed/JSON output. Customer-facing bytes DID change, on
+the same broader reading `BUZON-ESTADO-ALERTA-SILENCIO-1` (above) already used: the new INFO line and the
+`"silencio_info"`/nullable-`remedio` JSON shape are bytes an OPERATOR reads (Carlos over SSH, Main and the
+desk over `sudo -n`), never a customer of a Duna product -- but this dispatch's own body says, in words,
+"MERGE IS APPROVED on GREEN", an explicit instruction to merge once the gate is green regardless of this
+classification, so this slice merges without waiting, on the broader reading rather than a claim that it
+did not trip.
+
+### Attribution
+
+Main, deciding under delegation (`ORCH-CARLOS-DELEGATES-TIER-1-1`): observability wording and
+classification only, no change to which mail is read or forwarded -- exactly the approval's own words,
+nothing wider.
+
+### Open follow-ups, ranked
+
+1. **`BUZON-ALERTA-CONSOLE-LINE-1`** (named by `BUZON-ALERTA-AUTH-1`, still open): a console line surfacing a
+   source's own alert in the admin UI -- now with three `tipo`s to render (`auth`, `silencio`,
+   `silencio_info`) instead of two -- still cross-repo, outside this repository's own `touches:`.
+2. **`CUENTA-BUZON-FUENTE-MATCH-KEY-INV-1`** (named by a prior dispatch, unchanged): the host-observed
+   anomaly where a live Cuenta pull returns `fuentes=0` while Buzón itself runs 3 sources -- a cross-repo
+   contract question, not investigated by this slice either.
+3. A Microsoft/Graph or Gmail source's own silence alert always reads `"tipo": "silencio"`, never
+   `"silencio_info"`, however long it has been quiet with nothing lost -- deliberate (this slice never
+   invented a Graph/Gmail equivalent of UIDNEXT), not a bug. A real Graph/Gmail equivalent (a delta token, a
+   `historyId`) would need its own measurement first; named here so a future reader does not re-derive why
+   those two providers never get the quieter INFO line.
