@@ -31,6 +31,40 @@ def test_el_solape_es_de_diez_minutos() -> None:
     assert cursor.SOLAPE == datetime.timedelta(minutes=10)
 
 
+def test_guardar_cursor_no_deja_archivo_tmp(tmp_path: Path) -> None:
+    momento = datetime.datetime(2026, 3, 1, tzinfo=datetime.UTC)
+    cursor.guardar_cursor(str(tmp_path), momento)
+    nombres = [p.name for p in tmp_path.iterdir()]
+    assert cursor.NOMBRE_ARCHIVO in nombres
+    assert not any(n.endswith(".tmp") for n in nombres)
+
+
+def test_guardar_cursor_sobreescribe_sin_dejar_tmp(tmp_path: Path) -> None:
+    primero = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    segundo = datetime.datetime(2026, 2, 1, tzinfo=datetime.UTC)
+    cursor.guardar_cursor(str(tmp_path), primero)
+    cursor.guardar_cursor(str(tmp_path), segundo)
+    cargado = cursor.cargar_cursor(str(tmp_path), valor_inicial=datetime.datetime(2000, 1, 1))
+    assert cargado == segundo
+    nombres = [p.name for p in tmp_path.iterdir()]
+    assert not any(n.endswith(".tmp") for n in nombres)
+
+
+def test_guardar_cursor_proveedor_no_deja_archivo_tmp(tmp_path: Path) -> None:
+    cursor.guardar_cursor_proveedor(str(tmp_path), "123:456")
+    nombres = [p.name for p in tmp_path.iterdir()]
+    assert cursor.NOMBRE_ARCHIVO_PROVEEDOR in nombres
+    assert not any(n.endswith(".tmp") for n in nombres)
+
+
+def test_guardar_cursor_proveedor_es_modo_0600(tmp_path: Path, no_es_windows: None) -> None:
+    from duna_buzon import cripto
+
+    cursor.guardar_cursor_proveedor(str(tmp_path), "123:456")
+    ruta = tmp_path / cursor.NOMBRE_ARCHIVO_PROVEEDOR
+    assert cripto.modo_octal(ruta) == 0o600
+
+
 def test_guardar_cursor_atomico_ida_y_vuelta(tmp_path: Path) -> None:
     momento = datetime.datetime(2026, 3, 1, 10, 30, tzinfo=datetime.UTC)
     cursor.guardar_cursor_atomico(str(tmp_path), momento)
@@ -62,6 +96,30 @@ def test_guardar_cursor_atomico_archivo_es_modo_0600(tmp_path: Path, no_es_windo
     cursor.guardar_cursor_atomico(str(tmp_path), momento)
     ruta = tmp_path / cursor.NOMBRE_ARCHIVO
     assert cripto.modo_octal(ruta) == 0o600
+
+
+def test_guardar_cursor_una_escritura_interrumpida_deja_el_cursor_anterior_intacto(
+    tmp_path: Path, monkeypatch
+) -> None:
+    primero = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    cursor.guardar_cursor(str(tmp_path), primero)
+
+    def _reemplazo_que_falla(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full, simulated")
+
+    monkeypatch.setattr(cursor.os, "replace", _reemplazo_que_falla)
+    segundo = datetime.datetime(2026, 2, 1, tzinfo=datetime.UTC)
+    try:
+        cursor.guardar_cursor(str(tmp_path), segundo)
+    except OSError:
+        pass
+
+    # The old cursor is exactly as it was -- never truncated, never
+    # half-written -- and no leftover temp file survives the failure.
+    cargado = cursor.cargar_cursor(str(tmp_path), valor_inicial=datetime.datetime(2000, 1, 1))
+    assert cargado == primero
+    nombres = [p.name for p in tmp_path.iterdir()]
+    assert not any(n.endswith(".tmp") for n in nombres)
 
 
 def test_borrar_cursor_proveedor_sin_archivo_no_falla(tmp_path: Path) -> None:

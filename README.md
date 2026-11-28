@@ -209,8 +209,10 @@ The commands:
   (`BUZON-CURSOR-REBOBINAR-CLI-1`) -- the only way to re-read a source after a bad pass; otherwise that
   means hand-editing `cursor.json` on the server. DRY-RUN BY DEFAULT: prints the current cursor and the
   computed new one, writes nothing. `--aplicar` writes `cursor.json` atomically (same temp-file-then-
-  `os.replace` technique `fijar-carpetas` uses for `fuente.json`) and also clears
-  `cursor_proveedor.json` -- an IMAP source's own per-folder UID watermark otherwise overrides the
+  `os.replace` technique `fijar-carpetas` uses for `fuente.json` -- every normal `sincronizar` pass writes
+  its own cursor the same atomic way now too, never a truncate-in-place write, so a crash or kill
+  mid-write leaves the PREVIOUS cursor intact rather than a file the next pass cannot parse) and also
+  clears `cursor_proveedor.json` -- an IMAP source's own per-folder UID watermark otherwise overrides the
   rewound date on the very next pass; a safe no-op for Microsoft and Gmail, which never read that file.
   Refuses an unknown source, an invalid or future date, and a date more than 90 days back. Re-forwarding
   mail already sent is prevented by `sincronizar`'s own duplicate guard on `id_externo` (Finanzas
